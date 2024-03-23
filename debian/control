@@ -1,15 +1,41 @@
-Source: template-repository
-Section: unknown
+Source: stress-ng
+Rules-Requires-Root: no
+Section: devel
 Priority: optional
-Maintainer: Tsic404 <liuheng@deepin.org>
-Build-Depends: debhelper (>= 11)
-Standards-Version: 4.1.3
-Homepage: https://github.com/deepin-community/template-repository
-#Vcs-Browser: https://salsa.debian.org/debian/deepin-community-template-repository
-#Vcs-Git: https://salsa.debian.org/debian/deepin-community-template-repository.git
+Maintainer: Colin Ian King <colin.i.king@gmail.com>
+Standards-Version: 4.6.2
+Build-Depends: debhelper (>= 13),
+               debhelper-compat (=13),
+               libacl1-dev,
+               zlib1g-dev,
+               libbsd-dev,
+               libeigen3-dev,
+               libgcrypt20-dev,
+               libjpeg-dev,
+               libmpfr-dev,
+               libgmp-dev,
+               libkeyutils-dev [linux-any],
+               libapparmor-dev [linux-any],
+               apparmor [linux-any],
+               libaio-dev [linux-any],
+               libcap-dev [linux-any],
+               libsctp-dev [linux-any],
+               libipsec-mb-dev [amd64],
+               libjudy-dev,
+               libatomic1 [linux-any],
+               libkmod-dev [linux-any],
+               libxxhash-dev,
+               libglvnd-dev,
+               libgbm-dev [linux-any]
+Homepage: https://github.com/ColinIanKing/stress-ng
 
-Package: template-repository
+Package: stress-ng
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Description: tool to load and stress a computer
+ stress-ng can stress various subsystems of a computer.  It can stress load
+ CPU, cache, disk, memory, socket and pipe I/O, scheduling and much more.
+ stress-ng is a re-write of the original stress tool by Amos Waterland but
+ has many additional features such as specifying the number of bogo operations
+ to run, execution metrics, a stress verification on memory and compute
+ operations and considerably more stress mechanisms.
