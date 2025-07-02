@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -38,8 +38,8 @@
 #endif
 
 static const stress_help_t help[] = {
-	{ NULL,	"procfs N",	"start N workers reading portions of /proc" },
-	{ NULL,	"procfs-ops N",	"stop procfs workers after N bogo read operations" },
+	{ NULL,	"prctl N",	"start N workers exercising prctl system call" },
+	{ NULL,	"prctls-ops N",	"stop prctl workers after N bogo prctl operations" },
 	{ NULL,	NULL,		NULL }
 };
 
@@ -125,6 +125,14 @@ static const stress_help_t help[] = {
     defined(PR_GET_MEMORY_MERGE) ||		/* 68 */ \
     defined(PR_RISCV_V_SET_CONTROL) ||		/* 69 */ \
     defined(PR_RISCV_V_GET_CONTROL) ||		/* 70 */ \
+    defined(PR_RISCV_SET_ICACHE_FLUSH_CTX) ||	/* 71 */ \
+    defined(PR_PPC_GET_DEXCR) ||		/* 72 */ \
+    defined(PR_PPC_SET_DEXCR) ||		/* 73 */ \
+    defined(PR_GET_SHADOW_STACK_STATUS) ||	/* 74 */ \
+    defined(PR_SET_SHADOW_STACK_STATUS) ||	/* 75 */ \
+    defined(PR_LOCK_SHADOW_STACK_STATUS) ||	/* 76 */ \
+    defined(PR_TIMER_CREATE_RESTORE_IDS) ||	/* 77 */ \
+    defined(PR_FUTEX_HASH) ||			/* 78 */ \
     defined(PR_GET_AUXV) ||			/* 0x41555856 */ \
     defined(PR_SET_VMA) ||			/* 0x53564d41 */ \
     defined(PR_SET_PTRACER)			/* 0x59616d61 */
@@ -173,7 +181,7 @@ static inline void stress_arch_prctl(void)
 		ret = shim_arch_prctl(ARCH_GET_CPUID, 0);
 #if defined(ARCH_SET_CPUID)
 		if (ret >= 0)
-			VOID_RET(int, shim_arch_prctl(ARCH_SET_CPUID, (unsigned long)ret));
+			VOID_RET(int, shim_arch_prctl(ARCH_SET_CPUID, (unsigned long int)ret));
 #endif
 	}
 #endif
@@ -184,9 +192,9 @@ static inline void stress_arch_prctl(void)
     defined(STRESS_ARCH_X86_64)
 	{
 		int ret;
-		unsigned long fs;
+		unsigned long int fs;
 
-		ret = shim_arch_prctl(ARCH_GET_FS, (unsigned long)&fs);
+		ret = shim_arch_prctl(ARCH_GET_FS, (unsigned long int)&fs);
 #if defined(ARCH_SET_FS)
 		if (ret == 0)
 			ret = shim_arch_prctl(ARCH_SET_FS, fs);
@@ -201,9 +209,9 @@ static inline void stress_arch_prctl(void)
     defined(STRESS_ARCH_X86_64)
 	{
 		int ret;
-		unsigned long gs;
+		unsigned long int gs;
 
-		ret = shim_arch_prctl(ARCH_GET_GS, (unsigned long)&gs);
+		ret = shim_arch_prctl(ARCH_GET_GS, (unsigned long int)&gs);
 #if defined(ARCH_SET_GS)
 		if (ret == 0)
 			ret = shim_arch_prctl(ARCH_SET_GS, gs);
@@ -219,7 +227,7 @@ static inline void stress_arch_prctl(void)
 	{
 		uint64_t features;
 
-		VOID_RET(int, shim_arch_prctl(ARCH_GET_XCOMP_SUPP, (unsigned long)&features));
+		VOID_RET(int, shim_arch_prctl(ARCH_GET_XCOMP_SUPP, (unsigned long int)&features));
 	}
 #endif
 #if defined(HAVE_ASM_PRCTL_H) &&		\
@@ -229,7 +237,7 @@ static inline void stress_arch_prctl(void)
 	{
 		uint64_t features;
 
-		VOID_RET(int, shim_arch_prctl(ARCH_GET_XCOMP_PERM, (unsigned long)&features));
+		VOID_RET(int, shim_arch_prctl(ARCH_GET_XCOMP_PERM, (unsigned long int)&features));
 	}
 #endif
 #if defined(HAVE_ASM_PRCTL_H) &&		\
@@ -237,7 +245,7 @@ static inline void stress_arch_prctl(void)
     defined(ARCH_REQ_XCOMP_PERM) &&		\
     defined(STRESS_ARCH_X86_64)
 	{
-		unsigned long idx;
+		unsigned long int idx;
 
 		for (idx = 0; idx < 255; idx++) {
 			int ret;
@@ -413,9 +421,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_DUMPABLE)
-		if (ret >= 0) {
+		if (ret >= 0)
 			VOID_RET(int, prctl(PR_SET_DUMPABLE, ret));
-		}
 #endif
 	}
 #endif
@@ -429,9 +436,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_ENDIAN)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_ENDIAN, endian));
-		}
 #endif
 	}
 #endif
@@ -445,9 +451,8 @@ static int stress_prctl_child(
 		(void)mode;
 
 #if defined(PR_SET_FP_MODE)
-		if (mode >= 0) {
+		if (mode >= 0)
 			VOID_RET(int, prctl(PR_SET_FP_MODE, mode));
-		}
 #endif
 	}
 #endif
@@ -461,9 +466,8 @@ static int stress_prctl_child(
 		(void)vl;
 
 #if defined(PR_SVE_SET_VL)
-		if (vl >= 0) {
+		if (vl >= 0)
 			VOID_RET(int, prctl(PR_SVE_SET_VL, vl));
-		}
 #endif
 	}
 #endif
@@ -504,9 +508,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_FPEMU)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_FPEMU, control));
-		}
 #endif
 	}
 #endif
@@ -520,9 +523,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_FPEXC)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_FPEXC, mode));
-		}
 #endif
 	}
 #endif
@@ -613,9 +615,8 @@ static int stress_prctl_child(
 	{
 		void *auxv = getauxv_addr();
 
-		if (auxv) {
+		if (auxv)
 			VOID_RET(int, prctl(PR_SET_MM, PR_SET_MM_AUXV, auxv, 0, 0));
-		}
 	}
 #endif
 
@@ -640,9 +641,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_NAME)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_NAME, name));
-		}
 #endif
 	}
 #endif
@@ -722,9 +722,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_SECUREBITS)
-		if (ret >= 0) {
+		if (ret >= 0)
 			VOID_RET(int, prctl(PR_SET_SECUREBITS, ret, 0, 0, 0));
-		}
 #endif
 	}
 #endif
@@ -793,9 +792,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_TIMING)
-		if (ret >= 0) {
+		if (ret >= 0)
 			VOID_RET(int, prctl(PR_SET_TIMING, ret, 0, 0, 0));
-		}
 #endif
 	}
 #endif
@@ -809,9 +807,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_TSC)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_TSC, state, 0, 0, 0));
-		}
 #endif
 	}
 #endif
@@ -826,9 +823,8 @@ static int stress_prctl_child(
 		(void)ret;
 
 #if defined(PR_SET_UNALIGN)
-		if (ret == 0) {
+		if (ret == 0)
 			VOID_RET(int, prctl(PR_SET_UNALIGN, control, 0, 0, 0));
-		}
 #endif
 	}
 #endif
@@ -840,9 +836,9 @@ static int stress_prctl_child(
 
 #if defined(PR_SPEC_STORE_BYPASS)
 		{
-			unsigned long lval;
+			unsigned long int lval;
 
-			lval = (unsigned long)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_STORE_BYPASS, 0, 0, 0);
+			lval = (unsigned long int)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_STORE_BYPASS, 0, 0, 0);
 
 			if (lval & PR_SPEC_PRCTL) {
 				lval &= ~PR_SPEC_PRCTL;
@@ -861,9 +857,9 @@ static int stress_prctl_child(
 
 #if defined(PR_SPEC_INDIRECT_BRANCH)
 		{
-			unsigned long lval;
+			unsigned long int lval;
 
-			lval = (unsigned long)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_INDIRECT_BRANCH, 0, 0, 0);
+			lval = (unsigned long int)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_INDIRECT_BRANCH, 0, 0, 0);
 			if (lval & PR_SPEC_PRCTL) {
 				lval &= ~PR_SPEC_PRCTL;
 #if defined(PR_SPEC_ENABLE)
@@ -880,9 +876,9 @@ static int stress_prctl_child(
 
 #if defined(PR_SPEC_L1D_FLUSH)
 		{
-			unsigned long lval;
+			unsigned long int lval;
 
-			lval = (unsigned long)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_L1D_FLUSH, 0, 0, 0);
+			lval = (unsigned long int)prctl(PR_GET_SPECULATION_CTRL, PR_SPEC_L1D_FLUSH, 0, 0, 0);
 			if (lval & PR_SPEC_PRCTL) {
 				lval &= ~PR_SPEC_PRCTL;
 #if defined(PR_SPEC_ENABLE)
@@ -923,7 +919,7 @@ static int stress_prctl_child(
 #if defined(PR_SCHED_CORE) &&	\
     defined(PR_SCHED_CORE_GET)
 	{
-		unsigned long cookie = 0;
+		unsigned long int cookie = 0;
 		const pid_t bad_pid = stress_get_unused_pid_racy(false);
 
 		VOID_RET(int, prctl(PR_SCHED_CORE, PR_SCHED_CORE_GET, 0,
@@ -972,10 +968,10 @@ static int stress_prctl_child(
 	{
 		int arg;
 
-		arg = (unsigned long)prctl(PR_SME_GET_VL, 0, 0, 0, 0);
+		arg = (unsigned long int)prctl(PR_SME_GET_VL, 0, 0, 0, 0);
 #if defined(PR_SME_SET_VL)
 		if (arg >= 0)
-			arg = prctl(PR_SME_SET_VL, (unsigned long)arg, 0, 0, 0, 0);
+			arg = prctl(PR_SME_SET_VL, (unsigned long int)arg, 0, 0, 0, 0);
 #endif
 		(void)arg;
 	}
@@ -988,7 +984,7 @@ static int stress_prctl_child(
 		bits = prctl(PR_GET_MDWE, 0, 0, 0, 0);
 #if defined(PR_SET_MDWE)
 		if (bits >= 0)
-			bits = prctl(PR_SET_MDWE, (unsigned long)bits, 0, 0, 0, 0);
+			bits = prctl(PR_SET_MDWE, (unsigned long int)bits, 0, 0, 0, 0);
 #endif
 		(void)bits;
 	}
@@ -1030,7 +1026,7 @@ static int stress_prctl_child(
 
 #if defined(PR_GET_AUXV)
 	{
-		unsigned long aux_vec[1];
+		unsigned long int aux_vec[1];
 		/*
 		 *  exercise PR_GET_AUXV introduced in Linux 6.4
 		 */
@@ -1041,7 +1037,7 @@ static int stress_prctl_child(
 #if defined(PR_RISCV_V_GET_CONTROL)
 	/* RISC-V only, but try it on all arches */
 	{
-		signed long ctrl;
+		signed long int ctrl;
 
 		ctrl = prctl(PR_RISCV_V_GET_CONTROL, 0, 0, 0);
 #if defined(PR_RISCV_V_SET_CONTROL)
@@ -1054,6 +1050,74 @@ static int stress_prctl_child(
 	}
 #endif
 
+#if defined(PR_RISCV_SET_ICACHE_FLUSH_CTX) &&	\
+    defined(PR_RISCV_CTX_SW_FENCEI_ON) && 	\
+    defined(PR_RISCV_CTX_SW_FENCEI_OFF) &&	\
+    defined(PR_RISCV_SCOPE_PER_PROCESS)
+	/* RISC-V only, but try it on all arches */
+	{
+		if (prctl(PR_RISCV_SET_ICACHE_FLUSH_CTX, PR_RISCV_CTX_SW_FENCEI_ON, PR_RISCV_SCOPE_PER_PROCESS) >= 0)
+			(void)prctl(PR_RISCV_SET_ICACHE_FLUSH_CTX, PR_RISCV_CTX_SW_FENCEI_OFF, PR_RISCV_SCOPE_PER_PROCESS);
+	}
+#endif
+
+#if defined(PR_PPC_GET_DEXCR)
+	/* PowerPC, but try it on all arches */
+	{
+#if defined(PR_PPC_DEXCR_SBHE)
+		VOID_RET(unsigned long int, prctl(PR_PPC_GET_DEXCR, PR_PPC_DEXCR_SBHE, 0, 0, 0));
+#endif
+#if defined(PR_PPC_DEXCR_IBRTPD)
+		VOID_RET(unsigned long int, prctl(PR_PPC_GET_DEXCR, PR_PPC_DEXCR_IBRTPD, 0, 0, 0));
+#endif
+#if defined(PR_PPC_DEXCR_SRAPD)
+		VOID_RET(unsigned long int, prctl(PR_PPC_GET_DEXCR, PR_PPC_DEXCR_SRAPD, 0, 0, 0));
+#endif
+#if defined(PR_PPC_DEXCR_NPHIE)
+		VOID_RET(unsigned long int, prctl(PR_PPC_GET_DEXCR, PR_PPC_DEXCR_NPHIE, 0, 0, 0));
+#endif
+#if defined(PR_PPC_SET_DEXCR)
+		/* not exercised */
+#endif
+	}
+#endif
+
+#if defined(PR_GET_SHADOW_STACK_STATUS)
+	{
+		unsigned long mode;
+		int ret;
+
+		ret = prctl(PR_GET_SHADOW_STACK_STATUS, &mode, 0, 0, 0);
+#if defined(PR_SET_SHADOW_STACK_STATUS)
+		if (ret >= 0)
+			ret = prctl(PR_SET_SHADOW_STACK_STATUS, mode);
+#endif
+		(void)ret;
+	}
+#endif
+
+#if defined(PR_LOCK_SHADOW_STACK_STATUS)
+	/* not implemented (yet) */
+#endif
+
+#if defined(PR_TIMER_CREATE_RESTORE_IDS) &&	\
+    defined(PR_TIMER_CREATE_RESTORE_IDS_OFF) &&	\
+    defined(PR_TIMER_CREATE_RESTORE_IDS_ON) &&	\
+    defined(PR_TIMER_CREATE_RESTORE_IDS_GET)
+	{
+		if (prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_ON, 0, 0, 0) >= 0) {
+			VOID_RET(int, prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_GET, 0, 0, 0));
+			VOID_RET(int, prctl(PR_TIMER_CREATE_RESTORE_IDS, PR_TIMER_CREATE_RESTORE_IDS_OFF, 0, 0, 0));
+		}
+	}
+#endif
+
+#if defined(PR_FUTEX_HASH) &&		\
+    defined(PR_FUTEX_HASH_GET_SLOTS)
+	{
+		VOID_RET(int, prctl(PR_FUTEX_HASH, PR_FUTEX_HASH_GET_SLOTS, 0, 0, 0));
+	}
+#endif
 	stress_arch_prctl();
 
 	stress_prctl_syscall_user_dispatch(args);
@@ -1082,10 +1146,13 @@ static int stress_prctl(stress_args_t *args)
 {
 	void *page_anon;
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-	page_anon = stress_mmap_populate(NULL, args->page_size,	
+	page_anon = stress_mmap_populate(NULL, args->page_size,
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		pid_t pid;
@@ -1094,7 +1161,7 @@ again:
 		if (pid == -1) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
 			pr_fail("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -1115,8 +1182,8 @@ again:
 			/* Wait for child to exit or get killed by seccomp */
 			if (shim_waitpid(pid, &status, 0) < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid failed, errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 			} else {
 				/* Did the child hit a weird error? */
 				if (WIFEXITED(status) &&
@@ -1141,16 +1208,16 @@ finish:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_prctl_info = {
+const stressor_info_t stress_prctl_info = {
 	.stressor = stress_prctl,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_prctl_info = {
+const stressor_info_t stress_prctl_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/prctl.h or prctl() system call"

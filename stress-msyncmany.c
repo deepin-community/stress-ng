@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,7 +32,7 @@ static const stress_help_t help[] = {
 static int stress_msyncmany_child(stress_args_t *args, void *context)
 {
 	const size_t page_size = args->page_size;
-	long max = sysconf(_SC_MAPPED_FILES);
+	long int max = sysconf(_SC_MAPPED_FILES);
 	uint64_t **mappings;
 	int fd = *(int *)context;
 	size_t i, n;
@@ -47,45 +47,51 @@ static int stress_msyncmany_child(stress_args_t *args, void *context)
 			args->name, max);
 		return EXIT_NO_RESOURCE;
 	}
-	mappings = calloc((size_t)max, sizeof(*mappings));
+	mappings = (uint64_t **)calloc((size_t)max, sizeof(*mappings));
 	if (!mappings) {
-		pr_fail("%s: malloc failed, out of memory\n", args->name);
+		pr_fail("%s: calloc of %zu bytes failed%s, out of memory\n",
+			args->name, (size_t)max * sizeof(*mappings),
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
-	for (n = 0; stress_continue_flag() && (n < (size_t)max); n++) {
+	for (n = 0; LIKELY(stress_continue_flag() && (n < (size_t)max)); n++) {
 		uint64_t *ptr;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size))
 			break;
 
 		ptr = (uint64_t *)mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_SHARED, fd, 0);
-		if (ptr == MAP_FAILED)
+		if (UNLIKELY(ptr == MAP_FAILED))
 			break;
 		if (!mapped)
 			mapped = ptr;
 		mappings[n] = ptr;
+		stress_set_vma_anon_name(ptr, page_size, "msync-rw-page");
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (!mapped) {
-		pr_inf("%s: no mappings made, out of resources\n", args->name);
+		pr_inf("%s: no mappings made, out of resources%s\n",
+			args->name, stress_get_memfree_str());
 		rc = EXIT_NO_RESOURCE;
 		goto finish;
 	}
 
 	do {
-		int ret;
+		int ret, failed = 0;
 		const uint64_t pattern = stress_mwc64();
 
 		*mapped = pattern;
 
 		ret = msync((void *)mapped, args->page_size, MS_SYNC | MS_INVALIDATE);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: msync failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -94,11 +100,15 @@ static int stress_msyncmany_child(stress_args_t *args, void *context)
 		for (i = 0; i < n; i++) {
 			const uint64_t *ptr = (uint64_t *)mappings[i];
 
-			if (!ptr)
+			if (UNLIKELY(!ptr))
 				continue;
-			if (*ptr != pattern) {
+			if (UNLIKELY(*ptr != pattern)) {
 				pr_fail("%s: failed: mapping %zd at %p contained %" PRIx64 " and not %" PRIx64 "\n",
 					args->name, i, (const void *)ptr, *ptr, pattern);
+				rc = EXIT_FAILURE;
+				failed++;
+				if (UNLIKELY(failed >= 5))
+					break;
 			}
 		}
 		stress_bogo_inc(args);
@@ -150,16 +160,16 @@ static int stress_msyncmany(stress_args_t *args)
 	return ret;
 }
 
-stressor_info_t stress_msyncmany_info = {
+const stressor_info_t stress_msyncmany_info = {
 	.stressor = stress_msyncmany,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_msyncmany_info = {
+const stressor_info_t stress_msyncmany_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without msync() system call support"

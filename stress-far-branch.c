@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,25 +23,21 @@
 #include "core-madvise.h"
 #include "core-pragma.h"
 
+#define MIN_FAR_BRANCH_PAGES	(1)
+#define MAX_FAR_BRANCH_PAGES	(65536)
+
 static const stress_help_t help[] = {
 	{ NULL,	"far-branch N",		"start N far branching workers" },
+	{ NULL, "far-branch-flush",	"periodically flush instruction cache" },
 	{ NULL,	"far-branch-ops N",	"stop after N far branching bogo operations" },
 	{ NULL, "far-branch-pages N",	"number of pages to populate with functions" },
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_far_branch_pages(const char *opt)
-{
-	size_t far_branch_pages;
-
-	far_branch_pages = (size_t)stress_get_uint64(opt);
-	stress_check_range("far-branch-pages", (uint64_t)far_branch_pages, 1, 65536);
-	return stress_set_setting("far-branch-pages", TYPE_ID_SIZE_T, &far_branch_pages);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_far_branch_pages,	stress_set_far_branch_pages },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_far_branch_flush, "far-branch-flush", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_far_branch_pages, "far-branch-pages", TYPE_ID_SIZE_T, MIN_FAR_BRANCH_PAGES, MAX_FAR_BRANCH_PAGES, NULL },
+	END_OPT,
 };
 
 #define PAGE_MULTIPLES	(8)
@@ -49,7 +45,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
 #if defined(HAVE_MPROTECT) &&	\
     !defined(__NetBSD__)
 
-static int sigs[] = {
+static const int sigs[] = {
 #if defined(SIGILL)
 	SIGILL,
 #endif
@@ -79,6 +75,22 @@ static void MLOCKED_TEXT stress_sig_handler(
 	stress_continue_set_flag(false);
 
 	siglongjmp(jmp_env, 1);
+}
+
+static void stress_far_branch_page_flush(void *page, const size_t page_size)
+{
+	if (mprotect(page, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+		size_t i;
+		uint8_t *data = (uint8_t *)page;
+
+		for (i = 0; i < 64; i++)
+			data[i] ^= 0xff;
+		for (i = 0; i < 64; i++)
+			data[i] ^= 0xff;
+	}
+
+	shim_flush_icache((char *)page, (char *)page + page_size);
+	(void)mprotect(page, page_size, PROT_READ | PROT_EXEC);
 }
 
 #if defined(MAP_FIXED_NOREPLACE) ||	\
@@ -122,7 +134,7 @@ static void *stress_far_try_mmap(void *addr, size_t length)
 		void *ptr;
 
 		ptr = (uint8_t *)stress_far_mmap_try32(addr, length, PROT_READ | PROT_WRITE,
-			MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0);
+			MAP_ANONYMOUS | MAP_SHARED | MAP_FIXED_NOREPLACE, -1, 0);
 		if (ptr != MAP_FAILED) {
 			(void)stress_madvise_mergeable(ptr, length);
 			return ptr;
@@ -136,7 +148,7 @@ static void *stress_far_try_mmap(void *addr, size_t length)
 		void *ptr;
 
 		ptr = (uint8_t *)stress_far_mmap_try32(addr, length, PROT_READ | PROT_WRITE,
-			MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+			MAP_ANONYMOUS | MAP_SHARED | MAP_FIXED, -1, 0);
 		if (ptr != MAP_FAILED) {
 			(void)stress_madvise_mergeable(ptr, length);
 			return ptr;
@@ -207,13 +219,14 @@ static void *stress_far_mmap(
 	 */
 	if (ptr == MAP_FAILED) {
 		ptr = (uint8_t *)mmap(NULL, page_size, PROT_READ | PROT_WRITE,
-					MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+					MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 		if (ptr == MAP_FAILED)
 			return NULL;	/* Give up */
 		(void)stress_madvise_mergeable(ptr, page_size);
 	}
 
 use_page:
+	stress_set_vma_anon_name(ptr, page_size, "far-branch-returns");
 	for (i = 0; i < page_size; i += stress_ret_opcode.stride) {
 		(void)shim_memcpy((ptr + i), stress_ret_opcode.opcodes, stress_ret_opcode.len);
 		funcs[*total_funcs] = (stress_ret_func_t)(ptr + i);
@@ -271,8 +284,15 @@ static int stress_far_branch(stress_args_t *args)
 	NOCLOBBER void **pages = NULL;
 	NOCLOBBER size_t total_funcs = 0;
 	NOCLOBBER double calls = 0.0;
+	NOCLOBBER bool far_branch_flush = false;
 
-	(void)stress_get_setting("far-branch-pages", &n_pages);
+	(void)stress_get_setting("far-branch-flush", &far_branch_flush);
+	if (!stress_get_setting("far-branch-pages", &n_pages)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			n_pages = MAX_FAR_BRANCH_PAGES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			n_pages = MIN_FAR_BRANCH_PAGES;
+	}
 	max_funcs = (n_pages * page_size) / stress_ret_opcode.stride;
 
 	ret = sigsetjmp(jmp_env, 1);
@@ -313,7 +333,7 @@ static int stress_far_branch(stress_args_t *args)
 		goto cleanup;
 	}
 
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: using assembler '%s' as function return code\n", args->name, stress_ret_opcode.assembler);
 
 	(void)shim_memset(&sa, 0, sizeof(sa));
@@ -329,18 +349,18 @@ static int stress_far_branch(stress_args_t *args)
 		}
 	}
 
-	funcs = calloc(max_funcs, sizeof(*funcs));
+	funcs = (stress_ret_func_t *)calloc(max_funcs, sizeof(*funcs));
 	if (!funcs) {
 		pr_inf_skip("%s: cannot allocate %zu function "
-			"pointers, skipping stressor\n",
-			args->name, max_funcs);
+			"pointers%s, skipping stressor\n",
+			args->name, max_funcs, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	pages = calloc(n_pages, sizeof(*pages));
+	pages = (void **)calloc(n_pages, sizeof(*pages));
 	if (!pages) {
 		pr_inf_skip("%s: cannot allocate %zu page "
-			"pointers, skipping stressor\n",
-			args->name, n_pages);
+			"pointers%s, skipping stressor\n",
+			args->name, n_pages, stress_get_memfree_str());
 		free(funcs);
 		return EXIT_NO_RESOURCE;
 	}
@@ -356,13 +376,16 @@ static int stress_far_branch(stress_args_t *args)
 
 			pages[k] = stress_far_mmap(page_size, base, offset,
 						funcs, &total_funcs);
+			if (pages[k] != MAP_FAILED)
+				stress_set_vma_anon_name(pages[k], page_size, "functions-page");
 		}
 	}
 
 	total_funcs &= ~((size_t)15);
 
-	if (args->instance == 0)
-		pr_inf("%s: %zu functions over %zu pages\n", args->name, total_funcs, n_pages);
+	if (stress_instance_zero(args))
+		pr_inf("%s: %zu functions over %zu x %zuK pages\n",
+			args->name, total_funcs, n_pages, page_size >> 10);
 
 	funcs[0] = stress_far_branch_check;
 
@@ -370,6 +393,8 @@ static int stress_far_branch(stress_args_t *args)
 
 	check_flag = false;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t_start = stress_time_now();
@@ -394,16 +419,20 @@ static int stress_far_branch(stress_args_t *args)
 		}
 		stress_bogo_inc(args);
 		calls += (double)total_funcs;
+
+		if (UNLIKELY(far_branch_flush)) {
+			for (i = 0; i < n_pages; i++)
+				stress_far_branch_page_flush(pages[i], page_size);
+		}
 	} while (stress_continue(args));
 	duration = stress_time_now() - t_start;
 
-
 	rate = (duration > 0.0) ? calls / duration : 0.0;
 	stress_metrics_set(args, 0, "function calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (calls > 0.0) ? duration / calls: 0.0;
 	stress_metrics_set(args, 1, "nanosecs per call/return",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -424,21 +453,21 @@ cleanup:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_far_branch_info = {
+const stressor_info_t stress_far_branch_info = {
 	.stressor = stress_far_branch,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.verify = VERIFY_ALWAYS,
 	.supported = stress_asm_ret_supported,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_far_branch_info = {
+const stressor_info_t stress_far_branch_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.verify = VERIFY_ALWAYS,
 	.supported = stress_asm_ret_supported,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help,
 #if defined(__NetBSD__)
 	.unimplemented_reason = "denied by NetBSD exploit mitigation features"

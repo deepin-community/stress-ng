@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -93,17 +93,21 @@ static int reboot_clone_func(void *arg)
 static int stress_reboot(stress_args_t *args)
 {
 	const bool reboot_capable = stress_check_capability(SHIM_CAP_SYS_BOOT);
+	int rc = EXIT_SUCCESS;
 #if defined(HAVE_CLONE)
 	char *stack;
 
-	stack = malloc(CLONE_STACK_SIZE);
+	stack = (char *)malloc(CLONE_STACK_SIZE);
 	if (!stack) {
-		pr_inf_skip("%s: out of memory allocating %zd byte stack, skipping stressor\n",
-			args->name, (size_t)CLONE_STACK_SIZE);
+		pr_inf_skip("%s: cannot allocate %zu byte stack%s, skipping stressor\n",
+			args->name, (size_t)CLONE_STACK_SIZE,
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 #endif
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -124,20 +128,28 @@ static int stress_reboot(stress_args_t *args)
 			if (WIFEXITED(status) && (ret != 0)) {
 				pr_fail("%s: reboot in PID namespace failed, errno=%d (%s)\n",
 					args->name, ret, strerror(ret));
+				rc = EXIT_FAILURE;
 			}
 		}
 #endif
 		ret = shim_reboot(0, 0, (int)SHIM_LINUX_REBOOT_CMD_RESTART, 0);
 		if (ret < 0) {
 			if (reboot_capable) {
+				if (errno == EPERM) {
+					pr_inf_skip("%s: no permission, skipping stressor\n", args->name);
+					rc = EXIT_NO_RESOURCE;
+					break;
+				}
 				if (errno != EINVAL) {
 					pr_fail("%s: reboot with incorrect magic didn't return EINVAL, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			} else {
 				if ((errno != EPERM) && (errno != EINVAL)) {
 					pr_fail("%s: reboot when not reboot capable didn't return EPERM, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 		}
@@ -145,14 +157,21 @@ static int stress_reboot(stress_args_t *args)
 		ret = shim_reboot(0, 0, (int)SHIM_LINUX_REBOOT_CMD_SW_SUSPEND, 0);
 		if (ret < 0) {
 			if (reboot_capable) {
+				if (errno == EPERM) {
+					pr_inf_skip("%s: no permission, skipping stressor\n", args->name);
+					rc = EXIT_NO_RESOURCE;
+					break;
+				}
 				if (errno != EINVAL) {
 					pr_fail("%s: reboot with incorrect magic didn't return EINVAL, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			} else {
 				if ((errno != EPERM) && (errno != EINVAL)) {
 					pr_fail("%s: reboot when not reboot capable didn't return EPERM, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 		}
@@ -170,11 +189,12 @@ static int stress_reboot(stress_args_t *args)
 				if (errno != EPERM) {
 					pr_fail("%s: reboot when not reboot capable didn't return EPERM, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 		}
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -182,21 +202,21 @@ static int stress_reboot(stress_args_t *args)
 	free(stack);
 #endif
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_reboot_info = {
+const stressor_info_t stress_reboot_info = {
 	.stressor = stress_reboot,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_reboot_info = {
+const stressor_info_t stress_reboot_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux with reboot() support"

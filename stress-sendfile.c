@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,19 +36,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   NULL }
 };
 
-static int stress_set_sendfile_size(const char *opt)
-{
-	uint64_t sendfile_size;
-
-	sendfile_size = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("sendfile-size", sendfile_size,
-		MIN_SENDFILE_SIZE, MAX_SENDFILE_SIZE);
-	return stress_set_setting("sendfile-size", TYPE_ID_UINT64, &sendfile_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sendfile_size,	stress_set_sendfile_size },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_sendfile_size, "sendfile-size", TYPE_ID_UINT64_BYTES_VM, MIN_SENDFILE_SIZE, MAX_SENDFILE_SIZE, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_SENDFILE_H) &&	\
@@ -91,10 +81,11 @@ static int stress_sendfile(stress_args_t *args)
 	}
 #if defined(HAVE_POSIX_FALLOCATE)
 	ret = shim_posix_fallocate(fdin, (off_t)0, (off_t)sz);
+	errno = ret;
 #else
 	ret = shim_fallocate(fdin, 0, (off_t)0, (off_t)sz);
 #endif
-	if (ret < 0) {
+	if (ret != 0) {
 		rc = stress_exit_status(errno);
 		pr_err("%s: fallocate failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -117,6 +108,8 @@ static int stress_sendfile(stress_args_t *args)
 
 	bad_fd = stress_get_bad_fd();
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -142,7 +135,7 @@ static int stress_sendfile(stress_args_t *args)
 		}
 
 		if (errno == ENOSYS) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: skipping stressor, sendfile not implemented\n",
 					args->name);
 			rc = EXIT_NOT_IMPLEMENTED;
@@ -195,7 +188,7 @@ sendfile_ok:
 
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB per sec sent to /dev/null",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 close_out:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -211,18 +204,18 @@ dir_out:
 	return rc;
 }
 
-stressor_info_t stress_sendfile_info = {
+const stressor_info_t stress_sendfile_info = {
 	.stressor = stress_sendfile,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sendfile_info = {
+const stressor_info_t stress_sendfile_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/sendfile.h or sendfile() system call support"

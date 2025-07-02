@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -44,11 +44,16 @@ static int stress_pkey(stress_args_t *args)
 		PROT_READ | PROT_WRITE,
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (pages == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate a page, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu pages%s, errno=%d (%s), "
+			"skipping stressor\n",
+			args->name, pages_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(pages, pages_size, "pkey-pages");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -59,12 +64,12 @@ static int stress_pkey(stress_args_t *args)
 
 		/* Exercise invalid pkey flags */
 		pkey = shim_pkey_alloc(~0U, 0);
-		if (pkey >= 0)
+		if (UNLIKELY(pkey >= 0))
 			(void)shim_pkey_free(pkey);
 
 		/* Exercise invalid pkey access_rights */
 		pkey = shim_pkey_alloc(0, (unsigned int)~0);
-		if (pkey >= 0)
+		if (UNLIKELY(pkey >= 0))
 			(void)shim_pkey_free(pkey);
 
 		/* Exercise invalid pkey free */
@@ -92,9 +97,9 @@ static int stress_pkey(stress_args_t *args)
 		}
 
 		ret = shim_pkey_mprotect(page, page_size, PROT_NONE, pkey);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (errno == ENOSYS) {
-				if (args->instance == 0) {
+				if (stress_instance_zero(args)) {
 					pr_inf_skip("%s: pkey system calls not implemented, skipping\n",
 						args->name);
 				}
@@ -127,7 +132,7 @@ static int stress_pkey(stress_args_t *args)
 		/* Exercise zero size, should be OK */
 		(void)shim_pkey_mprotect(page, 0, PROT_READ, pkey);
 
-		if (pkey >= 0) {
+		if (LIKELY(pkey >= 0)) {
 			int rights;
 
 			rights = shim_pkey_get(pkey);
@@ -146,19 +151,19 @@ static int stress_pkey(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	(void)munmap(pages, pages_size);
+	(void)munmap((void *)pages, pages_size);
 	return rc;
 }
 
-stressor_info_t stress_pkey_info = {
+const stressor_info_t stress_pkey_info = {
 	.stressor = stress_pkey,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_pkey_info = {
+const stressor_info_t stress_pkey_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "built without pkey_mprotect() system call"
 };

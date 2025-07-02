@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -62,52 +62,19 @@ static const stress_fd_file_t stress_fd_files[] = {
 	{ "zero",	STRESS_FD_ZERO },
 };
 
-/*
- *  stress_set_fd_fork_fds()
- *	set maximum number of file descriptors to use
- */
-static int stress_set_fd_fork_fds(const char *opt)
+static const char *stress_fd_fork_file(const size_t i)
 {
-	size_t fd_fork_fds;
-
-	fd_fork_fds = stress_get_uint64(opt);
-	stress_check_range("fd-fork-fds", (uint64_t)fd_fork_fds,
-		STRESS_FD_MIN, STRESS_FD_MAX);
-	return stress_set_setting("fd-fork-fds", TYPE_ID_SIZE_T, &fd_fork_fds);
+	return (i < SIZEOF_ARRAY(stress_fd_files)) ? stress_fd_files[i].name : NULL;
 }
 
-/*
- *  stress_set_fd_fork_file()
- *	set file to dup
- */
-static int stress_set_fd_fork_file(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_fd_files); i++) {
-		if (strcmp(opt, stress_fd_files[i].name) == 0) {
-			stress_set_setting("fd-fork-file", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "fd-fork-file be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_fd_files); i++) {
-		(void)fprintf(stderr, " %s", stress_fd_files[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fd_fork_fds,	stress_set_fd_fork_fds },
-	{ OPT_fd_fork_file,	stress_set_fd_fork_file },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_fd_fork_fds,  "fd-fork-fds",  TYPE_ID_SIZE_T, STRESS_FD_MIN, STRESS_FD_MAX, NULL },
+	{ OPT_fd_fork_file, "fd-fork-file", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_fd_fork_file },
+	END_OPT,
 };
 
 static void stress_fd_close(
-	int *fds,
+	const int *fds,
 	const size_t n_fds,
 	stress_fd_close_info_t *info)
 {
@@ -150,11 +117,16 @@ static int stress_fd_fork(stress_args_t *args)
 	double rate, t_start = -1.0, t_max = -1.0;
 	char *filename;
 
-	(void)stress_get_setting("fd-fork-fds", &fd_fork_fds);
+	if (!stress_get_setting("fd-fork-fds", &fd_fork_fds)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			fd_fork_fds = STRESS_FD_MAX;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			fd_fork_fds = STRESS_FD_MIN;
+	}
 	(void)stress_get_setting("fd-fork-file", &fd_fork_file);
 
 	if (fd_fork_fds > max_fd) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: limited to system maximum of %zu file descriptors\n",
 				args->name, max_fd);
 		fd_fork_fds = max_fd;
@@ -164,9 +136,10 @@ static int stress_fd_fork(stress_args_t *args)
 	fds = stress_mmap_populate(NULL, fds_size,
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	stress_set_vma_anon_name(fds, fds_size, "fds");
 	if (fds == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap %d file descriptors, skipping stressor\n",
-			args->name, STRESS_FD_MAX);
+		pr_inf_skip("%s: failed to mmap %d file descriptors%s, skipping stressor\n",
+			args->name, STRESS_FD_MAX, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -174,15 +147,15 @@ static int stress_fd_fork(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (info == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap %zu bytes, errno=%d (%s), "
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), "
 			"skipping stressor\n",
-			args->name, sizeof(*info), errno, strerror(errno));
+			args->name, sizeof(*info), stress_get_memfree_str(),
+			errno, strerror(errno));
 		(void)munmap((void *)fds, fds_size);
 		return EXIT_NO_RESOURCE;
 	}
-
-	info->metrics.count = 0.0;
-	info->metrics.duration = 0.0;
+	stress_set_vma_anon_name(info, sizeof(*info), "state");
+	stress_zero_metrics(&info->metrics, 1);
 	info->use_close_range = true;
 
 	for (i = 1; i < fd_fork_fds; i++)
@@ -221,6 +194,8 @@ static int stress_fd_fork(stress_args_t *args)
 		goto tidy_fds;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t_start = stress_time_now();
@@ -256,7 +231,7 @@ static int stress_fd_fork(stress_args_t *args)
 		for (i = 0; i < STRESS_PID_MAX; i++)
 			pids[i] = -1;
 
-		for (max_pids = 0, i = 0; stress_continue(args) && (i < STRESS_PID_MAX); i++) {
+		for (max_pids = 0, i = 0; LIKELY(stress_continue(args) && (i < STRESS_PID_MAX)); i++) {
 			pids[i] = fork();
 			if (pids[i] < 0) {
 				continue;
@@ -287,7 +262,7 @@ tidy_fds:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	stress_fd_close(fds, fd_fork_fds, info);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: used %s() to close ~%d file descriptors on %s\n",
 			args->name,
 			info->use_close_range ? "close_range" : "close",
@@ -297,14 +272,14 @@ tidy_fds:
 
 	rate = (info->metrics.count > 0.0) ? (double)info->metrics.duration / info->metrics.count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per fd close",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "file descriptors open at one time",
-		(double)count_fd, STRESS_GEOMETRIC_MEAN);
+		(double)count_fd, STRESS_METRIC_GEOMETRIC_MEAN);
 	if (t_max > 0.0) {
 		const double duration = t_max - t_start;
 
 		stress_metrics_set(args, 2, "seconds to open all file descriptors",
-			(double)duration, STRESS_GEOMETRIC_MEAN);
+			(double)duration, STRESS_METRIC_GEOMETRIC_MEAN);
 	}
 
 	(void)munmap((void *)info, sizeof(*info));
@@ -313,10 +288,10 @@ tidy_fds:
 	return rc;
 }
 
-stressor_info_t stress_fd_fork_info = {
+const stressor_info_t stress_fd_fork_info = {
 	.stressor = stress_fd_fork,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

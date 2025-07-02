@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,7 +20,7 @@
 
 int main(int argc, char **argv)
 {
-	long long x = 23;
+	long long int x = 23;
 
 	return (int)__builtin_llabs(x);
 }

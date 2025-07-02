@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -63,11 +63,11 @@ static int check_status;		/* sanity check status */
 static void stress_stackmmap_push_msync(stress_stack_check_t *prev_check)
 {
 	void *addr = (void *)(((uintptr_t)&addr) & page_mask);
-	static void *laddr;
+	static const void *laddr;
 	stress_stack_check_t check;
 	register stress_stack_check_t *ptr;
 	register int i;
-	static char name[] = "stackmmap";
+	static const char name[] = "stackmmap";
 
 	check.prev = prev_check;
 	check.self_addr = &check;
@@ -88,13 +88,13 @@ static void stress_stackmmap_push_msync(stress_stack_check_t *prev_check)
 	}
 
 	for (i = 0, ptr = &check; (i < 256) && ptr; ptr = ptr->prev, i++) {
-		if (ptr->self_addr != ptr) {
+		if (UNLIKELY(ptr->self_addr != ptr)) {
 			pr_inf("%s: sanity check address mismatch, got 0x%p, "
 				"expecting 0x%p\n", name, ptr, ptr->self_addr);
 			check_status = EXIT_FAILURE;
 			return;
 		}
-		if (ptr->waste[0] != ~(ptr->waste[1])) {
+		if (UNLIKELY(ptr->waste[0] != ~(ptr->waste[1]))) {
 			pr_inf("%s: sanity check data mismatch, got 0x%" PRIx32
 				", expecting 0x%" PRIx32 "\n", name,
 				ptr->waste[0], ptr->waste[1]);
@@ -103,7 +103,7 @@ static void stress_stackmmap_push_msync(stress_stack_check_t *prev_check)
 		}
 	}
 
-	if (stress_continue_flag())
+	if (LIKELY(stress_continue_flag()))
 		stress_stackmmap_push_msync(&check);
 
 	stress_uint32_put(check.waste[1]);
@@ -155,33 +155,39 @@ static int stress_stackmmap(stress_args_t *args)
 	stack_sig = (uint8_t *)stress_mmap_populate(NULL, STRESS_SIGSTKSZ,
 		PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (stack_sig == MAP_FAILED) {
-		pr_inf_skip("%s: skipping stressor, cannot mmap signal stack, "
-			"errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu byte signal stressor%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, (size_t)STRESS_SIGSTKSZ,
+			stress_get_memfree_str(), errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		(void)close(fd);
 		goto tidy_dir;
 	}
+	stress_set_vma_anon_name(stack_sig, STRESS_SIGSTKSZ, "altstack-anon");
 
 	stack_mmap = (uint8_t *)mmap(NULL, MMAPSTACK_SIZE,
 		PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (stack_mmap == MAP_FAILED) {
 		if (errno == ENXIO) {
-			pr_inf_skip("%s: skipping stressor, mmap not possible on file %s\n",
-				args->name, filename);
+			pr_inf_skip("%s: mmap failed of %zu bytes on file %s%s, errno=%d (%s),"
+				"skipping stressor\n",
+				args->name, (size_t)STRESS_SIGSTKSZ, filename,
+				stress_get_memfree_str(), errno, strerror(errno));
 			rc = EXIT_NO_RESOURCE;
 			(void)close(fd);
 			goto tidy_stack_sig;
 		}
-		pr_fail("%s: mmap failed, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_fail("%s: mmap failed of %zu bytes failed%s, errno=%d (%s)\n",
+			args->name, (size_t)STRESS_SIGSTKSZ,
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)close(fd);
 		goto tidy_stack_sig;
 	}
 	(void)close(fd);
+	stress_set_vma_anon_name(stack_mmap, STRESS_SIGSTKSZ, "altstack-file");
 
 	if (shim_madvise((void *)stack_mmap, MMAPSTACK_SIZE, MADV_RANDOM) < 0) {
-		pr_dbg("%s: madvise failed: errno=%d (%s)\n",
+		pr_dbg("%s: madvise failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 	}
 	(void)shim_memset(stack_mmap, 0, MMAPSTACK_SIZE);
@@ -206,6 +212,8 @@ static int stress_stackmmap(stress_args_t *args)
 	c_test.uc_stack.ss_size = MMAPSTACK_SIZE - (page_size * 2);
 	c_test.uc_link = &c_main;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
@@ -218,25 +226,26 @@ static int stress_stackmmap(stress_args_t *args)
 
 		(void)stress_mwc32();
 again:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		pid = fork();
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
-			pr_err("%s: fork failed: errno=%d (%s)\n",
+			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		} else if (pid > 0) {
-			int status, waitret;
+			pid_t waitret;
+			int status;
 
 			/* Parent, wait for child */
 			waitret = shim_waitpid(pid, &status, 0);
 			if (waitret < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 				stress_kill_and_wait(args, pid, SIGTERM, false);
 			} else {
 				if (WIFEXITED(status)) {
@@ -265,7 +274,7 @@ again:
 			new_action.sa_handler = stress_sig_handler_exit;
 			(void)sigemptyset(&new_action.sa_mask);
 			new_action.sa_flags = SA_ONSTACK;
-			if (sigaction(SIGSEGV, &new_action, NULL) < 0)
+			if (UNLIKELY(sigaction(SIGSEGV, &new_action, NULL) < 0))
 				_exit(EXIT_FAILURE);
 
 			/*
@@ -273,7 +282,7 @@ again:
 			 *  to handle segfaults on an overrun
 			 *  mmap'd stack
 			 */
-			if (stress_sigaltstack(stack_sig, STRESS_SIGSTKSZ) < 0)
+			if (UNLIKELY(stress_sigaltstack(stack_sig, STRESS_SIGSTKSZ) < 0))
 				_exit(EXIT_FAILURE);
 
 			check_status = EXIT_SUCCESS;
@@ -298,16 +307,16 @@ tidy_dir:
 	return rc;
 }
 
-stressor_info_t stress_stackmmap_info = {
+const stressor_info_t stress_stackmmap_info = {
 	.stressor = stress_stackmmap,
-	.class = CLASS_VM | CLASS_MEMORY,
+	.classifier = CLASS_VM | CLASS_MEMORY,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_stackmmap_info = {
+const stressor_info_t stress_stackmmap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_MEMORY,
+	.classifier = CLASS_VM | CLASS_MEMORY,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without ucontext.h or swapcontext()"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -130,6 +130,8 @@ static int stress_dynlib(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGSEGV, stress_segvhandler, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -137,7 +139,7 @@ static int stress_dynlib(stress_args_t *args)
 		int ret;
 
 		ret = sigsetjmp(jmp_env, 1);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (ret)
 			goto tidy;
@@ -156,7 +158,7 @@ static int stress_dynlib(stress_args_t *args)
 
 		for (i = 0; i < MAX_LIBNAMES; i++) {
 			if (handles[i]) {
-				uint8_t *ptr;
+				const uint8_t *ptr;
 				double t;
 
 				(void)dlerror();
@@ -184,21 +186,21 @@ tidy:
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per dlsym lookup",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return EXIT_SUCCESS;
 }
-stressor_info_t stress_dynlib_info = {
+const stressor_info_t stress_dynlib_info = {
 	.stressor = stress_dynlib,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_dynlib_info = {
+const stressor_info_t stress_dynlib_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "built without dynamic library libdl support"
 };

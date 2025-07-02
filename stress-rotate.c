@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,7 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+#include "core-pragma.h"
 #include "core-put.h"
 
 #define ROTATE_LOOPS	(10000)
@@ -36,8 +37,8 @@ static double stress_rotate_all(stress_args_t *args, const bool verify, bool *su
 #if defined(HAVE_INT128_T)
 static __uint128_t stress_mwc128(void)
 {
-	uint64_t hi = stress_mwc64();
-	uint64_t lo = stress_mwc64();
+	const uint64_t hi = stress_mwc64();
+	const uint64_t lo = stress_mwc64();
 
 	return ((__uint128_t)hi << 64) | lo;
 }
@@ -66,6 +67,7 @@ stress_ ## fname ## size ## helper(stress_args_t *args, type *checksum)\
 	stress_uint ## size ## _put(*checksum);			\
 								\
 	t1 = stress_time_now();					\
+PRAGMA_UNROLL_N(8)						\
 	for (i = 0; i < ROTATE_LOOPS; i++) {			\
 		v0 = rotate_macro ## size(v0);			\
 		v1 = rotate_macro ## size(v1);			\
@@ -97,7 +99,7 @@ stress_ ## fname ## size(stress_args_t *args, const bool verify, bool *success)\
 		stress_mwc_set_seed(w, z);			\
 		duration += stress_ ## fname ## size ## helper	\
 				(args, &checksum1);		\
-		if (checksum0 != checksum1) {			\
+		if (UNLIKELY(checksum0 != checksum1)) {		\
 			pr_fail("%s: failed checksum with a "	\
 				"%s uint%d_t operation\n",	\
 				args->name, # fname, size);	\
@@ -144,7 +146,7 @@ typedef struct {
 	const stress_rotate_func_t	rotate_func;
 } stress_rotate_funcs_t;
 
-static stress_rotate_funcs_t stress_rotate_funcs[] = {
+static const stress_rotate_funcs_t stress_rotate_funcs[] = {
 	{ "all",	stress_rotate_all, },
 	{ "rol8",	stress_rol8 },
 	{ "ror8",	stress_ror8 },
@@ -186,30 +188,6 @@ static double stress_rotate_all(stress_args_t *args, const bool verify, bool *su
 	return 0.0;
 }
 
-/*
- *  stress_set_rotate_method()
- *	set the default vector floating point stress method
- */
-static int stress_set_rotate_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_rotate_funcs); i++) {
-		if (!strcmp(stress_rotate_funcs[i].name, name)) {
-			stress_set_setting("rotate-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "rotate-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_rotate_funcs); i++) {
-		(void)fprintf(stderr, " %s", stress_rotate_funcs[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
 static int stress_rotate(stress_args_t *args)
 {
 	size_t rotate_method = 0;	/* "all" */
@@ -217,13 +195,12 @@ static int stress_rotate(stress_args_t *args)
 	bool success = true;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
-	for (i = 1; i < SIZEOF_ARRAY(stress_rotate_metrics); i++) {
-		stress_rotate_metrics[i].duration = 0.0;
-		stress_rotate_metrics[i].count = 0.0;
-	}
+	stress_zero_metrics(stress_rotate_metrics, SIZEOF_ARRAY(stress_rotate_metrics));
 
 	(void)stress_get_setting("rotate-method", &rotate_method);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -237,7 +214,7 @@ static int stress_rotate(stress_args_t *args)
 
 			(void)snprintf(msg, sizeof(msg), "%s rotate ops per sec", stress_rotate_funcs[i].name);
 			stress_metrics_set(args, j, msg,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
@@ -247,14 +224,20 @@ static int stress_rotate(stress_args_t *args)
 	return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-        { OPT_rotate_method,	stress_set_rotate_method },
+static const char *stress_rotate_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_rotate_funcs)) ? stress_rotate_funcs[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+        { OPT_rotate_method, "rotate-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_rotate_method },
+	END_OPT,
 };
 
-stressor_info_t stress_rotate_info = {
+const stressor_info_t stress_rotate_info = {
 	.stressor = stress_rotate,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_INTEGER,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

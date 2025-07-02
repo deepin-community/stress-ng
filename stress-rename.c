@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -245,6 +245,9 @@ static int stress_rename(stress_args_t *args)
 	}
 #endif
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 restart:
 	(void)stress_temp_filename(oldname, PATH_MAX,
 		args->name, args->pid, inst1, i++);
@@ -252,7 +255,7 @@ restart:
 	if ((fp = fopen(oldname, "w+")) == NULL) {
 		int rc = stress_exit_status(errno);
 
-		pr_err("%s: fopen failed: errno=%d: (%s)%s\n",
+		pr_err("%s: fopen failed, errno=%d: (%s)%s\n",
 			args->name, errno, strerror(errno),
 			stress_get_fs_type(oldname));
 		(void)stress_temp_dir_rm(args->name, args->pid, inst1);
@@ -264,9 +267,8 @@ restart:
 #endif
 		return rc;
 	}
+	(void)fflush(fp);
 	(void)fclose(fp);
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue(args)) {
 		(void)stress_temp_filename(newname, PATH_MAX,
@@ -281,7 +283,7 @@ restart:
 		oldname = newname;
 		newname = tmpname;
 		stress_bogo_inc(args);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		(void)stress_temp_filename(newname, PATH_MAX,
@@ -296,7 +298,7 @@ restart:
 		oldname = newname;
 		newname = tmpname;
 		stress_bogo_inc(args);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 #if defined(EXERCISE_RENAMEAT)
@@ -327,7 +329,7 @@ restart:
 			newname = tmpname;
 
 			stress_bogo_inc(args);
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 		}
 #endif
@@ -359,7 +361,7 @@ restart:
 			newname = tmpname;
 
 			stress_bogo_inc(args);
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 		}
 #endif
@@ -382,9 +384,9 @@ restart:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_rename_info = {
+const stressor_info_t stress_rename_info = {
 	.stressor = stress_rename,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

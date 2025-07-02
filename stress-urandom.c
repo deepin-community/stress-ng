@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-capabilities.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_RANDOM_H)
 #include <linux/random.h>
@@ -39,8 +41,11 @@ static const stress_help_t help[] = {
     defined(__linux__)
 static void check_eperm(stress_args_t *args, const ssize_t ret, const int err)
 {
-	if ((g_opt_flags & OPT_FLAGS_VERIFY) &&
-	    ((ret == 0) || ((err != EPERM) && (err != EINVAL) && (err != ENOTTY)))) {
+	if (UNLIKELY((g_opt_flags & OPT_FLAGS_VERIFY) &&
+		     ((ret == 0) || ((err != EPERM) &&
+		      (err != ENOSYS) &&
+		      (err != EINVAL) &&
+		      (err != ENOTTY))))) {
 		pr_fail("%s: expected errno to be EPERM, got errno %d (%s) instead\n",
 			args->name, err, strerror(err));
 	}
@@ -101,7 +106,7 @@ static int stress_urandom(stress_args_t *args)
 #endif
 
 	if ((fd_urnd < 0) && (fd_rnd < 0)) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: random device(s) do not exist, skipping stressor\n",
 				args->name);
 #if defined(__linux__)
@@ -113,6 +118,8 @@ static int stress_urandom(stress_args_t *args)
 		return EXIT_NOT_IMPLEMENTED;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -128,7 +135,7 @@ static int stress_urandom(stress_args_t *args)
 
 			t = stress_time_now();
 			ret = read(fd_urnd, buffer, sizeof(buffer));
-			if (ret >= 0) {
+			if (LIKELY(ret >= 0)) {
 				duration += stress_time_now() - t;
 				bytes += (double)ret;
 			} else {
@@ -147,9 +154,9 @@ static int stress_urandom(stress_args_t *args)
 		if (fd_rnd >= 0) {
 			double t;
 #if defined(RNDGETENTCNT)
-			unsigned long val = 0;
+			unsigned long int val = 0;
 
-			if (ioctl(fd_rnd, RNDGETENTCNT, &val) < 0)
+			if (UNLIKELY(ioctl(fd_rnd, RNDGETENTCNT, &val) < 0))
 				goto next;
 			/* Try to avoid emptying entropy pool */
 			if (val < 128)
@@ -159,7 +166,7 @@ static int stress_urandom(stress_args_t *args)
 #endif
 			t = stress_time_now();
 			ret = read(fd_rnd, buffer, 1);
-			if (ret >= 0) {
+			if (LIKELY(ret >= 0)) {
 				duration += stress_time_now() - t;
 				bytes += (double)ret;
 			} else {
@@ -254,7 +261,7 @@ next:
 			FD_SET(fd_rnd_blk, &rdfds);
 
 			ret = select(fd_rnd_blk + 1, &rdfds, NULL, NULL, &timeout);
-			if (ret > 0) {
+			if (LIKELY(ret > 0)) {
 				if (FD_ISSET(fd_rnd_blk, &rdfds)) {
 #if defined(__linux__)
 					char *ptr;
@@ -315,10 +322,10 @@ next:
 	} while (stress_continue(args));
 
 	stress_metrics_set(args, 0, "million random bits read",
-		bytes * 8.0 / 1000000.0, STRESS_GEOMETRIC_MEAN);
+		bytes * 8.0 / 1000000.0, STRESS_METRIC_GEOMETRIC_MEAN);
 	rate = (duration > 0.0) ? bytes * 8.0 / duration : 0.0;
 	stress_metrics_set(args, 1, "million random bits per sec",
-		rate / 1000000.0, STRESS_HARMONIC_MEAN);
+		rate / 1000000.0, STRESS_METRIC_HARMONIC_MEAN);
 
 	rc = EXIT_SUCCESS;
 err:
@@ -337,9 +344,9 @@ err:
 
 	return rc;
 }
-stressor_info_t stress_urandom_info = {
+const stressor_info_t stress_urandom_info = {
 	.stressor = stress_urandom,
-	.class = CLASS_DEV | CLASS_OS,
+	.classifier = CLASS_DEV | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

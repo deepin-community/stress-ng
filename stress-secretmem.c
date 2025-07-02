@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -73,8 +73,8 @@ static bool stress_secretmem_unmap(
 
 	for (i = 0; i < n; i++) {
 		if (mappings[i]) {
-			if ((stress_munmap_retry_enomem((void *)mappings[i], page_size) == 0) &&
-			    (stress_munmap_retry_enomem((void *)(mappings[i] + page_size2), page_size) == 0)) {
+			if (LIKELY((stress_munmap_retry_enomem((void *)mappings[i], page_size) == 0) &&
+				   (stress_munmap_retry_enomem((void *)(mappings[i] + page_size2), page_size) == 0))) {
 				mappings[i] = NULL;
 			} else {
 				/* munmap failed, e.g. ENOMEM, so flag it */
@@ -98,9 +98,11 @@ static int stress_secretmem_child(stress_args_t *args, void *context)
 
 	(void)context;
 
-	mappings = calloc(MMAP_MAX, sizeof(*mappings));
-	if (!mappings) {
-		pr_fail("%s: calloc failed, out of memory\n", args->name);
+	mappings = (uint8_t **)calloc(MMAP_MAX, sizeof(*mappings));
+	if (UNLIKELY(!mappings)) {
+		pr_inf_skip("%s: failed to allocate %zu bytes%s, skipping stressor\n",
+			args->name, (size_t)MMAP_MAX * sizeof(*mappings),
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -112,6 +114,8 @@ static int stress_secretmem_child(stress_args_t *args, void *context)
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -119,24 +123,24 @@ static int stress_secretmem_child(stress_args_t *args, void *context)
 		uint8_t *redo_unmapping = NULL;
 		off_t sz = 0;
 
-		for (n = 0; stress_continue_flag() && (n < MMAP_MAX); n++) {
+		for (n = 0; LIKELY(stress_continue_flag() && (n < MMAP_MAX)); n++) {
 			const off_t offset = sz;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			sz += page_size3;
 
 			/* expand secret memory size */
-			if (ftruncate(fd, sz) != 0)
+			if (UNLIKELY(ftruncate(fd, sz) != 0))
 				break;
 
-			if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size3))
+			if (UNLIKELY((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size3)))
 				break;
 
 			mappings[n] = (uint8_t *)mmap(NULL, page_size3,
 				PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
-			if (mappings[n] == MAP_FAILED) {
+			if (UNLIKELY(mappings[n] == MAP_FAILED)) {
 				mappings[n] = NULL;
 				break;
 			}
@@ -151,7 +155,7 @@ static int stress_secretmem_child(stress_args_t *args, void *context)
 			/*
 			 *  Make an hole in the 3 page mapping on middle page
 			 */
-			if (stress_munmap_retry_enomem((void *)(mappings[n] + page_size), page_size) < 0) {
+			if (UNLIKELY(stress_munmap_retry_enomem((void *)(mappings[n] + page_size), page_size) < 0)) {
 				/* Failed?, remember to retry later */
 				redo_unmapping = mappings[n];
 				break;
@@ -192,16 +196,16 @@ static int stress_secretmem(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_secretmem_child, STRESS_OOMABLE_QUIET);
 }
 
-stressor_info_t stress_secretmem_info = {
+const stressor_info_t stress_secretmem_info = {
 	.stressor = stress_secretmem,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help,
 	.supported = stress_secretmem_supported
 };
 #else
-stressor_info_t stress_secretmem_info = {
+const stressor_info_t stress_secretmem_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help,
 	.unimplemented_reason = "built with headers that did not define memfd_secret() system call"
 };

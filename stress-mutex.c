@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,6 +17,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-affinity.h"
 #include "core-builtin.h"
 #include "core-pthread.h"
 
@@ -33,28 +34,13 @@ static const stress_help_t help[] = {
 	{ NULL, "mutex-affinity",	"change CPU affinity randomly across locks" },
 	{ NULL,	"mutex-ops N",		"stop after N mutex bogo operations" },
 	{ NULL, "mutex-procs N",	"select the number of concurrent processes" },
-	{ NULL,	NULL,		NULL }
+	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_mutex_affinity(const char *opt)
-{
-	return stress_set_setting_true("mutex-affinity", opt);
-}
-
-static int stress_set_mutex_procs(const char *opt)
-{
-	uint64_t mutex_procs;
-
-	mutex_procs = stress_get_uint64(opt);
-	stress_check_range("mutex-procs", mutex_procs,
-		MIN_MUTEX_PROCS, MAX_MUTEX_PROCS);
-	return stress_set_setting("mutex-procs", TYPE_ID_UINT64, &mutex_procs);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mutex_affinity,	stress_set_mutex_affinity },
-	{ OPT_mutex_procs,	stress_set_mutex_procs },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mutex_affinity, "mutex-affinity", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mutex_procs,    "mutex-procs",    TYPE_ID_UINT64, MIN_MUTEX_PROCS, MAX_MUTEX_PROCS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_PTHREAD_MUTEXATTR_T) &&		\
@@ -75,6 +61,11 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
     defined(HAVE_SCHED_GET_PRIORITY_MAX) &&	\
     defined(SCHED_FIFO)
 
+#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
+uint32_t *cpus;
+uint32_t n_cpus;
+#endif
+
 static pthread_mutex_t ALIGN64 mutex;
 
 typedef struct {
@@ -89,29 +80,22 @@ typedef struct {
 } pthread_info_t;
 
 /*
- *  mutex_exercise()
+ *  stress_mutex_exercise()
  *	exercise the mutex
  */
-static void OPTIMIZE3 *mutex_exercise(void *arg)
+static void OPTIMIZE3 *stress_mutex_exercise(void *arg)
 {
 	pthread_info_t *pthread_info = (pthread_info_t *)arg;
 	stress_args_t *args = pthread_info->args;
-	static void *nowt = NULL;
-	int max = (pthread_info->prio_max * 7) / 8;
+	const int max = (pthread_info->prio_max * 7) / 8;
 	int metrics_count = 0;
-#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
-	uint32_t cpus = (uint32_t)stress_get_processors_configured();
-#endif
 #if defined(HAVE_PTHREAD_MUTEXATTR)
 	int mutexattr_ret;
 	pthread_mutexattr_t mutexattr;
 #endif
-#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
-	if (!cpus)
-		cpus = 1;
-#endif
 
 	stress_mwc_reseed();
+	stress_random_small_sleep();
 
 #if defined(HAVE_PTHREAD_MUTEXATTR)
 	/*
@@ -132,7 +116,7 @@ static void OPTIMIZE3 *mutex_exercise(void *arg)
 
 		if (LIKELY(metrics_count > 0)) {
 			/* fast non-metrics lock path */
-			if (UNLIKELY(pthread_mutex_lock(&mutex) < 0)) {
+			if (UNLIKELY(pthread_mutex_lock(&mutex) != 0)) {
 				pr_fail("%s: pthread_mutex_lock failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				break;
@@ -142,25 +126,25 @@ static void OPTIMIZE3 *mutex_exercise(void *arg)
 			double t;
 
 			t = stress_time_now();
-			if (UNLIKELY(pthread_mutex_lock(&mutex) < 0)) {
+			if (LIKELY(pthread_mutex_lock(&mutex) == 0)) {
+				pthread_info->lock_duration += stress_time_now() - t;
+				pthread_info->lock_count += 1.0;
+			} else {
 				pr_fail("%s: pthread_mutex_lock failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				break;
-			} else {
-				pthread_info->lock_duration += stress_time_now() - t;
-				pthread_info->lock_count += 1.0;
 			}
 		}
 		metrics_count++;
-		if (metrics_count > 1000)
+		if (UNLIKELY(metrics_count > 1000))
 			metrics_count = 0;
 
 		param.sched_priority = pthread_info->prio_min;
 		(void)pthread_setschedparam(pthread_info->pthread, SCHED_FIFO, &param);
 #if defined(HAVE_PTHREAD_SETAFFINITY_NP)
-		if (pthread_info->mutex_affinity) {
+		if ((pthread_info->mutex_affinity) && (n_cpus > 0)) {
 			cpu_set_t cpuset;
-			const uint32_t cpu = stress_mwc32modn(cpus);
+			const uint32_t cpu = cpus[stress_mwc32modn(n_cpus)];
 
 			CPU_ZERO(&cpuset);
 			CPU_SET(cpu, &cpuset);
@@ -169,9 +153,9 @@ static void OPTIMIZE3 *mutex_exercise(void *arg)
 		}
 #endif
 		stress_bogo_inc(args);
-		shim_sched_yield();
+		(void)shim_sched_yield();
 
-		if (UNLIKELY(pthread_mutex_unlock(&mutex) < 0)) {
+		if (UNLIKELY(pthread_mutex_unlock(&mutex) != 0)) {
 			pr_fail("%s: pthread_mutex_unlock failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			break;
@@ -184,7 +168,7 @@ static void OPTIMIZE3 *mutex_exercise(void *arg)
 	}
 #endif
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -196,7 +180,7 @@ static int stress_mutex(stress_args_t *args)
 	size_t i;
 	bool created = false;
 	int prio_min, prio_max;
-	pthread_info_t pthread_info[DEFAULT_MUTEX_PROCS];
+	pthread_info_t pthread_info[MAX_MUTEX_PROCS];
 	uint64_t mutex_procs = DEFAULT_MUTEX_PROCS;
 	bool mutex_affinity = false;
 	double duration = 0.0, count = 0.0, rate;
@@ -215,17 +199,26 @@ static int stress_mutex(stress_args_t *args)
 	(void)shim_memset(&pthread_info, 0, sizeof(pthread_info));
 
 	if (pthread_mutex_init(&mutex, NULL) < 0) {
-		pr_fail("pthread_mutex_init failed: errno=%d: "
+		pr_fail("pthread_mutex_init failed, errno=%d: "
 			"(%s)\n", errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
 
+#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
+	n_cpus = stress_get_usable_cpus(&cpus, true);
+#endif
+
 	prio_min = sched_get_priority_min(SCHED_FIFO);
 	prio_max = sched_get_priority_max(SCHED_FIFO);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	for (i = 0; i < DEFAULT_MUTEX_PROCS; i++) {
+	for (i = 0; i < mutex_procs; i++)
+		pthread_info[i].ret = -1;
+
+	for (i = 0; i < mutex_procs; i++) {
 		pthread_info[i].args = args;
 		pthread_info[i].prio_min = prio_min;
 		pthread_info[i].prio_max = prio_max;
@@ -233,19 +226,23 @@ static int stress_mutex(stress_args_t *args)
 		pthread_info[i].lock_duration = 0.0;
 		pthread_info[i].lock_count = 0.0;
 		pthread_info[i].ret = pthread_create(&pthread_info[i].pthread, NULL,
-                                mutex_exercise, (void *)&pthread_info[i]);
+                                stress_mutex_exercise, (void *)&pthread_info[i]);
 		if ((pthread_info[i].ret) && (pthread_info[i].ret != EAGAIN)) {
 			pr_fail("%s: pthread create failed, errno=%d (%s)\n",
 				args->name, pthread_info[i].ret, strerror(pthread_info[i].ret));
 			break;
 		}
-		if (!stress_continue_flag())
-			break;
 		created = true;
+
+		if (UNLIKELY(!stress_continue(args)))
+			break;
 	}
 
 	if (!created) {
 		pr_inf("%s: could not create any pthreads\n", args->name);
+#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
+		stress_free_usable_cpus(&cpus);
+#endif
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -255,36 +252,39 @@ static int stress_mutex(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	for (i = 0; i < DEFAULT_MUTEX_PROCS; i++) {
+	for (i = 0; i < mutex_procs; i++) {
 		if (pthread_info[i].ret)
 			continue;
 
+		VOID_RET(int, pthread_join(pthread_info[i].pthread, NULL));
+
 		duration += pthread_info[i].lock_duration;
 		count += pthread_info[i].lock_count;
-
-		VOID_RET(int, pthread_join(pthread_info[i].pthread, NULL));
 	}
 	(void)pthread_mutex_destroy(&mutex);
 
 	rate = (count > 0.0) ? (duration / count) : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per mutex",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
+#if defined(HAVE_PTHREAD_SETAFFINITY_NP)
+	stress_free_usable_cpus(&cpus);
+#endif
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_mutex_info = {
+const stressor_info_t stress_mutex_info = {
 	.stressor = stress_mutex,
-	.class = CLASS_OS | CLASS_SCHEDULER,
+	.classifier = CLASS_OS | CLASS_SCHEDULER,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_mutex_info = {
+const stressor_info_t stress_mutex_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_SCHEDULER,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without librt, pthread_np.h, pthread or SCHED_FIFO support"

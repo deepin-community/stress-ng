@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -45,20 +45,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_bsearch_size()
- *	set bsearch size from given option string
- */
-static int stress_set_bsearch_size(const char *opt)
-{
-	uint64_t bsearch_size;
-
-	bsearch_size = stress_get_uint64(opt);
-	stress_check_range("bsearch-size", bsearch_size,
-		MIN_BSEARCH_SIZE, MAX_BSEARCH_SIZE);
-	return stress_set_setting("bsearch-size", TYPE_ID_UINT64, &bsearch_size);
-}
-
 static void OPTIMIZE3 * bsearch_nonlibc(
 	const void *key,
 	const void *base,
@@ -70,16 +56,55 @@ static void OPTIMIZE3 * bsearch_nonlibc(
 	register size_t upper = nmemb;
 
 	while (LIKELY(lower < upper)) {
-		register size_t index = (lower + upper) >> 1;
-		register const void *ptr = (const char *)base + (index * size);
-		register int cmp = compare(key, ptr);
+		register const size_t idx = (lower + upper) >> 1;
+		register const void *ptr = (const char *)base + (idx * size);
+		register const int cmp = compare(key, ptr);
 
 		if (cmp < 0) {
-			upper = index;
+			upper = idx;
 		} else if (cmp > 0) {
-			lower = index + 1;
+			lower = idx + 1;
 		} else {
 			return shim_unconstify_ptr(ptr);
+		}
+	}
+	return NULL;
+}
+
+static void OPTIMIZE3 * bsearch_ternary(
+	const void *key,
+	const void *base,
+	size_t nmemb,
+	size_t size,
+	int (*compare)(const void *p1, const void *p2))
+{
+	register size_t lower = 0;
+	register size_t upper = nmemb;
+
+	while (LIKELY(upper >= lower)) {
+		register const size_t diff = upper - lower;
+		register const size_t mid1 = lower + (diff / 3);
+		register const size_t mid2 = upper - (diff / 3);
+		register const void *ptr1, *ptr2;
+		register int cmp1, cmp2;
+
+		ptr1 = (const void *)((const char *)base + (mid1 * size));
+		cmp1 = compare(key, ptr1);
+		if (cmp1 == 0)
+			return shim_unconstify_ptr(ptr1);
+
+		ptr2 = (const void *)((const char *)base + (mid2 * size));
+		cmp2 = compare(key, ptr2);
+		if (cmp2 == 0)
+			return shim_unconstify_ptr(ptr2);
+
+		if (cmp1 < 0) {
+			upper = mid1 - 1;
+		} else if (cmp2 > 0) {
+			lower = mid2 + 1;
+		} else {
+			lower = mid1 + 1;
+			upper = mid2 - 1;
 		}
 	}
 	return NULL;
@@ -90,25 +115,12 @@ static const stress_bsearch_method_t stress_bsearch_methods[] = {
 	{ "bsearch-libc",	bsearch },
 #endif
 	{ "bsearch-nonlibc",	bsearch_nonlibc },
+	{ "ternary",		bsearch_ternary },
 };
 
-static int stress_set_bsearch_method(const char *opt)
+static const char *stress_bsearch_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_bsearch_methods); i++) {
-		if (strcmp(opt, stress_bsearch_methods[i].name) == 0) {
-			stress_set_setting("bsearch-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "bsearch-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_bsearch_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_bsearch_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_bsearch_methods)) ? stress_bsearch_methods[i].name : NULL;
 }
 
 /*
@@ -122,6 +134,7 @@ static int OPTIMIZE3 stress_bsearch(stress_args_t *args)
 	uint64_t bsearch_size = DEFAULT_BSEARCH_SIZE;
 	double rate, duration = 0.0, count = 0.0, sorted = 0.0;
 	bsearch_func_t bsearch_func;
+	int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("bsearch-method", &bsearch_method);
 	bsearch_func = stress_bsearch_methods[bsearch_method].bsearch_func;
@@ -141,11 +154,15 @@ static int OPTIMIZE3 stress_bsearch(stress_args_t *args)
 				data_size, PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of %zu bytes failed, errno=%d (%s), skipping stressor\n",
-			args->name, data_size, errno, strerror(errno));
+		pr_inf_skip("%s: mmap of %zu bytes failed%s, errno=%d (%s), skipping stressor\n",
+			args->name, data_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(data, data_size, "bsearch-data");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -162,11 +179,14 @@ static int OPTIMIZE3 stress_bsearch(stress_args_t *args)
 				if (result == NULL)
 					pr_fail("%s: element %zu could not be found\n",
 						args->name, i);
-				else if (*result != *ptr)
+				else if (*result != *ptr) {
 					pr_fail("%s: element %zu "
 						"found %" PRIu32
 						", expecting %" PRIu32 "\n",
 						args->name, i, *result, *ptr);
+					rc = EXIT_FAILURE;
+					break;
+				}
 			}
 		}
 		duration += stress_time_now() - t;
@@ -179,24 +199,24 @@ static int OPTIMIZE3 stress_bsearch(stress_args_t *args)
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "bsearch comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "bsearch comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)data, data_size);
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_bsearch_size,	stress_set_bsearch_size },
-	{ OPT_bsearch_method,	stress_set_bsearch_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_bsearch_size,   "bsearch-size",   TYPE_ID_UINT64,        MIN_BSEARCH_SIZE, MAX_BSEARCH_SIZE, NULL },
+	{ OPT_bsearch_method, "bsearch-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_bsearch_method },
+	END_OPT,
 };
 
-stressor_info_t stress_bsearch_info = {
+const stressor_info_t stress_bsearch_info = {
 	.stressor = stress_bsearch,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SEARCH,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

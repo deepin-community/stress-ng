@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,14 +20,18 @@
 #define CORE_CPUIDLE_H
 
 typedef struct cpu_cstate {
-	struct cpu_cstate *next;
-	uint32_t residency;	/* residency in microseconds */
-	char	*cstate;	/* cstate name */
+	struct cpu_cstate *next;	/* next cpu c-state */
+	uint32_t residency;		/* residency in microseconds */
+	char	*cstate;		/* C-state name */
 } cpu_cstate_t;
 
 extern void stress_cpuidle_init(void);
 extern void stress_cpuidle_free(void);
 extern void stress_cpuidle_log_info(void);
 extern cpu_cstate_t *stress_cpuidle_cstate_list_head(void);
+
+extern void stress_cpuidle_read_cstates_begin(stress_cstate_stats_t *cstate_stats);
+extern void stress_cpuidle_read_cstates_end(stress_cstate_stats_t *cstate_stats);
+extern void stress_cpuidle_dump(FILE *yaml, stress_stressor_t *stressors_list);
 
 #endif

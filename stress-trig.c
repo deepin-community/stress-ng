@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,8 @@
 #include "core-put.h"
 #include "core-target-clones.h"
 
+#include <math.h>
+
 #define PI			(3.14159265358979323846264338327950288419716939937511L)
 #define TANSUM			(-710.4128636743199902703338466380955651402473L)
 #define STRESS_TRIG_LOOPS	(10000)
@@ -42,8 +44,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_cos(stress_args_t *args)
 {
 	double sumcos = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
-	double precision = 1E-7;
+	const double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
+	const double precision = 1E-7;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -59,8 +61,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_cosf(stress_args_t *args)
 {
 	double sumcos = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
-	double precision = 1E-4;
+	const double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
+	const double precision = 1E-4;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -76,14 +78,12 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_cosl(stress_args_t *args)
 {
 	long double sumcos = 0.0L;
 	long double theta = 0.0L;
-	long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
+	const long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
 	long double precision;
 	int i;
 
 	switch (sizeof(precision)) {
 	case 16:
-		precision = 1E-12;
-		break;
 	case 12:
 		precision = 1E-8;
 		break;
@@ -105,8 +105,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sin(stress_args_t *args)
 {
 	double sumsin = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
-	double precision = 1E-7;
+	const double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
+	const double precision = 1E-7;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -122,8 +122,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sinf(stress_args_t *args)
 {
 	double sumsin = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
-	double precision = 1E-4;
+	const double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
+	const double precision = 1E-4;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -139,14 +139,12 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sinl(stress_args_t *args)
 {
 	long double sumsin = 0.0L;
 	long double theta = 0.0L;
-	long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
+	const long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
 	long double precision;
 	int i;
 
 	switch (sizeof(precision)) {
 	case 16:
-		precision = 1E-12;
-		break;
 	case 12:
 		precision = 1E-8;
 		break;
@@ -169,8 +167,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sincos(stress_args_t *args)
 {
 	double sumsin = 0.0, sumcos = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
-	double precision = 1E-7;
+	const double dtheta = (PI * 2.0) / (double)STRESS_TRIG_LOOPS;
+	const double precision = 1E-7;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -193,8 +191,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sincosf(stress_args_t *args)
 {
 	double sumsin = 0.0, sumcos = 0.0;
 	double theta = 0.0;
-	double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
-	double precision = 1E-4;
+	const double dtheta = (PI * 2.0) / (float)STRESS_TRIG_LOOPS;
+	const double precision = 1E-4;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -217,14 +215,12 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_sincosl(stress_args_t *args)
 {
 	long double sumsin = 0.0, sumcos = 0.0;
 	long double theta = 0.0L;
-	long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
+	const long double dtheta = (PI * 2.0L) / (long double)STRESS_TRIG_LOOPS;
 	long double precision;
 	int i;
 
 	switch (sizeof(precision)) {
 	case 16:
-		precision = 1E-12;
-		break;
 	case 12:
 		precision = 1E-8;
 		break;
@@ -252,8 +248,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_tan(stress_args_t *args)
 {
 	double sumtan = 0.0;
 	double theta = 3.0;
-	double dtheta = ((double)PI - theta) / (double)STRESS_TRIG_LOOPS;
-	double precision = 1E-7;
+	const double dtheta = ((double)PI - theta) / (double)STRESS_TRIG_LOOPS;
+	const double precision = 1E-7;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -269,8 +265,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_tanf(stress_args_t *args)
 {
 	double sumtan = 0.0;
 	double theta = 3.0;
-	double dtheta = ((double)PI - theta) / (double)STRESS_TRIG_LOOPS;
-	double precision = 1E-5;
+	const double dtheta = ((double)PI - theta) / (double)STRESS_TRIG_LOOPS;
+	const double precision = 1E-5;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -286,8 +282,8 @@ static bool OPTIMIZE3 TARGET_CLONES stress_trig_tanl(stress_args_t *args)
 {
 	long double sumtan = 0.0;
 	long double theta = 3.0;
-	long double dtheta = ((long double)PI - theta) / (long double)STRESS_TRIG_LOOPS;
-	long double precision = 1E-7;
+	const long double dtheta = ((long double)PI - theta) / (long double)STRESS_TRIG_LOOPS;
+	const long double precision = 1E-7;
 	int i;
 
 PRAGMA_UNROLL_N(8)
@@ -325,34 +321,18 @@ static const stress_trig_method_t stress_trig_methods[] = {
 
 stress_metrics_t stress_trig_metrics[SIZEOF_ARRAY(stress_trig_methods)];
 
-static int stress_set_trig_method(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_trig_methods); i++) {
-		if (strcmp(opt, stress_trig_methods[i].name) == 0)
-			return stress_set_setting("trig-method", TYPE_ID_SIZE_T, &i);
-	}
-
-	(void)fprintf(stderr, "trig-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_trig_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_trig_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-static bool stess_trig_exercise(stress_args_t *args, const size_t index)
+static bool stress_trig_exercise(stress_args_t *args, const size_t idx)
 {
 	bool ret;
 	const double t = stress_time_now();
 
-	ret = stress_trig_methods[index].trig_func(args);
-	stress_trig_metrics[index].duration += (stress_time_now() - t);
-	stress_trig_metrics[index].count += 1.0;
+	ret = stress_trig_methods[idx].trig_func(args);
+	stress_trig_metrics[idx].duration += (stress_time_now() - t);
+	stress_trig_metrics[idx].count += 1.0;
 	if (ret) {
-		pr_fail("trig: %s does not match expected checksum\n",
-			stress_trig_methods[index].name);
+		if (idx != 0)
+			pr_fail("trig: %s does not match expected checksum\n",
+				stress_trig_methods[idx].name);
 	}
 	return ret;
 }
@@ -363,7 +343,7 @@ static bool stress_trig_all(stress_args_t *args)
 	bool ret = false;
 
 	for (i = 1; i < SIZEOF_ARRAY(stress_trig_methods); i++) {
-		ret |= stess_trig_exercise(args, i);
+		ret |= stress_trig_exercise(args, i);
 	}
 	return ret;
 }
@@ -376,18 +356,21 @@ static int stress_trig(stress_args_t *args)
 {
 	size_t i, j;
 	size_t trig_method = 0;
+	int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("trig-method", &trig_method);
 
-	for (i = 0; i < SIZEOF_ARRAY(stress_trig_metrics); i++) {
-		stress_trig_metrics[i].duration = 0.0;
-		stress_trig_metrics[i].count = 0.0;
-	}
+	stress_zero_metrics(stress_trig_metrics, SIZEOF_ARRAY(stress_trig_metrics));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		stess_trig_exercise(args, trig_method);
+		if (stress_trig_exercise(args, trig_method)) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -400,22 +383,27 @@ static int stress_trig(stress_args_t *args)
 
 			(void)snprintf(buf, sizeof(buf), "%s ops per second", stress_trig_methods[i].name);
 			stress_metrics_set(args, j, buf,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_trig_method,	stress_set_trig_method },
-	{ 0,			NULL },
+static const char *stress_trig_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_trig_methods)) ? stress_trig_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_trig_method, "trig-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_trig_method },
+	END_OPT,
 };
 
-stressor_info_t stress_trig_info = {
+const stressor_info_t stress_trig_info = {
 	.stressor = stress_trig,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_FP | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

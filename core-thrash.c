@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,9 +18,12 @@
  *
  */
 #include "stress-ng.h"
+#include "core-attribute.h"
 #include "core-killpid.h"
+#include "core-numa.h"
 #include "core-thrash.h"
 
+#include <ctype.h>
 #include <sched.h>
 
 #if defined(__linux__) &&	\
@@ -102,9 +105,8 @@ int stress_pagein_self(const char *name)
 		char prot[6];
 
 		if (sscanf(buffer, "%" SCNx64 "-%" SCNx64
-		           " %5s %*x %*x:%*x %*d %1023s", &begin, &end, prot, tmppath) != 4) {
+		           " %5s %*x %*x:%*x %*d %1023s", &begin, &end, prot, tmppath) != 4)
 			continue;
-		}
 
 		/* Avoid VDSO etc.. */
 		if (strncmp("[v", tmppath, 2) == 0)
@@ -174,33 +176,48 @@ static int stress_pagein_proc(const pid_t pid)
 	 * Look for field 0060b000-0060c000 r--p 0000b000 08:01 1901726
 	 */
 	while (thrash_run && fgets(buffer, sizeof(buffer), fpmap)) {
-		uintmax_t begin, end, len;
-		uintptr_t off;
+		off_t off, begin, end, len;
 		char tmppath[1024];
 		char prot[6];
 
-		if (sscanf(buffer, "%" SCNx64 "-%" SCNx64
-		           " %5s %*x %*x:%*x %*d %1023s", &begin, &end, prot, tmppath) != 4)
+		/* portable off_t and scanf is a pain */
+		if ((sizeof(off_t) < 32) || (sizeof(off_t) > 64))
 			continue;
+		else if (sizeof(off_t) == 32) {
+			uint32_t begin32, end32;
+
+			if (sscanf(buffer, "%" SCNx32 "-%" SCNx32 " %5s %*x %*x:%*x %*d %1023s", &begin32, &end32, prot, tmppath) != 4)
+				continue;
+			begin = (off_t)begin32;
+			end = (off_t)end32;
+		} else if (sizeof(off_t) <= 64) {
+			uint64_t begin64, end64;
+
+			if (sscanf(buffer, "%" SCNx64 "-%" SCNx64 " %5s %*x %*x:%*x %*d %1023s", &begin64, &end64, prot, tmppath) != 4)
+				continue;
+			begin = (off_t)begin64;
+			end = (off_t)end64;
+		}
 
 		/* ignore non-readable or non-private mappings */
-		if (prot[0] != 'r' && prot[3] != 'p')
+		if ((prot[0] != 'r') && (prot[3] != 'p'))
 			continue;
-		len = end - begin;
 
 		/* Ignore bad range */
-		if ((begin >= end) || (len == 0) || (begin == 0))
+		if ((begin >= end) || (begin == 0))
 			continue;
+
+		len = end - begin;
 		/* Skip huge ranges more than 2GB */
-		if (len > 0x80000000UL)
+		if (len > (off_t)0x80000000UL)
 			continue;
 
 		for (off = begin; thrash_run && (off < end); off += page_size) {
-			unsigned long data;
+			unsigned long int data;
 			off_t pos;
 
-			pos = lseek(fdmem, (off_t)off, SEEK_SET);
-			if (pos != (off_t)off)
+			pos = lseek(fdmem, off, SEEK_SET);
+			if (pos != off)
 				continue;
 			VOID_RET(ssize_t, read(fdmem, &data, sizeof(data)));
 		}
@@ -211,6 +228,105 @@ exit_fdmem:
 	(void)close(fdmem);
 
 	return rc;
+}
+
+#if defined(__linux__)
+/*
+ *  stress_proc_file_read()
+ *	read a proc file
+ */
+static void stress_file_read(const char *filename)
+{
+	char buf[4096];
+	int fd;
+
+	fd = open(filename, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	while (read(fd, buf, sizeof(buf)) > 0)
+		;
+	(void)close(fd);
+}
+#endif
+
+/*
+ *  stress_sys_memory()
+ *	stress sys files that are memory related
+ */
+static inline void stress_sys_memory(void)
+{
+#if defined(__linux__)
+	static const char * const sys_files[] = {
+		"/sys/kernel/vmcoreinfo",
+		"/sys/kernel/debug/percpu_stats",
+	};
+
+	size_t i;
+
+	for (i = 0; i < SIZEOF_ARRAY(sys_files); i++) {
+		stress_file_read(sys_files[i]);
+	}
+#endif
+}
+
+/*
+ *  stress_proc_memory()
+ *	stress proc files that are memory related
+ */
+static inline void stress_proc_memory(void)
+{
+#if defined(__linux__)
+	static const char * const proc_files[] = {
+		"/proc/allocinfo",
+		"/proc/buddyinfo",
+		"/proc/meminfo",
+		"/proc/slabinfo",
+		"/proc/pagetypeinfo",
+		"/proc/pressure/memory",
+		"/proc/vmallocinfo",
+		"/proc/zoneinfo",
+	};
+
+	size_t i;
+	DIR *dir;
+	const struct dirent *d;
+
+	for (i = 0; i < SIZEOF_ARRAY(proc_files); i++) {
+		stress_file_read(proc_files[i]);
+	}
+
+	/*
+	 *  scan through all /proc/$PID directories
+	 *  reading proc_pid_files
+	 */
+	dir = opendir("/proc");
+	if (!dir)
+		return;
+
+	while ((d = readdir(dir)) != NULL) {
+		static const char * const proc_pid_files[] = {
+			"maps",
+			"numa_maps",
+			"projid_map",
+			"smaps",
+			"smaps_rollup",
+		};
+
+		if (!isdigit((unsigned char)d->d_name[0]))
+			continue;
+
+		for (i = 0; i < SIZEOF_ARRAY(proc_pid_files); i++) {
+			char filename[PATH_MAX];
+
+			(void)snprintf(filename, sizeof(filename),
+				"/proc/%s/%s", d->d_name,
+				proc_pid_files[i]);
+			stress_file_read(filename);
+		}
+	}
+	(void)closedir(dir);
+#endif
 }
 
 /*
@@ -270,7 +386,7 @@ static inline void stress_kmemleak_scan(void)
 static inline void stress_slab_shrink(void)
 {
 	DIR *dir;
-	struct dirent *d;
+	const struct dirent *d;
 	static const char slabpath[] = "/sys/kernel/slab";
 
 	/*
@@ -287,7 +403,7 @@ static inline void stress_slab_shrink(void)
 	 *  shrink all slabs
 	 */
 	while ((d = readdir(dir)) != NULL) {
-		if (isalpha((int)d->d_name[0]))  {
+		if (isalpha((unsigned char)d->d_name[0]))  {
 			char path[PATH_MAX];
 
 			(void)snprintf(path, sizeof(path), "%s/%s", slabpath, d->d_name);
@@ -339,7 +455,7 @@ static inline void stress_merge_memory(void)
 static int stress_pagein_all_procs(void)
 {
 	DIR *dp;
-	struct dirent *d;
+	const struct dirent *d;
 
 	dp = opendir("/proc");
 	if (!dp)
@@ -348,7 +464,7 @@ static int stress_pagein_all_procs(void)
 	while (thrash_run && ((d = readdir(dp)) != NULL)) {
 		intmax_t pid;
 
-		if (isdigit(d->d_name[0]) &&
+		if (isdigit((unsigned char)d->d_name[0]) &&
 		    sscanf(d->d_name, "%" SCNdMAX, &pid) == 1) {
 			char procpath[128];
 			struct stat statbuf;
@@ -368,12 +484,84 @@ static int stress_pagein_all_procs(void)
 	return 0;
 }
 
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+static void stress_thrash_move_pages(stress_numa_mask_t *numa_nodes)
+{
+	char buffer[4096];
+	NOCLOBBER FILE *fpmap = NULL;
+	const size_t page_size = stress_get_page_size();
+	unsigned long int node = 0;
+	uint16_t i;
+
+	fpmap = fopen("/proc/self/maps", "r");
+	if (!fpmap)
+		return;
+
+	/* start on a random node */
+	for (i = 0; i < stress_mwc16modn((uint16_t)numa_nodes->nodes); i++)
+		node = stress_numa_next_node(node, numa_nodes);
+
+	stress_thrash_state("movepages");
+	/*
+	 * Look for field 0060b000-0060c000 r--p 0000b000 08:01 1901726
+	 */
+	while (fgets(buffer, sizeof(buffer), fpmap)) {
+		uintmax_t begin, end, len;
+		uintptr_t off;
+		char tmppath[1024];
+		char prot[6];
+
+		if (sscanf(buffer, "%" SCNx64 "-%" SCNx64
+		           " %5s %*x %*x:%*x %*d %1023s", &begin, &end, prot, tmppath) != 4)
+			continue;
+
+		/* Avoid VDSO etc.. */
+		if (strncmp("[v", tmppath, 2) == 0)
+			continue;
+
+		len = end - begin;
+
+		/* Ignore bad range */
+		if ((begin >= end) || (len == 0) || (begin == 0))
+			continue;
+		/* Skip huge ranges more than 2GB */
+		if (len > 0x80000000UL)
+			continue;
+
+		for (off = begin; off < end; off += page_size) {
+			void *pages[1];
+			int nodes[1];
+			int states[1];
+			int flag = stress_mwc1() ? MPOL_MF_MOVE : MPOL_MF_MOVE_ALL;
+
+			node = stress_numa_next_node(node, numa_nodes);
+			pages[0] = (void *)off;
+			nodes[0] = node;
+			states[0] = 0;
+
+			if (shim_move_pages(parent_pid, 1, pages, nodes, states, flag) < 0) {
+				if (errno == ENOSYS)
+					goto err;
+			}
+		}
+	}
+err:
+	(void)fclose(fpmap);
+}
+#endif
+
 /*
  *  stress_thrash_start()
  *	start paging in thrash process
  */
 int stress_thrash_start(void)
 {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+        stress_numa_mask_t *numa_mask;
+        stress_numa_mask_t *numa_nodes;
+	bool thrash_numa = true;
+#endif
+
 	if (geteuid() != 0) {
 		pr_inf("not running as root, ignoring --thrash option\n");
 		return -1;
@@ -382,12 +570,13 @@ int stress_thrash_start(void)
 		pr_err("thrash background process already started\n");
 		return -1;
 	}
+
 	parent_pid = getpid();
 	thrash_run = true;
 	thrash_pid = fork();
 	if (thrash_pid < 0) {
 		thrash_run = false;
-		pr_err("thrash background process failed to fork: %d (%s)\n",
+		pr_err("thrash background process failed to fork, errno=%d (%s)\n",
 			errno, strerror(errno));
 		return -1;
 	} else if (thrash_pid == 0) {
@@ -398,6 +587,10 @@ int stress_thrash_start(void)
 		if (stress_sighandler("main", SIGALRM, stress_thrash_handler, NULL) < 0)
 			_exit(0);
 
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(NULL, &numa_nodes, &numa_mask,
+						"NUMA thrashing", &thrash_numa);
+#endif
 		while (thrash_run) {
 			if ((stress_mwc8() & 0x3) == 0) {
 				stress_slab_shrink();
@@ -414,10 +607,26 @@ int stress_thrash_start(void)
 
 			stress_kmemleak_scan();
 
+			stress_proc_memory();
+
+			stress_sys_memory();
+
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			stress_thrash_move_pages(numa_nodes);
+#endif
 			stress_thrash_state("sleep");
+
 			(void)sleep(1);
 		}
 		thrash_run = false;
+
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		if (numa_mask)
+			stress_numa_mask_free(numa_mask);
+		if (numa_nodes)
+			stress_numa_mask_free(numa_nodes);
+#endif
+
 		stress_thrash_state("exit");
 		_exit(0);
 	}
@@ -448,7 +657,7 @@ void stress_thrash_stop(void)
 }
 
 #else
-int stress_thrash_start(void)
+int PURE stress_thrash_start(void)
 {
 	return 0;
 }
@@ -457,7 +666,7 @@ void stress_thrash_stop(void)
 {
 }
 
-int stress_pagein_self(const char *name)
+int PURE stress_pagein_self(const char *name)
 {
 	(void)name;
 

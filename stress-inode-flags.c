@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 #include "core-pthread.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LIBGEN_H)
 #include <libgen.h>
@@ -115,7 +117,7 @@ static void stress_inode_flags_ioctl(
 {
 	int ret, attr;
 
-	if (!(keep_running || stress_continue(args)))
+	if (UNLIKELY(!(keep_running || stress_continue(args))))
 		return;
 
 	ret = ioctl(fd, FS_IOC_GETFLAGS, &attr);
@@ -156,27 +158,27 @@ static int stress_inode_flags_stressor(
 	stress_args_t *args,
 	const stress_data_t *data)
 {
-	size_t index = 0;
+	size_t idx = 0;
 
-	while (keep_running && stress_continue(args)) {
+	while (LIKELY(keep_running && stress_continue(args))) {
 		size_t i;
 
 		/* Work through all inode flag permutations */
-		stress_inode_flags_ioctl(args, data->dir_fd, inode_flag_perms[index]);
-		stress_inode_flags_ioctl(args, data->file_fd, inode_flag_perms[index]);
-		index++;
-		if (index >= inode_flag_count)
-			index = 0;
+		stress_inode_flags_ioctl(args, data->dir_fd, inode_flag_perms[idx]);
+		stress_inode_flags_ioctl(args, data->file_fd, inode_flag_perms[idx]);
+		idx++;
+		if (idx >= inode_flag_count)
+			idx = 0;
 		stress_inode_flags_ioctl_sane(data->dir_fd);
 		stress_inode_flags_ioctl_sane(data->file_fd);
 
 		stress_inode_flags_ioctl(args, data->dir_fd, 0);
-		for (i = 0; stress_continue(args) && (i < SIZEOF_ARRAY(inode_flags)); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(inode_flags))); i++)
 			stress_inode_flags_ioctl(args, data->dir_fd, inode_flags[i]);
 		stress_inode_flags_ioctl_sane(data->dir_fd);
 
 		stress_inode_flags_ioctl(args, data->file_fd, 0);
-		for (i = 0; stress_continue(args) && (i < SIZEOF_ARRAY(inode_flags)); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(inode_flags))); i++)
 			stress_inode_flags_ioctl(args, data->file_fd, inode_flags[i]);
 		stress_inode_flags_ioctl_sane(data->file_fd);
 		shim_fsync(data->file_fd);
@@ -192,7 +194,6 @@ static int stress_inode_flags_stressor(
  */
 static void *stress_inode_flags_thread(void *arg)
 {
-	static void *nowt = NULL;
 	stress_pthread_args_t *pa = (stress_pthread_args_t *)arg;
 
 	/*
@@ -201,9 +202,11 @@ static void *stress_inode_flags_thread(void *arg)
 	 */
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
+	stress_random_small_sleep();
+
 	pa->pthread_ret = stress_inode_flags_stressor(pa->args, pa->data);
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -220,7 +223,7 @@ static int stress_inode_flags(stress_args_t *args)
 	char tmp[PATH_MAX], file_name[PATH_MAX];
 	char *dir_name;
 
-	inode_flags_counter_lock = stress_lock_create();
+	inode_flags_counter_lock = stress_lock_create("counter");
 	if (!inode_flags_counter_lock) {
 		pr_inf("%s: failed to create lock, skipping stressor\n", args->name);
 		return EXIT_NO_RESOURCE;
@@ -250,14 +253,14 @@ static int stress_inode_flags(stress_args_t *args)
 
 	data.dir_fd = open(dir_name, O_RDONLY | O_DIRECTORY);
 	if (data.dir_fd < 0) {
-		pr_err("%s: cannot open %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open %s, errno=%d (%s)\n",
 			args->name, dir_name, errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto tidy_unlink;
 	}
 	data.file_fd = open(file_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
 	if (data.file_fd < 0) {
-		pr_err("%s: cannot open %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open %s, errno=%d (%s)\n",
 			args->name, file_name, errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto tidy_dir_fd;
@@ -275,6 +278,8 @@ static int stress_inode_flags(stress_args_t *args)
 				stress_inode_flags_thread, &pa[i]);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -310,15 +315,15 @@ tidy_lock:
 	return rc;
 }
 
-stressor_info_t stress_inode_flags_info = {
+const stressor_info_t stress_inode_flags_info = {
 	.stressor = stress_inode_flags,
-	.class = CLASS_OS | CLASS_FILESYSTEM,
+	.classifier = CLASS_OS | CLASS_FILESYSTEM,
 	.help = help
 };
 #else
-stressor_info_t stress_inode_flags_info = {
+const stressor_info_t stress_inode_flags_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_FILESYSTEM,
+	.classifier = CLASS_OS | CLASS_FILESYSTEM,
 	.help = help,
 	.unimplemented_reason = "built without libgen.h, linux/fs.h or pthread support"
 };

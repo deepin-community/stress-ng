@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-killpid.h"
 
@@ -26,6 +27,9 @@
 #if defined(HAVE_SYS_MOUNT_H)
 #include <sys/mount.h>
 #endif
+
+#define MIN_RAMFS_SIZE	(1 * MB)
+#define MAX_RAMFS_SIZE	(2 * GB)
 
 static const stress_help_t help[] = {
 	{ NULL,	"ramfs N",	 "start N workers exercising ramfs mounts" },
@@ -50,40 +54,10 @@ static int stress_ramfs_supported(const char *name)
 	return 0;
 }
 
-/*
- *  stress_set_ramfs_size()
- *	set ramfs allocation size
- */
-static int stress_set_ramfs_size(const char *opt)
-{
-	uint64_t ramfs_size;
-	const uint64_t page_size = (uint64_t)stress_get_page_size();
-	const uint64_t page_mask = ~(page_size - 1);
-
-	ramfs_size = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("ramfs-size", ramfs_size,
-		1 * MB, 1 * GB);
-	if (ramfs_size & (page_size - 1)) {
-		ramfs_size &= page_mask;
-		pr_inf("ramfs: rounding ramfs-size to %" PRIu64 " x %" PRId64 "K pages\n",
-			ramfs_size / page_size, page_size >> 10);
-	}
-	return stress_set_setting("ramfs-size", TYPE_ID_UINT64, &ramfs_size);
-}
-
-/*
- *  stress_set_ramfs_fill()
- *      set flag to fill ramfs
- */
-static int stress_set_ramfs_fill(const char *opt)
-{
-	return stress_set_setting_true("ramfs-fill", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_ramfs_size,	stress_set_ramfs_size },
-	{ OPT_ramfs_fill,	stress_set_ramfs_fill },
-	{ 0,                    NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_ramfs_size, "ramfs-size", TYPE_ID_UINT64_BYTES_VM, MIN_RAMFS_SIZE, MAX_RAMFS_SIZE, NULL },
+	{ OPT_ramfs_fill, "ramfs-fill", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__) && \
@@ -119,6 +93,8 @@ static void stress_ramfs_umount(stress_args_t *args, const char *path)
 	 *  know that umount been successful and can then return.
 	 */
 	for (i = 0; i < 100; i++) {
+		static bool warned = false;
+
 #if defined(HAVE_UMOUNT2) &&	\
     defined(MNT_FORCE)
 		if (stress_mwc1()) {
@@ -131,16 +107,22 @@ static void stress_ramfs_umount(stress_args_t *args, const char *path)
 #endif
 		if (ret == 0) {
 			if (i > 1) {
-				shim_nanosleep_uint64(ns);
+				(void)shim_nanosleep_uint64(ns);
 			}
 			continue;
 		}
 		switch (errno) {
+		case EPERM:
+			if (!warned) {
+				warned = true;
+				pr_inf_skip("%s: cannot umount, no permission, skipping stressor\n", args->name);
+			}
+			break;
 		case EAGAIN:
 		case EBUSY:
 		case ENOMEM:
 			/* Wait and then re-try */
-			shim_nanosleep_uint64(ns);
+			(void)shim_nanosleep_uint64(ns);
 			break;
 		case EINVAL:
 			/*
@@ -151,7 +133,7 @@ static void stress_ramfs_umount(stress_args_t *args, const char *path)
 			goto misc_tests;
 		default:
 			/* Unexpected, so report it */
-			pr_inf("%s: umount failed %s: %d %s\n", args->name,
+			pr_inf("%s: umount failed %s, errno=%d %s\n", args->name,
 				path, errno, strerror(errno));
 			break;
 		}
@@ -214,6 +196,24 @@ static int stress_ramfs_fs_ops(
 					break;
 				offset = end;
 			}
+			if (g_opt_flags & OPT_FLAGS_AGGRESSIVE) {
+				uint8_t buf[8192] ALIGN64;
+				const size_t sz = sizeof(buf);
+
+				stress_uint8rnd4(buf, sz);
+				if (lseek(fd, 0, SEEK_SET) == 0) {
+					uint64_t i;
+
+					for (i = 0; i < ramfs_size; i += sz) {
+						const uint64_t r = stress_mwc64();
+
+						shim_memcpy(buf, &r, sizeof(r));
+						if (write(fd, buf, sz) != (ssize_t)sz)
+							break;
+					}
+				}
+				fsync(fd);
+			}
 		}
 		if (symlink(pathname, symlinkname) < 0) {
 			pr_fail("%s: cannot create symbolic link on ram based file system, errno=%d (%s)\n",
@@ -269,6 +269,8 @@ static int stress_ramfs_child(stress_args_t *args)
 	bool ramfs_fill = false;
 	int i = 0;
 	int rc = EXIT_SUCCESS;
+	const uint64_t page_size = (uint64_t)stress_get_page_size();
+	const uint64_t page_mask = ~(page_size - 1);
 
 	if (stress_sighandler(args->name, SIGALRM,
 	    stress_ramfs_child_handler, NULL) < 0) {
@@ -285,10 +287,25 @@ static int stress_ramfs_child(stress_args_t *args)
 	stress_parent_died_alarm();
 	(void)sched_settings_apply(true);
 
-	(void)stress_get_setting("ramfs-size", &ramfs_size);
-	(void)stress_get_setting("ramfs-fill", &ramfs_fill);
+	if (!stress_get_setting("ramfs-size", &ramfs_size)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			ramfs_size = MAX_RAMFS_SIZE;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			ramfs_size = MIN_RAMFS_SIZE;
+	}
+	if (!stress_get_setting("ramfs-fill", &ramfs_fill)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			ramfs_fill = true;
+	}
 
-	stress_temp_dir(pathname, sizeof(pathname), args->name, args->pid, args->instance);
+	if (ramfs_size & (page_size - 1)) {
+		ramfs_size &= page_mask;
+		pr_inf("ramfs: rounding ramfs-size to %" PRIu64 " x %" PRId64 "K pages\n",
+			ramfs_size / page_size, page_size >> 10);
+	}
+
+	stress_temp_dir(pathname, sizeof(pathname), args->name,
+		args->pid, args->instance);
 	if (mkdir(pathname, S_IRGRP | S_IWGRP) < 0) {
 		pr_fail("%s: cannot mkdir %s, errno=%d (%s)\n",
 			args->name, pathname, errno, strerror(errno));
@@ -318,11 +335,16 @@ static int stress_ramfs_child(stress_args_t *args)
 		(void)snprintf(opt, sizeof(opt), "size=%" PRIu64, ramfs_size);
 		ret = mount("", realpathname, fs, 0, opt);
 		if (ret < 0) {
-			if ((errno != ENOSPC) &&
+			if (errno == EPERM) {
+				pr_inf_skip("%s: cannot mount, no permission, skipping stressor\n",
+					args->name);
+				rc = EXIT_NO_RESOURCE;
+			} else if ((errno != ENOSPC) &&
 			    (errno != ENOMEM) &&
-			    (errno != ENODEV))
+			    (errno != ENODEV)) {
 				pr_fail("%s: mount failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+			}
 			/* Just in case, force umount */
 			goto cleanup;
 		}
@@ -345,7 +367,7 @@ static int stress_ramfs_child(stress_args_t *args)
 			if ((errno == ENOSYS) ||
 			    (errno == ENODEV))
 				goto skip_fsopen;
-			pr_fail("%s: fsopen failed: errno=%d (%s)\n",
+			pr_fail("%s: fsopen failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto skip_fsopen;
 		}
@@ -353,7 +375,7 @@ static int stress_ramfs_child(stress_args_t *args)
 		if (shim_fsconfig(fd, FSCONFIG_SET_STRING, "size", opt, 0) < 0) {
 			if (errno == ENOSYS)
 				goto cleanup_fd;
-			pr_fail("%s: fsconfig failed: errno=%d (%s)\n",
+			pr_fail("%s: fsconfig failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
 			goto cleanup_fd;
@@ -361,7 +383,7 @@ static int stress_ramfs_child(stress_args_t *args)
 		if (shim_fsconfig(fd, FSCONFIG_CMD_CREATE, NULL, NULL, 0) < 0) {
 			if (errno == ENOSYS)
 				goto cleanup_fd;
-			pr_fail("%s: fsconfig failed: errno=%d (%s)\n",
+			pr_fail("%s: fsconfig failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
 			goto cleanup_fd;
@@ -376,7 +398,7 @@ static int stress_ramfs_child(stress_args_t *args)
 			 */
 			if ((errno == ENOSPC) || (errno == ENOMEM))
 				goto cleanup_fd;
-			pr_fail("%s: fsmount failed: errno=%d (%s)\n",
+			pr_fail("%s: fsmount failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
 			goto cleanup_fd;
@@ -384,7 +406,7 @@ static int stress_ramfs_child(stress_args_t *args)
 		if (shim_move_mount(mfd, "", AT_FDCWD, realpathname, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
 			if (errno == ENOSYS)
 				goto cleanup_mfd;
-			pr_fail("%s: move_mount failed: errno=%d (%s)\n",
+			pr_fail("%s: move_mount failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
 			goto cleanup_mfd;
@@ -401,8 +423,7 @@ skip_fsopen:
 
 #endif
 		stress_bogo_inc(args);
-	} while (keep_mounting && stress_continue(args) &&
-		 (!args->max_ops || (stress_bogo_get(args) < args->max_ops)));
+	} while (keep_mounting && stress_continue(args));
 
 cleanup:
 	stress_ramfs_umount(args, realpathname);
@@ -419,30 +440,33 @@ static int stress_ramfs_mount(stress_args_t *args)
 {
 	int pid;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 again:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		pid = fork();
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
-			pr_err("%s: fork failed: errno=%d (%s)\n",
+			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		} else if (pid > 0) {
-			int status, waitret;
+			pid_t waitret;
+			int status;
 
 			/* Parent, wait for child */
 			waitret = shim_waitpid(pid, &status, 0);
 			if (waitret < 0) {
 				if (errno != EINTR) {
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 					(void)stress_kill_pid(pid);
 				}
 				(void)shim_waitpid(pid, &status, 0);
@@ -461,6 +485,8 @@ again:
 			} else if (WEXITSTATUS(status) == EXIT_FAILURE) {
 				pr_fail("%s: child mount/umount failed\n", args->name);
 				return EXIT_FAILURE;
+			} else if (WEXITSTATUS(status) == EXIT_NO_RESOURCE) {
+				return EXIT_NO_RESOURCE;
 			}
 		} else {
 			_exit(stress_ramfs_child(args));
@@ -473,19 +499,19 @@ finish:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_ramfs_info = {
+const stressor_info_t stress_ramfs_info = {
 	.stressor = stress_ramfs_mount,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.supported = stress_ramfs_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_ramfs_info = {
+const stressor_info_t stress_ramfs_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.supported = stress_ramfs_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

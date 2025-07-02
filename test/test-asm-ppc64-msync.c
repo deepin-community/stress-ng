@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,7 +18,7 @@
  */
 
 #if !defined(__PPC64__)
-#error ppc64 darn instruction not supported
+#error ppc64 msync instruction not supported
 #endif
 
 int main(void)

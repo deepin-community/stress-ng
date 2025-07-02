@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+
+#include <sys/file.h>
 
 #if defined(HAVE_SYS_SELECT_H)
 #include <sys/select.h>
@@ -44,11 +46,11 @@ typedef struct {
 } stress_dentry_removal_t;
 
 static const stress_help_t help[] = {
-	{ "D N","dentry N",		"start N dentry thrashing stressors" },
-	{ NULL,	"dentry-ops N",		"stop after N dentry bogo operations" },
-	{ NULL,	"dentry-order O",	"specify unlink order (reverse, forward, stride)" },
-	{ NULL,	"dentries N",		"create N dentries per iteration" },
-	{ NULL,	NULL,			NULL }
+	{ "D N","dentry N",	  "start N dentry thrashing stressors" },
+	{ NULL,	"dentry-ops N",	  "stop after N dentry bogo operations" },
+	{ NULL,	"dentry-order O", "specify unlink order (reverse, forward, stride)" },
+	{ NULL,	"dentries N",	  "create N dentries per iteration" },
+	{ NULL,	NULL,		  NULL }
 };
 
 static const stress_dentry_removal_t dentry_removals[] = {
@@ -56,44 +58,11 @@ static const stress_dentry_removal_t dentry_removals[] = {
 	{ "reverse",	ORDER_REVERSE },
 	{ "stride",	ORDER_STRIDE },
 	{ "random",	ORDER_RANDOM },
-	{ NULL,		ORDER_NONE },
 };
 
-static int stress_set_dentries(const char *opt)
+static const char *stress_dentry_order(const size_t i)
 {
-	uint64_t dentries;
-
-	dentries = stress_get_uint64(opt);
-	stress_check_range("dentries", dentries,
-		MIN_DENTRIES, MAX_DENTRIES);
-	return stress_set_setting("dentries", TYPE_ID_UINT64, &dentries);
-}
-
-/*
- *  stress_set_dentry_order()
- *	set dentry ordering from give option
- */
-static int stress_set_dentry_order(const char *opt)
-{
-	const stress_dentry_removal_t *dr;
-
-	for (dr = dentry_removals; dr->name; dr++) {
-		if (!strcmp(dr->name, opt)) {
-			uint8_t dentry_order = dr->denty_order;
-
-			stress_set_setting("dentry-order",
-				TYPE_ID_UINT8, &dentry_order);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "dentry-order must be one of:");
-	for (dr = dentry_removals; dr->name; dr++) {
-		(void)fprintf(stderr, " %s", dr->name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	return (i < SIZEOF_ARRAY(dentry_removals)) ? dentry_removals[i].name : NULL;
 }
 
 /*
@@ -134,7 +103,7 @@ static void stress_dentry_unlink_file(
  *  stress_dentry_unlink()
  *	remove all dentries
  */
-static void stress_dentry_unlink(
+static int stress_dentry_unlink(
 	stress_args_t *args,
 	const uint64_t n,
 	const uint8_t dentry_order,
@@ -178,7 +147,9 @@ static void stress_dentry_unlink(
 	if (read_errors > 0) {
 		pr_fail("%s: %" PRIu64 " files did not contain the expected graycode check data\n",
 			args->name, read_errors);
+		return EXIT_FAILURE;
 	}
+	return EXIT_SUCCESS;
 }
 
 /*
@@ -340,7 +311,7 @@ static void stress_dentry_misc(const char *path)
  */
 static int stress_dentry(stress_args_t *args)
 {
-	int ret;
+	int ret, rc = EXIT_SUCCESS;
 	uint64_t dentries = DEFAULT_DENTRIES;
 	uint64_t dentry_offset = dentries;
 	uint8_t dentry_order = ORDER_RANDOM;
@@ -365,8 +336,11 @@ static int stress_dentry(stress_args_t *args)
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
-	(void)stress_temp_dir(dir_path, sizeof(dir_path), args->name, args->pid, args->instance);
+	(void)stress_temp_dir(dir_path, sizeof(dir_path), args->name,
+		args->pid, args->instance);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	stress_dentry_state(&nr_dentry1);
@@ -379,7 +353,7 @@ static int stress_dentry(stress_args_t *args)
 			int fd;
 			double t;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto abort;
 
 			stress_temp_filename_args(args,
@@ -388,9 +362,11 @@ static int stress_dentry(stress_args_t *args)
 			t = stress_time_now();
 			if ((fd = open(path, O_CREAT | O_RDWR,
 					S_IRUSR | S_IWUSR)) < 0) {
-				if (errno != ENOSPC)
+				if (errno != ENOSPC) {
 					pr_fail("%s open %s failed, errno=%d (%s)\n",
 						args->name, path, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 				n = i;
 				break;
 			}
@@ -421,7 +397,7 @@ static int stress_dentry(stress_args_t *args)
 			const uint64_t gray_code = (i >> 1) ^ i;
 			double t;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto abort;
 
 			/* The following should succeed */
@@ -463,17 +439,19 @@ static int stress_dentry(stress_args_t *args)
 		/*
 		 *  And remove
 		 */
-		stress_dentry_unlink(args, n, dentry_order, verify);
+		if (stress_dentry_unlink(args, n, dentry_order, verify) != EXIT_SUCCESS)
+			rc = EXIT_FAILURE;
+
 		stress_dentry_misc(dir_path);
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 abort:
 	stress_dentry_state(&nr_dentry2);
 	nr_dentries = nr_dentry2 - nr_dentry1;
-	if ((args->instance == 0) && (nr_dentries > 0)) {
+	if (stress_instance_zero(args) && (nr_dentries > 0)) {
 		pr_inf("%s: %" PRId64 " dentries allocated\n",
 			args->name, nr_dentries);
 	}
@@ -481,34 +459,34 @@ abort:
 
 	rate = (creat_count > 0.0) ? (double)creat_duration / creat_count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per file creation",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (access_count > 0.0) ? (double)access_duration / access_count : 0.0;
 	stress_metrics_set(args, 1, "nanosecs per file access",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (bogus_access_count > 0.0) ? (double)bogus_access_duration / bogus_access_count : 0.0;
 	stress_metrics_set(args, 2, "nanosecs per bogus file access",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (bogus_unlink_count > 0.0) ? (double)bogus_unlink_duration / bogus_unlink_count : 0.0;
 	stress_metrics_set(args, 3, "nanosecs per bogus file unlink",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	/* force unlink of all files */
 	stress_dentry_unlink(args, dentries, dentry_order, verify);
 	(void)stress_temp_dir_rm_args(args);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dentries,		stress_set_dentries },
-	{ OPT_dentry_order,	stress_set_dentry_order },
-	{ 0,		NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_dentries,	    "dentries",     TYPE_ID_UINT64, MIN_DENTRIES, MAX_DENTRIES, NULL },
+	{ OPT_dentry_order, "dentry-order", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_dentry_order },
+	END_OPT,
 };
 
-stressor_info_t stress_dentry_info = {
+const stressor_info_t stress_dentry_info = {
 	.stressor = stress_dentry,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

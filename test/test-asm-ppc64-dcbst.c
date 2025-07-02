@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,7 +18,7 @@
  */
 #include <stdint.h>
 
-#if !defined(__PPC64__)
+#if !(defined(__PPC64__) || defined(__ppc64__))
 #error ppc64 dcbst instruction not supported
 #endif
 

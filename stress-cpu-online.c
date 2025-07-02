@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,20 +33,10 @@ static const stress_help_t help[] = {
 
 #define STRESS_CPU_ONLINE_MAX_CPUS	(65536)
 
-static int stress_set_cpu_online_affinity(const char *opt)
-{
-	return stress_set_setting_true("cpu-online-affinity", opt);
-}
-
-static int stress_set_cpu_online_all(const char *opt)
-{
-	return stress_set_setting_true("cpu-online-all", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_cpu_online_affinity,	stress_set_cpu_online_affinity },
-	{ OPT_cpu_online_all,		stress_set_cpu_online_all },
-	{ 0,				NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_cpu_online_affinity, "cpu-online-affinity", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_cpu_online_all,      "cpu-online-all",      TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__)
@@ -80,7 +70,7 @@ static int stress_cpu_online_set(
 	const int setting)
 {
 	char filename[PATH_MAX];
-	char data[3] = { '0' + (char)setting, '\n', 0 };
+	const char data[3] = { '0' + (char)setting, '\n', 0 };
 	ssize_t ret;
 
 	(void)snprintf(filename, sizeof(filename),
@@ -187,7 +177,7 @@ static int stress_cpu_online(stress_args_t *args)
 	(void)stress_get_setting("cpu-online-all", &cpu_online_all);
 
 	if (geteuid() != 0) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: need root privilege to run "
 				"this stressor\n", args->name);
 		/* Not strictly a test failure */
@@ -206,10 +196,11 @@ static int stress_cpu_online(stress_args_t *args)
 		cpus = STRESS_CPU_ONLINE_MAX_CPUS;
 	}
 
-	cpu_online = calloc((size_t)cpus, sizeof(*cpu_online));
+	cpu_online = (bool *)calloc((size_t)cpus, sizeof(*cpu_online));
 	if (!cpu_online) {
-		pr_inf_skip("%s: out of memory allocating %" PRId32 " boolean flags, "
-			    "skipping stressor\n", args->name, cpus);
+		pr_inf_skip("%s: out of memory allocating %" PRId32 " boolean flags%s, "
+			    "skipping stressor\n", args->name, cpus,
+			    stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -234,8 +225,8 @@ static int stress_cpu_online(stress_args_t *args)
 		free(cpu_online);
 		return EXIT_FAILURE;
 	}
-	if ((args->num_instances > 1) && cpu_online_all) {
-		if (args->instance == 0) {
+	if ((args->instances > 1) && cpu_online_all) {
+		if (stress_instance_zero(args)) {
 			pr_inf("%s: disabling --cpu-online-all option because "
 			       "more than 1 %s stressor is being invoked\n",
 				args->name, args->name);
@@ -243,11 +234,13 @@ static int stress_cpu_online(stress_args_t *args)
 		cpu_online_all = false;
 	}
 
-	if ((args->instance == 0) && cpu_online_all) {
+	if (stress_instance_zero(args) && cpu_online_all) {
 		pr_inf("%s: exercising all %" PRId32 " cpus\n",
 			args->name, cpu_online_count + 1);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Use a pipe to send offlined CPU number to child */
@@ -312,10 +305,14 @@ static int stress_cpu_online(stress_args_t *args)
 	do {
 		switch (args->instance) {
 		case 1:
-			cpu = (cpu + 1) % (uint32_t)cpus;
+			cpu++;
+			if (cpu >= (uint32_t)cpus)
+				cpu = 0;
 			break;
 		case 2:
-			cpu = (cpu - 1) % (uint32_t)cpus;
+			if (cpu == 0)
+				cpu = cpus;
+			cpu--;
 			break;
 		default:
 			cpu = stress_mwc32modn((uint32_t)cpus);
@@ -336,7 +333,7 @@ static int stress_cpu_online(stress_args_t *args)
 			/* Don't try if already offline */
 			stress_cpu_online_get(cpu, &setting);
 			if (setting == 0) {
-				shim_sched_yield();
+				(void)shim_sched_yield();
 				continue;
 			}
 
@@ -358,7 +355,7 @@ static int stress_cpu_online(stress_args_t *args)
 				break;
 			if (rc == EXIT_SUCCESS) {
 				rc = stress_cpu_online_get(cpu, &setting);
-				if ((rc == EXIT_SUCCESS) && (args->num_instances == 0) && (setting != 0)) {
+				if ((rc == EXIT_SUCCESS) && (args->instances == 0) && (setting != 0)) {
 					pr_inf("%s: set cpu %" PRIu32 " offline, expecting setting to be 0, got %d instead\n",
 						args->name, cpu, setting);
 				} else {
@@ -373,7 +370,7 @@ static int stress_cpu_online(stress_args_t *args)
 				break;
 			if (rc == EXIT_SUCCESS) {
 				rc = stress_cpu_online_get(cpu, &setting);
-				if ((rc == EXIT_SUCCESS) && (args->num_instances == 0) && (setting != 1)) {
+				if ((rc == EXIT_SUCCESS) && (args->instances == 0) && (setting != 1)) {
 					pr_inf("%s: set cpu %" PRIu32 " offline, expecting setting to be 1, got %d instead\n",
 						args->name, cpu, setting);
 				} else {
@@ -384,7 +381,7 @@ static int stress_cpu_online(stress_args_t *args)
 				}
 			}
 			stress_bogo_inc(args);
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 	} while (stress_continue(args));
 
@@ -412,27 +409,27 @@ static int stress_cpu_online(stress_args_t *args)
 
 	rate = (offline_count > 0.0) ? (double)offline_duration / offline_count : 0.0;
 	stress_metrics_set(args, 0, "millisecs per offline action",
-		rate * STRESS_DBL_MILLISECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MILLISECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (online_count > 0.0) ? (double)online_duration / online_count : 0.0;
 	stress_metrics_set(args, 1, "millisecs per online action",
-		rate * STRESS_DBL_MILLISECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MILLISECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
 
-stressor_info_t stress_cpu_online_info = {
+const stressor_info_t stress_cpu_online_info = {
 	.stressor = stress_cpu_online,
 	.supported = stress_cpu_online_supported,
-	.class = CLASS_CPU | CLASS_OS | CLASS_PATHOLOGICAL,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_OS | CLASS_PATHOLOGICAL,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_cpu_online_info = {
+const stressor_info_t stress_cpu_online_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU | CLASS_OS | CLASS_PATHOLOGICAL,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_OS | CLASS_PATHOLOGICAL,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

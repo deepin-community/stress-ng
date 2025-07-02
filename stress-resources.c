@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,11 +34,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   NULL }
 };
 
-static int stress_set_resources_mlock(const char *opt)
-{
-	return stress_set_setting_true("resources-mlock", opt);
-}
-
 /*
  *  stress_resources()
  *	stress by forking and exiting
@@ -50,10 +45,13 @@ static int stress_resources(stress_args_t *args)
 	size_t num_pids = MAX_PIDS;
 	stress_resources_t *resources;
 	const size_t num_resources = MAX_LOOPS;
-	pid_t *pids;
+	stress_pid_t *s_pids;
 	bool resources_mlock = false;
 
-	(void)stress_get_setting("resources-mlock", &resources_mlock);
+	if (!stress_get_setting("resources-mlock", &resources_mlock)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			resources_mlock = true;
+	}
 
 	stress_get_memlimits(&shmall, &freemem, &totalmem, &freeswap, &totalswap);
 	min_mem_free = (freemem / 100) * 2;
@@ -67,27 +65,29 @@ static int stress_resources(stress_args_t *args)
 	UNEXPECTED
 #endif
 
-	pids = malloc(num_pids * sizeof(*pids));
-	if (!pids) {
-		pr_inf_skip("%s: cannot allocate %zd process ids, skipping stressor\n",
-			args->name, num_pids);
+	s_pids = stress_sync_s_pids_mmap(num_pids);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu PIDs%s, skipping stressor\n",
+			args->name, num_pids, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
-	resources = malloc(num_resources * sizeof(*resources));
+	resources = (stress_resources_t *)malloc(num_resources * sizeof(*resources));
 	if (!resources) {
-		pr_inf_skip("%s: cannot allocate %zd resource structures, skipping stressor\n",
-			args->name, num_resources);
-		free(pids);
+		pr_inf_skip("%s: cannot allocate %zu resource structures%s, skipping stressor\n",
+			args->name, num_resources, stress_get_memfree_str());
+		(void)stress_sync_s_pids_munmap(s_pids, num_pids);
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		unsigned int i;
 
-		(void)shim_memset(pids, 0, sizeof(*pids));
+		(void)shim_memset(s_pids, 0, sizeof(*s_pids));
 		for (i = 0; i < num_pids; i++) {
 			pid_t pid;
 
@@ -103,34 +103,36 @@ static int stress_resources(stress_args_t *args)
 				(void)sched_settings_apply(true);
 
 				n = stress_resources_allocate(args, resources, num_resources, pipe_size, min_mem_free, true);
-				(void)stress_resources_free(args, resources, n);
+				stress_resources_access(args, resources, n);
+				stress_resources_free(args, resources, n);
 
 				_exit(0);
 			}
 
-			pids[i] = pid;
-			if (!stress_continue(args))
+			s_pids[i].pid = pid;
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_bogo_inc(args);
 		}
-		stress_kill_and_wait_many(args, pids, num_pids, SIGALRM, true);
+		stress_kill_and_wait_many(args, s_pids, num_pids, SIGALRM, true);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	free(resources);
-	free(pids);
+	(void)stress_sync_s_pids_munmap(s_pids, num_pids);
 
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_resources_mlock,	stress_set_resources_mlock },
-	{ 0,			NULL },
+
+static const stress_opt_t opts[] = {
+	{ OPT_resources_mlock, "resources-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_resources_info = {
+const stressor_info_t stress_resources_info = {
 	.stressor = stress_resources,
-	.class = CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
 	.help = help
 };

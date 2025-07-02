@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,8 +24,8 @@
 #define DEFAULT_SKIPLIST_SIZE	(1 * KB)
 
 typedef struct skip_node {
-	unsigned long value;
-	struct skip_node *skip_nodes[1];
+	unsigned long int value;
+	struct skip_node **skip_nodes;
 } skip_node_t;
 
 typedef struct {
@@ -40,20 +40,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"skiplist-size N", "number of 32 bit integers to add to skiplist" },
 	{ NULL,	NULL,		  NULL }
 };
-
-/*
- *  stress_set_skiplist_size()
- *	set skiplist size from given option string
- */
-static int stress_set_skiplist_size(const char *opt)
-{
-	uint64_t skiplist_size;
-
-	skiplist_size = stress_get_uint64(opt);
-	stress_check_range("skiplist-size", skiplist_size,
-		MIN_SKIPLIST_SIZE, MAX_SKIPLIST_SIZE);
-	return stress_set_setting("skiplist-size", TYPE_ID_UINT64, &skiplist_size);
-}
 
 /*
  *  skip_list_random_level()
@@ -77,9 +63,14 @@ static inline size_t OPTIMIZE3 skip_list_random_level(const size_t max_level)
  */
 static inline skip_node_t *skip_node_alloc(const size_t levels)
 {
-	const size_t sz = sizeof(skip_node_t) + (levels * sizeof(skip_node_t *));
+	const size_t sz = sizeof(skip_node_t) + ((levels + 1) * sizeof(skip_node_t *));
+	skip_node_t *skip_node;
 
-	return (skip_node_t *)calloc(1, sz);
+	skip_node = calloc(1, sz);
+	if (!skip_node)
+		return NULL;
+	skip_node->skip_nodes = (skip_node_t **)(skip_node + 1);
+	return skip_node;
 }
 
 /*
@@ -109,13 +100,13 @@ static skip_list_t *skip_list_init(skip_list_t *list, const size_t max_level)
  *  skip_list_insert()
  *	insert a value into the skiplist
  */
-static skip_node_t OPTIMIZE3 *skip_list_insert(skip_list_t *list, const unsigned long value)
+static skip_node_t OPTIMIZE3 *skip_list_insert(skip_list_t *list, const unsigned long int value)
 {
 	skip_node_t **skip_nodes;
 	skip_node_t *skip_node = list->head;
 	register size_t i, level;
 
-	skip_nodes = calloc(list->max_level + 1, sizeof(*skip_nodes));
+	skip_nodes = (skip_node_t **)calloc(list->max_level + 1, sizeof(*skip_nodes));
 	if (UNLIKELY(!skip_nodes))
 		return NULL;
 
@@ -163,7 +154,7 @@ static skip_node_t OPTIMIZE3 *skip_list_insert(skip_list_t *list, const unsigned
  *  skip_list_search()
  *	search the skiplist for a specific value
  */
-static skip_node_t OPTIMIZE3 *skip_list_search(skip_list_t *list, const unsigned long value)
+static skip_node_t OPTIMIZE3 *skip_list_search(skip_list_t *list, const unsigned long int value)
 {
 	skip_node_t *skip_node = list->head;
 	register size_t i;
@@ -179,13 +170,13 @@ static skip_node_t OPTIMIZE3 *skip_list_search(skip_list_t *list, const unsigned
  *  skip_list_ln2()
  *	compute maximum skiplist level
  */
-static inline unsigned long OPTIMIZE3 skip_list_ln2(register unsigned long n)
+static inline unsigned long int OPTIMIZE3 skip_list_ln2(register unsigned long int n)
 {
 #if defined(HAVE_BUILTIN_CLZL)
 	/* this is fine as long as n > 0 */
 	return (sizeof(n) * 8) - __builtin_clzl(n);
 #else
-	register unsigned long i = 0;
+	register unsigned long int i = 0;
 
 	while (n) {
 		i++;
@@ -220,7 +211,7 @@ static void skip_list_free(skip_list_t *list)
  */
 static int OPTIMIZE3 stress_skiplist(stress_args_t *args)
 {
-	unsigned long n, i, ln2n;
+	unsigned long int n, i, ln2n;
 	uint64_t skiplist_size = DEFAULT_SKIPLIST_SIZE;
 	int rc = EXIT_FAILURE;
 
@@ -230,7 +221,7 @@ static int OPTIMIZE3 stress_skiplist(stress_args_t *args)
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
 			skiplist_size = MIN_SKIPLIST_SIZE;
 	}
-	n = (unsigned long)skiplist_size;
+	n = (unsigned long int)skiplist_size;
 	ln2n = skip_list_ln2(n);
 
 	/*
@@ -244,34 +235,40 @@ static int OPTIMIZE3 stress_skiplist(stress_args_t *args)
 		goto finish;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		skip_list_t list;
 
 		if (!skip_list_init(&list, ln2n)) {
-			pr_inf("%s: out of memory initializing the skip list\n",
-				args->name);
+			pr_inf("%s: out of memory initializing the skip list%s\n",
+				args->name, stress_get_memfree_str());
 			return EXIT_NO_RESOURCE;
 		}
 
 		for (i = 0; i < n; i++) {
-			const unsigned long v = (i >> 1) ^ i;
+			const unsigned long int v = (i >> 1) ^ i;
 
-			if (!skip_list_insert(&list, v)) {
-				pr_inf("%s: out of memory initializing the skip list\n",
-					args->name);
+			if (UNLIKELY(!skip_list_insert(&list, v))) {
+				pr_inf("%s: out of memory initializing the skip list%s\n",
+					args->name, stress_get_memfree_str());
 				skip_list_free(&list);
 				return EXIT_NO_RESOURCE;
 			}
 		}
 
 		for (i = 0; i < n; i++) {
-			const unsigned long v = (i >> 1) ^ i;
+			const unsigned long int v = (i >> 1) ^ i;
 
-			if (!skip_list_search(&list, v))
+			if (UNLIKELY(!skip_list_search(&list, v))) {
 				pr_fail("%s node containing value %lu was not found\n",
 					args->name, v);
+				rc = EXIT_FAILURE;
+				skip_list_free(&list);
+				goto finish;
+			}
 		}
 		skip_list_free(&list);
 
@@ -285,15 +282,15 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_skiplist_size,	stress_set_skiplist_size },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_skiplist_size, "skiplist-size", TYPE_ID_UINT64, MIN_SKIPLIST_SIZE, MAX_SKIPLIST_SIZE, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_skiplist_info = {
+const stressor_info_t stress_skiplist_info = {
 	.stressor = stress_skiplist,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SEARCH,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

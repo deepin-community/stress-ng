@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,13 +20,16 @@
 #include "stress-ng.h"
 #include "core-killpid.h"
 
-#define MIN_DIR_DIRS		(64)
-#define MAX_DIR_DIRS		(65536)
-#define DEFAULT_DIR_DIRS	(8192)
+#include <ctype.h>
+#include <sys/file.h>
 
 #if defined(HAVE_LIBGEN_H)
 #include <libgen.h>
 #endif
+
+#define MIN_DIR_DIRS		(64)
+#define MAX_DIR_DIRS		(65536)
+#define DEFAULT_DIR_DIRS	(8192)
 
 static const stress_help_t help[] = {
 	{ NULL,	"dir N",	"start N directory thrashing stressors" },
@@ -34,20 +37,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"dir-ops N",	"stop after N directory bogo operations" },
 	{ NULL,	NULL,		NULL }
 };
-
-/*
- *  stress_set_dir_dirs()
- *      set number of dir directories from given option string
- */
-static int stress_set_dir_dirs(const char *opt)
-{
-	uint64_t dir_dirs;
-
-	dir_dirs = stress_get_uint64(opt);
-	stress_check_range("dir-dirs", dir_dirs,
-		MIN_DIR_DIRS, MAX_DIR_DIRS);
-	return stress_set_setting("dir-dirs", TYPE_ID_UINT64, &dir_dirs);
-}
 
 #if defined(__DragonFly__)
 #define d_reclen d_namlen
@@ -141,13 +130,13 @@ static int stress_dir_read(
 	const char *path)
 {
 	DIR *dp;
-	struct dirent *de;
+	const struct dirent *de;
 
 	dp = opendir(path);
 	if (!dp)
 		return -1;
 
-	while (stress_continue(args) && ((de = readdir(dp)) != NULL)) {
+	while (LIKELY(stress_continue(args) && ((de = readdir(dp)) != NULL))) {
 		char filename[PATH_MAX];
 		struct stat statbuf;
 		int fd;
@@ -184,18 +173,18 @@ static int stress_dir_rename(
 	const char *path)
 {
 	DIR *dp;
-	struct dirent *de;
+	const struct dirent *de;
 	char new_filename[PATH_MAX];
 	char tmp[32];
 
-	(void)snprintf(tmp, sizeof(tmp), "rename-%" PRIu32 "-%jd", stress_mwc32(), (intmax_t)getpid());
+	(void)snprintf(tmp, sizeof(tmp), "rename-%" PRIu32 "-%" PRIdMAX, stress_mwc32(), (intmax_t)getpid());
 	stress_mk_filename(new_filename, sizeof(new_filename), path, tmp);
 
 	dp = opendir(path);
 	if (!dp)
 		return -1;
 
-	while (stress_continue(args) && ((de = readdir(dp)) != NULL)) {
+	while (LIKELY(stress_continue(args) && ((de = readdir(dp)) != NULL))) {
 		char old_filename[PATH_MAX];
 
 #if !defined(__CYGWIN__)
@@ -259,7 +248,8 @@ static int stress_mkdir(const int dir_fd, const char *path, const int mode)
 	 *  50% of the time use mkdirat rather than mkdir
 	 */
 	if ((dir_fd >= 0) && stress_mwc1()) {
-		char tmp[PATH_MAX], *filename;
+		char tmp[PATH_MAX];
+		const char *filename;
 
 		(void)shim_strscpy(tmp, path, sizeof(tmp));
 		filename = basename(tmp);
@@ -339,9 +329,9 @@ static void stress_dir_read_concurrent(
 	stress_args_t *args,
 	const char *pathname)
 {
-	shim_nice(1);
-	shim_nice(1);
-	shim_nice(1);
+	(void)shim_nice(1);
+	(void)shim_nice(1);
+	(void)shim_nice(1);
 
 	do {
 		if (stress_dir_read(args, pathname) < 0)
@@ -385,16 +375,16 @@ static int stress_dir_readdir(
 	const char *pathname)
 {
 	DIR *dir;
-	char dirname[PATH_MAX + 64];
+	char dirpath[PATH_MAX + 64];
 	char filename[PATH_MAX + 70];
 	int rc = 0, i, got_mask, all_mask;
-	struct dirent *entry;
+	const struct dirent *de;
 
-	(void)snprintf(dirname, sizeof(dirname), "%s/test-%jd-%" PRIu32, pathname,
+	(void)snprintf(dirpath, sizeof(dirpath), "%s/test-%" PRIdMAX "-%" PRIu32, pathname,
 		(intmax_t)getpid(), stress_mwc32());
-	if (mkdir(dirname, S_IRUSR | S_IWUSR | S_IXUSR) < 0) {
+	if (mkdir(dirpath, S_IRUSR | S_IWUSR | S_IXUSR) < 0) {
 		pr_fail("%s: cannot mkdir %s, errno=%d (%s)\n",
-			args->name, dirname, errno, strerror(errno));
+			args->name, dirpath, errno, strerror(errno));
 		rc = -1;
 		goto err_rmdir;
 	}
@@ -402,17 +392,17 @@ static int stress_dir_readdir(
 	/*
 	 *  Check if readdir + rewinddir will pick up new files
 	 */
-	dir = opendir(dirname);
+	dir = opendir(dirpath);
 	if (!dir) {
 		pr_fail("%s: cannot opendir %s, errno=%d (%s)\n",
-			args->name, dirname, errno, strerror(errno));
+			args->name, dirpath, errno, strerror(errno));
 		rc = -1;
 		goto err_rmdir;
 	}
 	all_mask = 0;
 	for (i = 0; i < 10; i++) {
 		all_mask |= (1U << i);
-		(void)snprintf(filename, sizeof(filename), "%s/%d", dirname, i);
+		(void)snprintf(filename, sizeof(filename), "%s/%d", dirpath, i);
 		if (stress_dir_touch(args, filename) < 0) {
 			(void)closedir(dir);
 			rc = -1;
@@ -422,9 +412,9 @@ static int stress_dir_readdir(
 
 	rewinddir(dir);
 	got_mask = 0;
-	while ((entry = readdir(dir))) {
-		if (isdigit((int)entry->d_name[0])) {
-			const int d = atoi(entry->d_name);
+	while ((de = readdir(dir))) {
+		if (isdigit((unsigned char)de->d_name[0])) {
+			const int d = atoi(de->d_name);
 
 			got_mask |= (1U << d);
 		}
@@ -433,17 +423,17 @@ static int stress_dir_readdir(
 
 	if (got_mask != all_mask) {
 		pr_fail("%s: rewinddir and readdir did not find all the files in directory %s\n",
-			args->name, dirname);
+			args->name, dirpath);
 		rc = -1;
 	}
 
 err_rm_files:
 	for (i = 0; i < 10; i++) {
-		(void)snprintf(filename, sizeof(filename), "%s/%d", dirname, i);
+		(void)snprintf(filename, sizeof(filename), "%s/%d", dirpath, i);
 		(void)unlink(filename);
 	}
 err_rmdir:
-	(void)rmdir(dirname);
+	(void)rmdir(dirpath);
 
 	return rc;
 }
@@ -461,8 +451,15 @@ static int stress_dir(stress_args_t *args)
 	const int bad_fd = stress_get_bad_fd();
 	pid_t pid;
 
-	stress_temp_dir(pathname, sizeof(pathname), args->name, args->pid, args->instance);
-	(void)stress_get_setting("dir-dirs", &dir_dirs);
+	stress_temp_dir(pathname, sizeof(pathname), args->name,
+		args->pid, args->instance);
+	if (!stress_get_setting("dir-dirs", &dir_dirs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			dir_dirs = MAX_DIR_DIRS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			dir_dirs = MIN_DIR_DIRS;
+	}
+
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -471,6 +468,8 @@ static int stress_dir(stress_args_t *args)
 #if defined(O_DIRECTORY)
 	dir_fd = open(pathname, O_DIRECTORY | O_RDONLY);
 #endif
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	pid = fork();
@@ -486,7 +485,7 @@ static int stress_dir(stress_args_t *args)
 		stress_dir_flock(dir_fd);
 		stress_dir_truncate(pathname, dir_fd);
 
-		for (i = 0; stress_continue(args) && (i < n); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
 			char path[PATH_MAX];
 			const uint64_t gray_code = (i >> 1) ^ i;
 
@@ -499,6 +498,7 @@ static int stress_dir(stress_args_t *args)
 				    (errno != EMLINK)) {
 					pr_fail("%s: mkdir %s failed, errno=%d (%s)\n",
 						args->name, path, errno, strerror(errno));
+					ret = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -508,19 +508,19 @@ static int stress_dir(stress_args_t *args)
 		stress_invalid_rmdir(pathname);
 		stress_invalid_mkdirat(bad_fd);
 
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 			stress_dir_tidy(args, i);
 			break;
 		}
 		stress_dir_read(args, pathname);
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 			stress_dir_tidy(args, i);
 			break;
 		}
 		stress_dir_rename(args, pathname);
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 			stress_dir_tidy(args, i);
 			break;
@@ -555,15 +555,15 @@ static int stress_dir(stress_args_t *args)
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dir_dirs,	stress_set_dir_dirs },
-	{ 0,		NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_dir_dirs, "dir-dirs", TYPE_ID_UINT64, MIN_DIR_DIRS, MAX_DIR_DIRS, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_dir_info = {
+const stressor_info_t stress_dir_info = {
 	.stressor = stress_dir,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

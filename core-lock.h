@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,9 +19,13 @@
 #ifndef CORE_LOCK_H
 #define CORE_LOCK_H
 
-extern void *stress_lock_create(void);
+extern int stress_lock_mem_map(void);
+extern void stress_lock_mem_unmap(void);
+
+extern void *stress_lock_create(const char *name);
 extern int stress_lock_destroy(void *lock_handle);
 extern int stress_lock_acquire(void *lock_handle);
+extern int stress_lock_acquire_relax(void *lock_handle);
 extern int stress_lock_release(void *lock_handle);
 
 #endif

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,7 +66,7 @@ static stress_lockofd_info_t *stress_lockofd_info_new(void)
 		lockofd_infos.free = new->next;
 		new->next = NULL;
 	} else {
-		new = calloc(1, sizeof(*new));
+		new = (stress_lockofd_info_t *)calloc(1, sizeof(*new));
 		if (!new)
 			return NULL;
 	}
@@ -186,9 +186,9 @@ static int stress_lockofd_contention(
 		f.l_len = len;
 		f.l_pid = 0;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
-		rc = fcntl(fd, F_OFD_GETLK, &f);
+		rc = fcntl(fd, F_OFD_SETLK, &f);
 		if (rc < 0)
 			continue;
 
@@ -196,7 +196,8 @@ static int stress_lockofd_contention(
 
 		lockofd_info = stress_lockofd_info_new();
 		if (!lockofd_info) {
-			pr_err("%s: calloc failed, out of memory\n", args->name);
+			pr_err("%s: calloc failed, out of memory%s\n",
+				args->name, stress_get_memfree_str());
 			return -1;
 		}
 		lockofd_info->offset = offset;
@@ -261,7 +262,7 @@ static int stress_lockofd(stress_args_t *args)
 	}
 	for (offset = 0; offset < LOCK_FILE_SIZE; offset += sizeof(buffer)) {
 redo:
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			ret = EXIT_SUCCESS;
 			goto tidy;
 		}
@@ -276,6 +277,8 @@ redo:
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -283,7 +286,7 @@ again:
 	if (cpid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto tidy;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -316,16 +319,16 @@ tidy:
 	return ret;
 }
 
-stressor_info_t stress_lockofd_info = {
+const stressor_info_t stress_lockofd_info = {
 	.stressor = stress_lockofd,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_lockofd_info = {
+const stressor_info_t stress_lockofd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without fcntl() F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW, F_WRLCK or F_UNLCK commands"

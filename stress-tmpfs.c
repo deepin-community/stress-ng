@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -59,20 +59,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		    NULL }
 };
 
-static int stress_set_tmpfs_mmap_file(const char *opt)
-{
-	return stress_set_setting_true("tmpfs-mmap-file", opt);
-}
-
-static int stress_set_tmpfs_mmap_async(const char *opt)
-{
-	return stress_set_setting_true("tmpfs-mmap-async", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_tmpfs_mmap_async,	stress_set_tmpfs_mmap_async },
-	{ OPT_tmpfs_mmap_file,	stress_set_tmpfs_mmap_file },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_tmpfs_mmap_async,	"tmpfs-mmap-async", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_tmpfs_mmap_file,  "tmpfs-mmap-file",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_VFS_H) && \
@@ -130,13 +120,13 @@ static int stress_tmpfs_open(stress_args_t *args, off_t *len)
 
 	*len = 0;
 	n = stress_mount_get(mnts, SIZEOF_ARRAY(mnts));
-	if (n < 0)
+	if (UNLIKELY(n < 0))
 		return -1;
 
 	for (i = 0; i < n; i++) {
 		struct statfs buf;
 
-		if (!mnts[i])
+		if (UNLIKELY(!mnts[i]))
 			continue;
 		/* Some paths should be avoided... */
 		if (!strncmp(mnts[i], "/dev", 4))
@@ -157,7 +147,7 @@ static int stress_tmpfs_open(stress_args_t *args, off_t *len)
 		(void)snprintf(path, sizeof(path), "%s/%s-%" PRIdMAX "-%" PRIu32 "-%" PRIu32,
 			mnts[i], args->name, (intmax_t)args->pid, args->instance, rnd);
 		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-		if (fd >= 0) {
+		if (LIKELY(fd >= 0)) {
 			const char data = 0;
 			off_t rc, max_size = (off_t)buf.f_bsize * (off_t)buf.f_bavail;
 
@@ -169,7 +159,7 @@ static int stress_tmpfs_open(stress_args_t *args, off_t *len)
 				if (max_size > (off_t)MAX_TMPFS_SIZE)
 					max_size = (off_t)MAX_TMPFS_SIZE;
 			}
-			max_size /= args->num_instances;
+			max_size /= args->instances;
 			max_size += (args->page_size - 1);
 			max_size &= ~(off_t)(args->page_size - 1);
 
@@ -180,13 +170,13 @@ static int stress_tmpfs_open(stress_args_t *args, off_t *len)
 			 *  over time
 			 */
 			rc = lseek(fd, max_size, SEEK_SET);
-			if (rc < 0) {
+			if (UNLIKELY(rc < 0)) {
 				(void)close(fd);
 				fd = -1;
 				continue;
 			}
 			rc = write(fd, &data, sizeof(data));
-			if (rc < 0) {
+			if (UNLIKELY(rc < 0)) {
 				(void)close(fd);
 				fd = -1;
 				continue;
@@ -202,7 +192,7 @@ static int stress_tmpfs_open(stress_args_t *args, off_t *len)
 
 static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 {
-	stress_tmpfs_context_t *context = (stress_tmpfs_context_t *)ctxt;
+	const stress_tmpfs_context_t *context = (stress_tmpfs_context_t *)ctxt;
 	const size_t page_size = args->page_size;
 	const size_t sz = (size_t)context->sz;
 	const size_t pages = (size_t)sz / page_size;
@@ -212,16 +202,18 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 	int no_mem_retries = 0;
 	int ms_flags;
 	int flags = MAP_SHARED;
+	int rc = EXIT_SUCCESS;
 	mapping_info_t *mappings;
 
 #if defined(MAP_POPULATE)
 	flags |= MAP_POPULATE;
 #endif
 
-	mappings = calloc(pages, sizeof(*mappings));
-	if (!mappings) {
-		pr_inf_skip("%s: failed to allocate mapping array, skipping stressor\n",
-			args->name);
+	mappings = (mapping_info_t *)calloc(pages, sizeof(*mappings));
+	if (UNLIKELY(!mappings)) {
+		pr_inf_skip("%s: failed to allocate %zu byte mapping array%s, skipping stressor\n",
+			args->name, pages * sizeof(*mappings),
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -237,7 +229,7 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		uint8_t *buf = NULL;
 		off_t offset;
 
-		if (no_mem_retries >= NO_MEM_RETRIES_MAX) {
+		if (UNLIKELY(no_mem_retries >= NO_MEM_RETRIES_MAX)) {
 			pr_err("%s: gave up trying to mmap, no available memory\n",
 				args->name);
 			break;
@@ -247,12 +239,12 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		 *  exercise some random file operations
 		 */
 		offset = (off_t)stress_mwc64modn(sz + 1);
-		if (lseek(fd, offset, SEEK_SET) != (off_t)-1) {
+		if (LIKELY(lseek(fd, offset, SEEK_SET) >= 0)) {
 			char data[1];
 
 			VOID_RET(ssize_t, read(fd, data, sizeof(data)));
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 #if (defined(HAVE_SYS_XATTR_H) ||       \
@@ -261,7 +253,6 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
     defined(HAVE_FSETXATTR)
 		{
 			int ret;
-
 			char attrname[32];
 			char attrdata[32];
 
@@ -275,7 +266,7 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		}
 #endif
 		offset = (off_t)stress_mwc64modn(sz + 1);
-		if (lseek(fd, offset, SEEK_SET) != (off_t)-1) {
+		if (LIKELY(lseek(fd, offset, SEEK_SET) >= 0)) {
 			char data[1];
 			ssize_t wr;
 
@@ -323,9 +314,12 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		/* Ensure we can write to the mapped pages */
 		stress_mmap_set(buf, sz, page_size);
 		if (g_opt_flags & OPT_FLAGS_VERIFY) {
-			if (stress_mmap_check(buf, sz, page_size) < 0)
+			if (UNLIKELY(stress_mmap_check(buf, sz, page_size) < 0)) {
 				pr_fail("%s: mmap'd region of %zu bytes does "
 					"not contain expected data\n", args->name, sz);
+				rc = EXIT_FAILURE;
+				break;
+			}
 		}
 
 		/*
@@ -333,10 +327,11 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		 */
 		(void)stress_mincore_touch_pages(buf, sz);
 		for (n = pages; n; ) {
-			uint64_t j, i = stress_mwc64modn(pages);
+			uint64_t j;
+			const uint64_t i = stress_mwc64modn(pages);
 
 			for (j = 0; j < n; j++) {
-				uint64_t page = (i + j) % pages;
+				const uint64_t page = (i + j) % pages;
 
 				if (mappings[page].state == PAGE_MAPPED) {
 					mappings[page].state = 0;
@@ -345,7 +340,7 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 					n--;
 					break;
 				}
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto cleanup;
 			}
 		}
@@ -355,10 +350,11 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 		 *  Step #2, map them back in random order
 		 */
 		for (n = pages; n; ) {
-			uint64_t j, i = stress_mwc64modn(pages);
+			uint64_t j;
+			const uint64_t i = stress_mwc64modn(pages);
 
 			for (j = 0; j < n; j++) {
-				uint64_t page = (i + j) % pages;
+				const uint64_t page = (i + j) % pages;
 
 				if (!mappings[page].state) {
 					offset = tmpfs_mmap_file ? (off_t)(page * page_size) : 0;
@@ -378,9 +374,12 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 						mappings[page].state = PAGE_MAPPED;
 						/* Ensure we can write to the mapped page */
 						stress_mmap_set(mappings[page].addr, page_size, page_size);
-						if (stress_mmap_check(mappings[page].addr, page_size, page_size) < 0)
+						if (UNLIKELY(stress_mmap_check(mappings[page].addr, page_size, page_size) < 0)) {
 							pr_fail("%s: mmap'd region of %zu bytes does "
 								"not contain expected data\n", args->name, page_size);
+							rc = EXIT_FAILURE;
+							break;
+						}
 						if (tmpfs_mmap_file) {
 							(void)shim_memset(mappings[page].addr, (int)n, page_size);
 							(void)shim_msync((void *)mappings[page].addr, page_size, ms_flags);
@@ -389,7 +388,7 @@ static int stress_tmpfs_child(stress_args_t *args, void *ctxt)
 					n--;
 					break;
 				}
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto cleanup;
 			}
 		}
@@ -410,7 +409,7 @@ cleanup:
 	(void)close(fd);
 	free(mappings);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -429,6 +428,8 @@ static int stress_tmpfs(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = stress_oomable_child(args, &context, stress_tmpfs_child, STRESS_OOMABLE_NORMAL);
@@ -439,18 +440,18 @@ static int stress_tmpfs(stress_args_t *args)
 
 	return ret;
 }
-stressor_info_t stress_tmpfs_info = {
+const stressor_info_t stress_tmpfs_info = {
 	.stressor = stress_tmpfs,
-	.class = CLASS_MEMORY | CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_MEMORY | CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_tmpfs_info = {
+const stressor_info_t stress_tmpfs_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_MEMORY | CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_MEMORY | CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without sys/vfs.h or statfs() system call"

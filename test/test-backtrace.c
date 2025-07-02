@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,12 +16,25 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
-#include <math.h>
+#define _GNU_SOURCE
 
-int main(int argc, char **argv)
+#include <execinfo.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int main(void)
 {
-	long double x = 1.48734 + (long double)argc;
+	int i, n_ptrs;
+	void *buffer[100];
+	char **strings;
 
-	return (int)__builtin_sqrtl(x);
+	n_ptrs = backtrace(buffer, 100);
+	strings = backtrace_symbols(buffer, n_ptrs);
+
+	for (i = 0; i < n_ptrs; i++)
+		printf("%s\n", strings[i]);
+
+	free(strings);
+
+	return n_ptrs;
 }
-

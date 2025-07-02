@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,39 +22,32 @@
 #include "core-net.h"
 #include "core-out-of-memory.h"
 
+#include <sys/ioctl.h>
+
+#if defined(HAVE_SYS_SELECT_H)
+#include <sys/select.h>
+#endif
+
 #if defined(HAVE_SYS_UN_H)
 #include <sys/un.h>
 #else
 UNEXPECTED
 #endif
 
-#define MIN_SOCKET_FD_PORT	(1024)
-#define MAX_SOCKET_FD_PORT	(65535)
 #define DEFAULT_SOCKET_FD_PORT	(8000)
 
 static const stress_help_t help[] = {
 	{ NULL,	"sockfd N",	 "start N workers sending file descriptors over sockets" },
 	{ NULL,	"sockfd-ops N",	 "stop after N sockfd bogo operations" },
 	{ NULL,	"sockfd-port P", "use socket fd ports P to P + number of workers - 1" },
+	{ NULL,	"sockfd-reuse",	 "reuse file descriptors between sender and receiver" },
 	{ NULL,	NULL,		 NULL }
 };
 
-/*
- *  stress_set_socket_fd_port()
- *	set port to use
- */
-static int stress_set_socket_fd_port(const char *opt)
-{
-	int socket_fd_port;
-
-	stress_set_net_port("sockfd-port", opt,
-		MIN_SOCKET_FD_PORT, MAX_SOCKET_FD_PORT, &socket_fd_port);
-	return stress_set_setting("sockfd-port", TYPE_ID_INT, &socket_fd_port);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sockfd_port,	stress_set_socket_fd_port },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_sockfd_port,  "sockfd-port",  TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	{ OPT_sockfd_reuse, "sockfd-reuse", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__)
@@ -65,7 +58,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
  *  stress_socket_fd_send()
  *	send a fd (fd_send) over a socket fd
  */
-static inline ssize_t stress_socket_fd_sendmsg(const int fd, const int fd_send)
+static inline ssize_t stress_socket_fd_send(const int fd, const int fd_send)
 {
 	struct iovec iov;
 	struct msghdr msg ALIGN64;
@@ -147,6 +140,7 @@ static int OPTIMIZE3 stress_socket_client(
 	const pid_t mypid,
 	const ssize_t max_fd,
 	const int socket_fd_port,
+	const bool socket_fd_reuse,
 	int *fds,
 	const size_t fds_size)
 {
@@ -163,7 +157,7 @@ static int OPTIMIZE3 stress_socket_client(
 
 		(void)shim_memset(fds, 0, fds_size);
 retry:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			return EXIT_NO_RESOURCE;
 
 		if (UNLIKELY((fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)) {
@@ -199,20 +193,31 @@ retry:
 		if (UNLIKELY(!stress_continue_flag()))
 			return EXIT_SUCCESS;
 
-		for (n = 0; stress_continue(args) && (n < max_fd); n++) {
-			int rc, nbytes;
-
+		for (n = 0; LIKELY(stress_continue(args) && (n < max_fd)); n++) {
 			fds[n] = stress_socket_fd_recv(fd);
 			if (fds[n] < 0)
 				continue;
 
-			/* Attempt to read a byte from the fd */
-			rc = ioctl(fds[n], FIONREAD, &nbytes);
-			if ((rc == 0) && (nbytes >= 1)) {
-				char data;
+#if defined(HAVE_SELECT)
+			if (socket_fd_reuse)
+				(void)stress_socket_fd_send(fd, fds[n]);
+#else
+			(void)socket_fd_reuse;
+#endif
 
-				VOID_RET(ssize_t, read(fds[n], &data, sizeof(data)));
+#if defined(FIONREAD)
+			{
+				int rc, nbytes;
+
+				/* Attempt to read a byte from the fd */
+				rc = ioctl(fds[n], FIONREAD, &nbytes);
+				if ((rc == 0) && (nbytes >= 1)) {
+					char data;
+
+					VOID_RET(ssize_t, read(fds[n], &data, sizeof(data)));
+				}
 			}
+#endif
 		}
 
 		stress_close_fds(fds, n);
@@ -241,7 +246,8 @@ static int OPTIMIZE3 stress_socket_server(
 	stress_args_t *args,
 	const pid_t ppid,
 	const ssize_t max_fd,
-	const int socket_fd_port)
+	const int socket_fd_port,
+	const bool socket_fd_reuse)
 {
 	int fd;
 	int so_reuseaddr = 1;
@@ -297,39 +303,64 @@ static int OPTIMIZE3 stress_socket_server(
 	do {
 		int sfd;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		sfd = accept(fd, (struct sockaddr *)NULL, NULL);
-		if (sfd >= 0) {
+		if (LIKELY(sfd >= 0)) {
 			ssize_t i;
 
-			for (i = 0; stress_continue(args) && (i < max_fd); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < max_fd)); i++) {
 				int new_fd;
 
+#if defined(HAVE_SELECT)
+				if (socket_fd_reuse) {
+					fd_set readfds;
+					struct timeval tv;
+					int sret;
+
+					FD_ZERO(&readfds);
+					FD_SET(sfd, &readfds);
+					tv.tv_sec = 0;
+					tv.tv_usec = 0;
+
+					sret = select(sfd + 1, &readfds, NULL, NULL, &tv);
+					if (sret > 0) {
+						new_fd = stress_socket_fd_recv(sfd);
+					} else {
+						new_fd = open("/dev/zero", O_RDWR);
+					}
+				} else {
+					new_fd = open("/dev/zero", O_RDWR);
+				}
+#else
+				(void)socket_fd_reuse;
 				new_fd = open("/dev/zero", O_RDWR);
-				if (new_fd >= 0) {
+#endif
+
+				if (LIKELY(new_fd >= 0)) {
 					ssize_t ret;
 
-					ret = stress_socket_fd_sendmsg(sfd, new_fd);
-					if ((ret < 0) &&
-					     ((errno != EAGAIN) &&
-					      (errno != EINTR) &&
-					      (errno != EWOULDBLOCK) &&
-					      (errno != ECONNRESET) &&
-					      (errno != ENOMEM) &&
+					ret = stress_socket_fd_send(sfd, new_fd);
+					if (UNLIKELY((ret < 0) &&
+						     ((errno != EAGAIN) &&
+						      (errno != EINTR) &&
+						      (errno != EWOULDBLOCK) &&
+						      (errno != ECONNRESET) &&
+						      (errno != ENOMEM) &&
 #if defined(ETOOMANYREFS)
-					      (errno != ETOOMANYREFS) &&
+						      (errno != ETOOMANYREFS) &&
 #endif
-					      (errno != EPIPE))) {
+						      (errno != EPIPE)))) {
 						pr_fail("%s: sendmsg failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
 						(void)close(new_fd);
 						break;
 					}
 					(void)close(new_fd);
-					VOID_RET(ssize_t, stress_socket_fd_sendmsg(sfd, bad_fd));
+					VOID_RET(ssize_t, stress_socket_fd_send(sfd, bad_fd));
 					msgs++;
+
 					stress_bogo_inc(args);
 				}
 			}
@@ -363,14 +394,23 @@ static int stress_sockfd(stress_args_t *args)
 	int socket_fd_port = DEFAULT_SOCKET_FD_PORT;
 	int ret = EXIT_SUCCESS, reserved_port;
 	int *fds;
+	bool socket_fd_reuse = false;
 	size_t fds_size;
 
 	if (stress_sigchld_set_handler(args) < 0)
 		return EXIT_NO_RESOURCE;
 
 	(void)stress_get_setting("sockfd-port", &socket_fd_port);
+	(void)stress_get_setting("sockfd-reuse", &socket_fd_reuse);
+
+#if !defined(HAVE_SELECT)
+	if ((socket_fd_reuse) && (stress_instance_zero(args)))
+		pr_inf("%s: select() is not supported, sockfd-reuse option is disabled\n", args->name);
+#endif
 
 	socket_fd_port += args->instance;
+	if (socket_fd_port > MAX_PORT)
+		socket_fd_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(socket_fd_port, socket_fd_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -389,26 +429,30 @@ static int stress_sockfd(stress_args_t *args)
 	 */
 	if (geteuid() == 0) {
 		max_fd -= 64;
-		max_fd /= args->num_instances ? args->num_instances : 1;
+		max_fd /= args->instances ? args->instances : 1;
 		if (max_fd < 0)
 			max_fd = 1;
 	}
+	if (max_fd > (1024 * 1024))
+		max_fd = 1024 * 1024;
 
 	fds_size = sizeof(*fds) * (size_t)max_fd;
-	fds = malloc(fds_size);
+	fds = (int *)malloc(fds_size);
 	if (!fds) {
-		pr_inf_skip("%s: cannot allocate %zd file descriptors, skipping stressor\n",
-			args->name, max_fd);
+		pr_inf_skip("%s: failed to allocate %zd file descriptors%s, skipping stressor\n",
+			args->name, max_fd, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	pid = fork();
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			ret = EXIT_SUCCESS;
 			goto finish;
 		}
@@ -418,12 +462,12 @@ again:
 		return EXIT_FAILURE;
 	} else if (pid == 0) {
 		stress_set_oom_adjustment(args, false);
-		ret = stress_socket_client(args, mypid, max_fd, socket_fd_port, fds, fds_size);
+		ret = stress_socket_client(args, mypid, max_fd, socket_fd_port, socket_fd_reuse, fds, fds_size);
 		_exit(ret);
 	} else {
 		int status;
 
-		ret = stress_socket_server(args, mypid, max_fd, socket_fd_port);
+		ret = stress_socket_server(args, mypid, max_fd, socket_fd_port, socket_fd_reuse);
 		(void)shim_kill(pid, SIGALRM);
 		(void)shim_waitpid(pid, &status, 0);
 	}
@@ -436,18 +480,18 @@ finish:
 	return ret;
 }
 
-stressor_info_t stress_sockfd_info = {
+const stressor_info_t stress_sockfd_info = {
 	.stressor = stress_sockfd,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sockfd_info = {
+const stressor_info_t stress_sockfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

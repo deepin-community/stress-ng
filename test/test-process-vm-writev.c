@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,9 +28,9 @@ int main(void)
 	pid_t pid = 0;
 	struct iovec local_iov = { 0 };
 	struct iovec remote_iov = { 0 };
-	unsigned long liovcnt = 1;
-	unsigned long riovcnt = 1;
-	unsigned long flags = 0;
+	unsigned long int liovcnt = 1;
+	unsigned long int riovcnt = 1;
+	unsigned long int flags = 0;
 
 	return process_vm_writev(pid, &local_iov, liovcnt, &remote_iov, riovcnt, flags);
 }

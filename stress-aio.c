@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,8 +29,8 @@
 #define BUFFER_SZ		(16)
 
 static const stress_help_t help[] = {
-	{ NULL,	"aio N",	"start N workers that issue async I/O requests" },
-	{ NULL,	"aio-ops N",	"stop after N bogo async I/O requests" },
+	{ NULL,	"aio N",	  "start N workers that issue async I/O requests" },
+	{ NULL,	"aio-ops N",	  "stop after N bogo async I/O requests" },
 	{ NULL, "aio-requests N", "number of async I/O requests per worker" },
 	{ NULL,	NULL,		NULL }
 };
@@ -53,19 +53,9 @@ typedef struct {
 static volatile bool do_accounting = true;
 #endif
 
-static int stress_set_aio_requests(const char *opt)
-{
-	uint32_t aio_requests;
-
-	aio_requests = stress_get_uint32(opt);
-	stress_check_range("aio-requests", (uint64_t)aio_requests,
-		MIN_AIO_REQUESTS, MAX_AIO_REQUESTS);
-	return stress_set_setting("aio-requests", TYPE_ID_UINT32, &aio_requests);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_aio_requests,	stress_set_aio_requests },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_aio_requests, "aio-requests", TYPE_ID_UINT32, MIN_AIO_REQUESTS, MAX_AIO_REQUESTS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_RT) &&	\
@@ -139,7 +129,7 @@ static void aio_issue_cancel(const char *name, stress_io_req_t *io_req)
 			(void)shim_usleep_interruptible(250000);
 			break;
 		default:
-			pr_fail("%s: %d error: %d %s\n",
+			pr_fail("%s: %d aio_error(), errno=%d %s\n",
 				name, io_req->request,
 				errno, strerror(errno));
 			break;
@@ -179,7 +169,7 @@ static int issue_aio_request(
 			    (errno == EINTR) ||
 			    (errno == EBUSY))
 				continue;
-			pr_fail("%s: failed to issue aio request: %d (%s)\n",
+			pr_fail("%s: failed to issue aio request, errno=%d (%s)\n",
 				name, errno, strerror(errno));
 		}
 		return ret;
@@ -219,7 +209,7 @@ static int issue_aio_sync_request(
 		if (ret < 0) {
 			if ((errno == EAGAIN) || (errno == EINTR))
 				continue;
-			pr_fail("%s: failed to issue aio request: %d (%s)\n",
+			pr_fail("%s: failed to issue aio request, errno=%d (%s)\n",
 				name, errno, strerror(errno));
 		}
 		return ret;
@@ -240,7 +230,7 @@ static int stress_aio(stress_args_t *args)
 	struct sigaction sa, sa_old;
 	char filename[PATH_MAX];
 	uint32_t total = 0, i, opt_aio_requests = DEFAULT_AIO_REQUESTS;
-	double t1 = 0.0, t2 = 0.0, dt;
+	double t1 = 0.0, t2 = 0.0, dt, rate;
 	const char *fs_type;
 
 	if (!stress_get_setting("aio-requests", &opt_aio_requests)) {
@@ -250,7 +240,7 @@ static int stress_aio(stress_args_t *args)
 			opt_aio_requests = MIN_AIO_REQUESTS;
 	}
 
-	if ((io_reqs = calloc(opt_aio_requests, sizeof(*io_reqs))) == NULL) {
+	if ((io_reqs = (stress_io_req_t *)calloc(opt_aio_requests, sizeof(*io_reqs))) == NULL) {
 		pr_inf_skip("%s: cannot allocate %" PRIu32 " io request "
 			    "structures, skipping stressor\n", args->name, opt_aio_requests);
 		return EXIT_NO_RESOURCE;
@@ -297,13 +287,16 @@ static int stress_aio(stress_args_t *args)
 			goto cancel;
 		}
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t1 = stress_time_now();
 	do {
 		(void)shim_usleep_interruptible(250000); /* wait until a signal occurs */
 
-		for (i = 0; stress_continue(args) && (i < opt_aio_requests); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < opt_aio_requests)); i++) {
 			if (io_reqs[i].status != EINPROGRESS)
 				continue;
 
@@ -368,30 +361,28 @@ finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	free(io_reqs);
 
-	pr_dbg("%s: total of %" PRIu32 " async I/O signals "
-		"caught (instance %d)\n",
-		args->name, total, args->instance);
-
 	dt = t2 - t1;
-	if (dt > 0.0)
-		stress_metrics_set(args, 0, "async I/O signals per sec",
-			(double)total / dt, STRESS_HARMONIC_MEAN);
+	rate = (dt > 0.0) ? (double)total / dt : 0.0;
+	stress_metrics_set(args, 0, "async I/O signals per sec",
+			rate, STRESS_METRIC_HARMONIC_MEAN);
+	stress_metrics_set(args, 1, "async I/O signals",
+			(double)total, STRESS_METRIC_TOTAL);
 	(void)stress_temp_dir_rm_args(args);
 	return rc;
 }
 
-stressor_info_t stress_aio_info = {
+const stressor_info_t stress_aio_info = {
 	.stressor = stress_aio,
-	.class = CLASS_IO | CLASS_INTERRUPT | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_INTERRUPT | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_aio_info = {
+const stressor_info_t stress_aio_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_IO | CLASS_INTERRUPT | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_INTERRUPT | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without aio.h"

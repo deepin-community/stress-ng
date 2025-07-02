@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,8 +17,10 @@
  *
  */
 #include "stress-ng.h"
+#include "core-asm-arm.h"
 #include "core-affinity.h"
 #include "core-arch.h"
+#include "core-builtin.h"
 #include "core-cpu-cache.h"
 #include "core-killpid.h"
 
@@ -49,8 +51,62 @@ typedef struct peterson {
 } peterson_t;
 
 static peterson_t *peterson;
+static sigjmp_buf jmp_env;
 
-static void stress_peterson_p0(stress_args_t *args)
+static inline void ALWAYS_INLINE peterson_mfence(void)
+{
+	shim_mfence();
+}
+
+static inline void ALWAYS_INLINE peterson_mbarrier(void)
+{
+#if defined(HAVE_ASM_ARM_DMB_SY)
+	stress_asm_arm_dmb_sy();
+#endif
+}
+
+static void stress_peterson_sigill_handler(int signum)
+{
+	(void)signum;
+
+	siglongjmp(jmp_env, 1);
+}
+
+static int stress_peterson_supported(const char *name)
+{
+	static struct sigaction act, oldact;
+	int ret;
+
+	(void)shim_memset(&act, 0, sizeof(act));
+	(void)shim_memset(&oldact, 0, sizeof(oldact));
+
+	ret = sigsetjmp(jmp_env, 1);
+	if (ret == 1) {
+		pr_inf_skip("%s: memory barrier not functional, skipping stressor\n", name);
+		(void)sigaction(SIGILL, &oldact, &act);
+		return -1;
+	}
+
+	act.sa_handler = stress_peterson_sigill_handler;
+        (void)sigemptyset(&act.sa_mask);
+        act.sa_flags = SA_NOCLDSTOP;
+	if (sigaction(SIGILL, &act, &oldact) < 0) {
+		pr_inf_skip("%s: sigaction for SIGILL failed, skipping stressor\n",
+			name);
+		return -1;
+	}
+
+	peterson_mbarrier();
+
+	if (sigaction(SIGILL, &oldact, NULL) < 0) {
+		pr_inf_skip("%s: sigaction for SIGILL failed, skipping stressor\n",
+			name);
+		return -1;
+	}
+	return 0;
+}
+
+static int stress_peterson_p0(stress_args_t *args)
 {
 	int check0, check1;
 	double t;
@@ -58,10 +114,11 @@ static void stress_peterson_p0(stress_args_t *args)
 	t = stress_time_now();
 	peterson->m.flag[0] = true;
 	peterson->m.turn = 1;
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 	while (peterson->m.flag[1] && (peterson->m.turn == 1)) {
 #if defined(STRESS_ARCH_RISCV)
-		shim_sched_yield();
+		(void)shim_sched_yield();
 #endif
 	}
 
@@ -70,21 +127,25 @@ static void stress_peterson_p0(stress_args_t *args)
 	peterson->m.check++;
 	check1 = peterson->m.check;
 #if defined(STRESS_ARCH_ARM)
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 #endif
 
 	peterson->m.flag[0] = false;
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 	peterson->p0.duration += stress_time_now() - t;
 	peterson->p0.count += 1.0;
 
-	if (check0 + 1 != check1) {
+	if (UNLIKELY(check0 + 1 != check1)) {
 		pr_fail("%s p0: peterson mutex check failed %d vs %d\n",
 			args->name, check0 + 1, check1);
+		return EXIT_FAILURE;
 	}
+	return EXIT_SUCCESS;
 }
 
-static void stress_peterson_p1(stress_args_t *args)
+static int stress_peterson_p1(stress_args_t *args)
 {
 	int check0, check1;
 	double t;
@@ -92,10 +153,11 @@ static void stress_peterson_p1(stress_args_t *args)
 	t = stress_time_now();
 	peterson->m.flag[1] = true;
 	peterson->m.turn = 0;
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 	while (peterson->m.flag[0] && (peterson->m.turn == 0)) {
 #if defined(STRESS_ARCH_RISCV)
-		shim_sched_yield();
+		(void)shim_sched_yield();
 #endif
 	}
 
@@ -104,19 +166,23 @@ static void stress_peterson_p1(stress_args_t *args)
 	peterson->m.check--;
 	check1 = peterson->m.check;
 #if defined(STRESS_ARCH_ARM)
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 #endif
 	stress_bogo_inc(args);
 
 	peterson->m.flag[1] = false;
-	shim_mfence();
+	peterson_mfence();
+	peterson_mbarrier();
 	peterson->p1.duration += stress_time_now() - t;
 	peterson->p1.count += 1.0;
 
-	if (check0 - 1 != check1) {
+	if (UNLIKELY(check0 - 1 != check1)) {
 		pr_fail("%s p1: peterson mutex check failed %d vs %d\n",
 			args->name, check0 - 1, check1);
+		return EXIT_FAILURE;
 	}
+	return EXIT_SUCCESS;
 }
 
 /*
@@ -128,16 +194,25 @@ static int stress_peterson(stress_args_t *args)
 	const size_t sz = STRESS_MAXIMUM(args->page_size, sizeof(*peterson));
 	pid_t pid;
 	double duration, count, rate;
-	int parent_cpu;
+	int parent_cpu, rc = EXIT_SUCCESS;
 
 	peterson = (peterson_t *)stress_mmap_populate(NULL, sz,
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (peterson == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %zd bytes for bekker shared struct, skipping stressor\n",
-			args->name, sz);
+		pr_inf_skip("%s: cannot mmap %zu bytes for peterson shared struct%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, sz, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(peterson, sz, "peterson-lock");
+
+	stress_zero_metrics(&peterson->p0, 1);
+	stress_zero_metrics(&peterson->p1, 1);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	peterson->m.flag[0] = false;
@@ -151,14 +226,25 @@ static int stress_peterson(stress_args_t *args)
 	} else if (pid == 0) {
 		/* Child */
 		(void)stress_change_cpu(args, parent_cpu);
-		while (stress_continue(args))
-			stress_peterson_p0(args);
-		_exit(0);
+		while (stress_continue(args)) {
+			rc = stress_peterson_p0(args);
+			if (UNLIKELY(rc != EXIT_SUCCESS))
+				break;
+		}
+		_exit(rc);
 	} else {
+		int status;
+
 		/* Parent */
-		while (stress_continue(args))
-			stress_peterson_p1(args);
-		(void)stress_kill_pid_wait(pid, NULL);
+		while (stress_continue(args)) {
+			rc = stress_peterson_p1(args);
+			if (UNLIKELY(rc != EXIT_SUCCESS))
+				break;
+		}
+		if (stress_kill_pid_wait(pid, &status) >= 0) {
+			if (WIFEXITED(status))
+				rc = WEXITSTATUS(status);
+                }
 	}
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -167,25 +253,26 @@ static int stress_peterson(stress_args_t *args)
 	count = peterson->p0.count + peterson->p1.count;
 	rate = (count > 0.0) ? (duration / count) : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per mutex",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)peterson, sz);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_peterson_info = {
+const stressor_info_t stress_peterson_info = {
 	.stressor = stress_peterson,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE | CLASS_IPC,
 	.verify = VERIFY_ALWAYS,
+	.supported = stress_peterson_supported,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_peterson_info = {
+const stressor_info_t stress_peterson_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU | CLASS_IPC,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without user space memory fencing"

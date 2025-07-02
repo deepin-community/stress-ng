@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,7 +25,6 @@
 #define MAX_FSTAT_THREADS	(4)
 #define FSTAT_LOOPS		(16)
 
-static volatile bool keep_running;
 static sigset_t set;
 
 static const stress_help_t help[] = {
@@ -36,7 +35,7 @@ static const stress_help_t help[] = {
 };
 
 /* paths we should never stat */
-static const char *blocklist[] = {
+static const char * const blocklist[] = {
 	"/dev/watchdog"
 };
 
@@ -70,23 +69,6 @@ typedef struct ctxt {
 	uid_t euid;			/* euid of process */
 	int bad_fd;			/* bad/invalid fd */
 } stress_fstat_context_t;
-
-static int stress_set_fstat_dir(const char *opt)
-{
-	return stress_set_setting("fstat-dir", TYPE_ID_STR, opt);
-}
-
-/*
- *  handle_fstat_sigalrm()
- *      catch SIGALRM
- */
-static void MLOCKED_TEXT handle_fstat_sigalrm(int signum)
-{
-	(void)signum;
-
-	keep_running = false;
-	stress_continue_set_flag(false);
-}
 
 /*
  *  do_not_stat()
@@ -215,7 +197,6 @@ static int stress_fstat_helper(const stress_fstat_context_t *ctxt)
  */
 static void *stress_fstat_thread(void *ptr)
 {
-	static void *nowt = NULL;
 	stress_fstat_pthread_info_t *pthread_info = (stress_fstat_pthread_info_t *)ptr;
 	const stress_fstat_context_t *ctxt = pthread_info->ctxt;
 
@@ -228,21 +209,23 @@ static void *stress_fstat_thread(void *ptr)
 #if !defined(__APPLE__)
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 #endif
-	while (keep_running && stress_continue_flag()) {
+	stress_random_small_sleep();
+
+	while (LIKELY(stress_continue_flag())) {
 		size_t i;
 
 		for (i = 0; i < FSTAT_LOOPS; i++) {
-			if (!stress_continue_flag())
-				break;
 			if (stress_fstat_helper(ctxt) < 0) {
 				pthread_info->pthread_ret = -1;
 				break;
 			}
+			if (UNLIKELY(!stress_continue_flag()))
+				break;
 		}
 		(void)shim_sched_yield();
 	}
 
-	return &nowt;
+	return &g_nowt;
 }
 #endif
 
@@ -265,7 +248,6 @@ static int stress_fstat_threads(stress_args_t *args, stress_stat_info_t *si, con
 	stress_fstat_pthread_info_t pthreads[MAX_FSTAT_THREADS];
 #endif
 
-	keep_running = true;
 #if defined(HAVE_LIB_PTHREAD)
 	(void)shim_memset(pthreads, 0, sizeof(pthreads));
 
@@ -277,14 +259,13 @@ static int stress_fstat_threads(stress_args_t *args, stress_stat_info_t *si, con
 	}
 #endif
 	for (i = 0; i < FSTAT_LOOPS; i++) {
-		if (!stress_continue_flag())
-			break;
 		if (stress_fstat_helper(&ctxt) < 0) {
 			rc = -1;
 			break;
 		}
+		if (UNLIKELY(!stress_continue_flag()))
+			break;
 	}
-	keep_running = false;
 
 #if defined(HAVE_LIB_PTHREAD)
 	for (i = 0; i < MAX_FSTAT_THREADS; i++) {
@@ -306,7 +287,7 @@ static int stress_fstat(stress_args_t *args)
 {
 	stress_stat_info_t *si;
 	static stress_stat_info_t *stat_info;
-	struct dirent *d;
+	const struct dirent *d;
 	NOCLOBBER int ret = EXIT_FAILURE;
 	bool stat_some;
 	const uid_t euid = geteuid();
@@ -315,11 +296,8 @@ static int stress_fstat(stress_args_t *args)
 
 	(void)stress_get_setting("fstat-dir", &fstat_dir);
 
-	if (stress_sighandler(args->name, SIGALRM, handle_fstat_sigalrm, NULL) < 0)
-		return EXIT_FAILURE;
-
 	if ((dp = opendir(fstat_dir)) == NULL) {
-		pr_err("%s: opendir on %s failed: errno=%d: (%s)\n",
+		pr_err("%s: opendir on %s failed, errno=%d: (%s)\n",
 			args->name, fstat_dir, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -328,7 +306,7 @@ static int stress_fstat(stress_args_t *args)
 	while ((d = readdir(dp)) != NULL) {
 		char path[PATH_MAX];
 
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			ret = EXIT_SUCCESS;
 			(void)closedir(dp);
 			goto free_cache;
@@ -337,13 +315,17 @@ static int stress_fstat(stress_args_t *args)
 		(void)stress_mk_filename(path, sizeof(path), fstat_dir, d->d_name);
 		if (do_not_stat(path))
 			continue;
-		if ((si = calloc(1, sizeof(*si))) == NULL) {
-			pr_err("%s: out of memory\n", args->name);
+		if ((si = (stress_stat_info_t *)calloc(1, sizeof(*si))) == NULL) {
+			pr_err("%s: out of memory allocating %zu bytes%s\n",
+				args->name, sizeof(*si),
+				stress_get_memfree_str());
 			(void)closedir(dp);
 			goto free_cache;
 		}
-		if ((si->path = strdup(path)) == NULL) {
-			pr_err("%s: out of memory\n", args->name);
+		if ((si->path = shim_strdup(path)) == NULL) {
+			pr_err("%s: out of memory allocating %zu bytes%s\n",
+				args->name, strlen(path),
+				stress_get_memfree_str());
 			free(si);
 			(void)closedir(dp);
 			goto free_cache;
@@ -356,13 +338,15 @@ static int stress_fstat(stress_args_t *args)
 	(void)closedir(dp);
 
 	(void)sigfillset(&set);
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		stat_some = false;
 
-		for (si = stat_info; si && stress_continue_flag(); si = si->next) {
-			if (!stress_continue(args))
+		for (si = stat_info; LIKELY(si && stress_continue_flag()); si = si->next) {
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			if (si->ignore == IGNORE_ALL)
 				continue;
@@ -390,15 +374,15 @@ free_cache:
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fstat_dir,	stress_set_fstat_dir },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_fstat_dir, "fstat-dir", TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_fstat_info = {
+const stressor_info_t stress_fstat_info = {
 	.stressor = stress_fstat,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

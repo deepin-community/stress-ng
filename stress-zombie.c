@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -46,10 +46,10 @@ static const stress_help_t help[] = {
 };
 
 /*
- *  stress_pid_not_a_zombie()
- *	return true if we are 100% sure the process is not a zombie
+ *  stress_pid_a_zombie()
+ *	return false if we are 100% sure the process not a zombie
  */
-static bool stress_pid_not_a_zombie(const pid_t pid)
+static bool stress_pid_a_zombie(const pid_t pid)
 {
 #if defined(__linux__)
 	char path[PATH_MAX];
@@ -60,18 +60,18 @@ static bool stress_pid_not_a_zombie(const pid_t pid)
 	(void)snprintf(path, sizeof(path), "/proc/%" PRIdMAX "/stat", (intmax_t)pid);
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
-		return false;	/* Unknown */
+		return true;	/* Unknown */
 	n = read(fd, buf, sizeof(buf));
 	(void)close(fd);
 	if (n < 0)
-		return false;	/* Unknown */
+		return true;	/* Unknown */
 	while (*ptr) {
 		if (*ptr == ')')
 			break;
 		ptr++;
 	}
 	if (!*ptr)
-		return false;	/* Unknown */
+		return true;	/* Unknown */
 	ptr++;
 	while (*ptr) {
 		if (*ptr != ' ')
@@ -79,14 +79,14 @@ static bool stress_pid_not_a_zombie(const pid_t pid)
 		ptr++;
 	}
 	if (!*ptr)
-		return false;	/* Unknown */
+		return true;	/* Unknown */
 
 	/* Process should not be in runnable state */
-	return (*ptr == 'R');
+	return (*ptr == 'Z');
 #else
 	(void)pid;
 
-	return false; 	/* No idea */
+	return true; 	/* No idea */
 #endif
 }
 
@@ -104,7 +104,7 @@ static stress_zombie_t *stress_zombie_new(void)
 		zombies.free = new->next;
 		new->next = NULL;
 	} else {
-		new = calloc(1, sizeof(*new));
+		new = (stress_zombie_t *)calloc(1, sizeof(*new));
 		if (!new)
 			return NULL;
 	}
@@ -136,9 +136,20 @@ static void stress_zombie_head_remove(stress_args_t *args, const bool check)
 
 		if (verify && check) {
 			if (pid > 1) {
-				(void)stress_kill_pid(pid);
-				if (stress_pid_not_a_zombie(pid))
-					pr_fail("%s: PID %jd is not in the expected zombie state\n",
+				uint64_t usec = 1;
+				bool zombie = false;
+
+				while (usec <= 262144) {
+					(void)stress_kill_pid(pid);
+					if (stress_pid_a_zombie(pid)) {
+						zombie = true;
+						break;
+					}
+					(void)shim_usleep(usec);
+					usec <<= 1ULL;
+				}
+				if (!zombie)
+					pr_fail("%s: PID %" PRIdMAX " is not in the expected zombie state\n",
 						args->name, (intmax_t)pid);
 			}
 		}
@@ -182,20 +193,6 @@ static void stress_zombie_free(void)
 }
 
 /*
- *  stress_set_zombie_max()
- *	set maximum number of zombies allowed
- */
-static int stress_set_zombie_max(const char *opt)
-{
-	uint32_t zombie_max;
-
-	zombie_max = stress_get_uint32(opt);
-	stress_check_range("zombie-max", (uint64_t)zombie_max,
-		MIN_ZOMBIES, MAX_ZOMBIES);
-	return stress_set_setting("zombie-max", TYPE_ID_INT32, &zombie_max);
-}
-
-/*
  *  stress_zombie()
  *	stress by zombieing and exiting
  */
@@ -211,6 +208,8 @@ static int stress_zombie(stress_args_t *args)
 			zombie_max = MIN_ZOMBIES;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -253,7 +252,7 @@ static int stress_zombie(stress_args_t *args)
 	} while (stress_continue(args));
 
 	stress_metrics_set(args, 0, "created zombies per stressor",
-		(double)max_zombies, STRESS_HARMONIC_MEAN);
+		(double)max_zombies, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -267,15 +266,15 @@ static int stress_zombie(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_zombie_max,	stress_set_zombie_max },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_zombie_max, "zombie-max", TYPE_ID_INT32, MIN_ZOMBIES, MAX_ZOMBIES, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_zombie_info = {
+const stressor_info_t stress_zombie_info = {
 	.stressor = stress_zombie,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

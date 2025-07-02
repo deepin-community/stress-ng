@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,8 +29,6 @@
 UNEXPECTED
 #endif
 
-#define MIN_SOCKMANY_PORT	(1024)
-#define MAX_SOCKMANY_PORT	(65535)
 #define DEFAULT_SOCKET_MANY_PORT (11000)
 
 #define SOCKET_MANY_BUF		(8)
@@ -49,23 +47,11 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_sockmany_port()
- *	set port to use
- */
-static int stress_set_sockmany_port(const char *opt)
-{
-	int sockmany_port;
-
-	stress_set_net_port("sockmany-port", opt,
-		MIN_SOCKMANY_PORT, MAX_SOCKMANY_PORT, &sockmany_port);
-	return stress_set_setting("sockmany-port", TYPE_ID_INT, &sockmany_port);
-}
-
-static int stress_set_sockmany_if(const char *name)
-{
-	return stress_set_setting("sockmany-if", TYPE_ID_STR, name);
-}
+static const stress_opt_t opts[] = {
+	{ OPT_sockmany_if,   "sockmany-if",   TYPE_ID_STR, 0, 0, NULL },
+	{ OPT_sockmany_port, "sockmany-port", TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	END_OPT,
+};
 
 /*
  *  stress_sockmany_cleanup()
@@ -142,17 +128,16 @@ retry:
 				(void)close(fds[i]);
 
 				/* Run out of resources? */
-				if (errno == EADDRNOTAVAIL)
+				if (save_errno == EADDRNOTAVAIL)
 					break;
 
 				(void)shim_usleep(10000);
 				retries++;
-				if (retries > 100) {
+				if (UNLIKELY(retries > 100)) {
 					/* Give up.. */
 					stress_sockmany_cleanup(fds, i);
-					errno = save_errno;
 					pr_fail("%s: connect failed, errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+						args->name, save_errno, strerror(save_errno));
 					return EXIT_FAILURE;
 				}
 				goto retry;
@@ -232,7 +217,7 @@ static int OPTIMIZE3 stress_sockmany_server(
 	do {
 		int sfd;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		sfd = accept(fd, (struct sockaddr *)NULL, NULL);
@@ -330,6 +315,8 @@ static int stress_sockmany(stress_args_t *args)
 	}
 
 	sockmany_port += args->instance;
+	if (sockmany_port > MAX_PORT)
+		sockmany_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(sockmany_port, sockmany_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -345,16 +332,21 @@ static int stress_sockmany(stress_args_t *args)
 		PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (sock_fds == MAP_FAILED) {
-		pr_inf("%s: could not allocate share memory, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf("%s: failed to mmap %zu byte shared memory%s, errno=%d (%s), "
+			"skipping stressor\n",
+			args->name, sizeof(*sock_fds),
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(sock_fds, sizeof(*sock_fds), "sock-fds");
 
 	if (stress_sighandler(args->name, SIGPIPE, stress_sockmany_sigpipe_handler, NULL) < 0) {
 		(void)munmap((void *)sock_fds, sizeof(*sock_fds));
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -362,7 +354,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto finish;
 		}
@@ -388,16 +380,10 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sockmany_if,	stress_set_sockmany_if },
-	{ OPT_sockmany_port,	stress_set_sockmany_port },
-	{ 0,			NULL },
-};
-
-stressor_info_t stress_sockmany_info = {
+const stressor_info_t stress_sockmany_info = {
 	.stressor = stress_sockmany,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

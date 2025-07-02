@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,8 +19,8 @@
 #ifndef CORE_ASM_S390_H
 #define CORE_ASM_S390_H
 
-#include "stress-ng.h"
 #include "core-arch.h"
+#include "core-attribute.h"
 
 #if defined(STRESS_ARCH_S390)
 

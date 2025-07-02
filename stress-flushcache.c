@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,6 +36,7 @@ static const stress_help_t help[] = {
      defined(STRESS_ARCH_ARM) ||	\
      defined(STRESS_ARCH_RISCV) ||	\
      defined(STRESS_ARCH_S390) ||	\
+     defined(STRESS_ARCH_PPC) ||	\
      defined(STRESS_ARCH_PPC64)) &&	\
      defined(HAVE_MPROTECT) &&		\
      ((defined(HAVE_COMPILER_GCC_OR_MUSL) && NEED_GNUC(4,6,0)) ||	\
@@ -75,7 +76,7 @@ static int stress_flushcache_mprotect(
 
 	ret = mprotect(addr, size, prot);
 	if (ret < 0) {
-		pr_inf("%s: mprotect failed on text page %p: errno=%d (%s)\n",
+		pr_inf("%s: mprotect failed on text page %p, errno=%d (%s)\n",
 			args->name, addr, errno, strerror(errno));
 	}
 	return ret;
@@ -103,7 +104,8 @@ static inline void clear_cache_page(
 }
 #endif
 
-#if defined(HAVE_ASM_PPC64_DCBST)
+#if defined(STRESS_ARCH_PPC64) &&	\
+    defined(HAVE_ASM_PPC64_DCBST)
 static inline void dcbst_page(
 	void *addr,
 	const size_t page_size,
@@ -116,6 +118,25 @@ static inline void dcbst_page(
 		(*(volatile uint8_t *)ptr)++;
 		(*(volatile uint8_t *)ptr)--;
 		stress_asm_ppc64_dcbst((void *)ptr);
+		ptr += cl_size;
+	}
+}
+#endif
+
+#if defined(STRESS_ARCH_PPC) &&	\
+    defined(HAVE_ASM_PPC_DCBST)
+static inline void dcbst_page(
+	void *addr,
+	const size_t page_size,
+	const size_t cl_size)
+{
+	register uint8_t *ptr = (uint8_t *)addr;
+	const uint8_t *ptr_end = ptr + page_size;
+
+	while (ptr < ptr_end) {
+		(*(volatile uint8_t *)ptr)++;
+		(*(volatile uint8_t *)ptr)--;
+		stress_asm_ppc_dcbst((void *)ptr);
 		ptr += cl_size;
 	}
 }
@@ -179,20 +200,23 @@ static inline int stress_flush_icache(
 	if (stress_flushcache_mprotect(args, page_addr, context->i_size, PROT_READ | PROT_WRITE | PROT_EXEC) < 0)
 		return -1;
 
-	while ((ptr < ptr_end) && stress_continue_flag()) {
+	while (LIKELY((ptr < ptr_end) && stress_continue_flag())) {
 		volatile uint8_t *vptr = (volatile uint8_t *)ptr;
-		uint8_t val;
+		const uint8_t val = *vptr;
 
-		val = *vptr;
 		*vptr ^= ~0;
 		shim_flush_icache((char *)ptr, (char *)ptr + cl_size);
 #if defined(HAVE_ASM_PPC64_ICBI)
 		stress_asm_ppc64_icbi((void *)ptr);
+#elif defined(HAVE_ASM_PPC_ICBI)
+		stress_asm_ppc_icbi((void *)ptr);
 #endif
 		*vptr = val;
 		shim_flush_icache((char *)ptr, (char *)ptr + cl_size);
 #if defined(HAVE_ASM_PPC64_ICBI)
 		stress_asm_ppc64_icbi((void *)ptr);
+#elif defined(HAVE_ASM_PPC_ICBI)
+		stress_asm_ppc_icbi((void *)ptr);
 #endif
 		ptr += cl_size;
 	}
@@ -218,6 +242,7 @@ static inline int stress_flush_dcache(
 	const size_t page_size = args->page_size;
 #if defined(HAVE_ASM_X86_CLFLUSH) ||	\
     defined(HAVE_ASM_X86_CLDEMOTE) ||	\
+    defined(HAVE_ASM_PPC_DCBST) ||	\
     defined(HAVE_ASM_PPC64_DCBST)
 	const size_t cl_size = context->cl_size;
 #endif
@@ -225,7 +250,7 @@ static inline int stress_flush_dcache(
 	register uint8_t *ptr = (uint8_t *)d_addr;
 	const uint8_t *ptr_end = ptr + d_size;
 
-	while ((ptr < ptr_end) && stress_continue_flag()) {
+	while (LIKELY((ptr < ptr_end) && stress_continue_flag())) {
 #if defined(HAVE_ASM_X86_CLFLUSH)
 		if (context->x86_clfsh)
 			clflush_page((void *)ptr, page_size, cl_size);
@@ -235,7 +260,8 @@ static inline int stress_flush_dcache(
 		if (context->x86_demote)
 			cldemote_page((void *)ptr, page_size, cl_size);
 #endif
-#if defined(HAVE_ASM_PPC64_DCBST)
+#if defined(HAVE_ASM_PPC_DCBST) ||	\
+    defined(HAVE_ASM_PPC64_DCBST)
 		dcbst_page((void *)ptr, page_size, cl_size);
 #endif
 		shim_cacheflush((void *)ptr, page_size, SHIM_DCACHE);
@@ -252,15 +278,18 @@ static int stress_flushcache_child(stress_args_t *args, void *ctxt)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (context->d_addr == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap %zd bytes, skipping stressor\n",
-			args->name, context->d_size);
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, skipping stressor\n",
+			args->name, context->d_size, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(context->d_addr, context->d_size, "d-cache");
 
 	if (context->i_addr)
 		(void)stress_flushcache_nohugepage(context->i_addr, context->i_size);
 	(void)stress_flushcache_nohugepage(context->d_addr, context->d_size);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -300,10 +329,11 @@ static int stress_flushcache(stress_args_t *args)
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (context.i_addr == MAP_FAILED) {
-		pr_inf_skip("%s: could not mmap %zd sized page, skipping stressor\n",
-			args->name, page_size);
+		pr_inf_skip("%s: could not mmap %zu sized page%s, skipping stressor\n",
+			args->name, page_size, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(context.i_addr, page_size, "i-cache");
 	context.icache_func = (stress_ret_func_t)context.i_addr;
 	context.i_size = page_size;
 
@@ -316,8 +346,8 @@ static int stress_flushcache(stress_args_t *args)
 		context.cl_size = 64;
 
 	context.d_size *= numa_nodes;
-	if ((args->instance == 0) && (numa_nodes > 1))
-		pr_inf("%s: scaling cache size by number of numa nodes %d to %zdK\n",
+	if (stress_instance_zero(args) && (numa_nodes > 1))
+		pr_inf("%s: scaling cache size by number of numa nodes %d to %zuK\n",
 			args->name, numa_nodes, context.d_size / 1024);
 	ret = stress_oomable_child(args, (void *)&context, stress_flushcache_child, STRESS_OOMABLE_NORMAL);
 
@@ -325,16 +355,16 @@ static int stress_flushcache(stress_args_t *args)
 	return ret;
 }
 
-stressor_info_t stress_flushcache_info = {
+const stressor_info_t stress_flushcache_info = {
 	.stressor = stress_flushcache,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.supported = stress_asm_ret_supported,
 	.help = help
 };
 #else
-stressor_info_t stress_flushcache_info = {
+const stressor_info_t stress_flushcache_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.supported = stress_asm_ret_supported,
 	.help = help,
 	.unimplemented_reason = "built without cache flush support"

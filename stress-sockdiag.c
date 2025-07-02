@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -181,20 +181,20 @@ static int sockdiag_send(stress_args_t *args, const int fd)
 		for (i = 0; i < 32; i++) {
 			request.udr.udiag_show = 1U << i;
 			ret = sendmsg(fd, &msg, 0);
-			if (ret > 0)
+			if (LIKELY(ret > 0))
 				return 1;
 			if (LIKELY(errno != EINTR))
 				return -1;
 		}
 		request.udr.udiag_show = ~0U;
 		ret = sendmsg(fd, &msg, 0);
-		if (ret > 0)
+		if (LIKELY(ret > 0))
 			return 1;
 		if (LIKELY(errno != EINTR))
 			return -1;
 
 		family++;
-		if (family >= SIZEOF_ARRAY(families))
+		if (UNLIKELY(family >= SIZEOF_ARRAY(families)))
 			family = 0;
 	}
 
@@ -210,7 +210,7 @@ static int stress_sockdiag_parse(
 	unsigned int rta_len;
 	uint32_t count = 0;
 
-	if (len < NLMSG_LENGTH(sizeof(*diag))) {
+	if (UNLIKELY(len < NLMSG_LENGTH(sizeof(*diag)))) {
 		/* short response, ignore for now */
 		return 0;
 	}
@@ -257,7 +257,7 @@ static int sockdiag_recv(stress_args_t *args, const int fd)
 				continue;
 			return -1;
 		}
-		if (!NLMSG_OK(h, ret))
+		if (UNLIKELY(!NLMSG_OK(h, ret)))
 			return -1;
 
 		for (; NLMSG_OK(h, ret); h = NLMSG_NEXT(h, ret)) {
@@ -283,35 +283,37 @@ static int sockdiag_recv(stress_args_t *args, const int fd)
  */
 static int stress_sockdiag(stress_args_t *args)
 {
-	int ret = EXIT_SUCCESS;
+	int rc = EXIT_SUCCESS;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		int fd, rc;
+		int fd, ret;
 
 		fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_SOCK_DIAG);
 		if (UNLIKELY(fd < 0)) {
 			if (errno == EPROTONOSUPPORT) {
-				if (args->instance == 0)
+				if (stress_instance_zero(args))
 					pr_inf_skip("%s: NETLINK_SOCK_DIAG not supported, skipping stressor\n",
 						args->name);
-				ret = EXIT_NOT_IMPLEMENTED;
+				rc  = EXIT_NOT_IMPLEMENTED;
 				break;
 			}
-			pr_fail("%s: NETLINK_SOCK_DIAG open failed: errno=%d (%s)\n",
+			pr_fail("%s: NETLINK_SOCK_DIAG open failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-			ret = EXIT_FAILURE;
+			rc = EXIT_FAILURE;
 			break;
 		}
-		rc = sockdiag_send(args, fd);
-		if (UNLIKELY(rc < 0)) {
-			pr_fail("%s: NETLINK_SOCK_DIAG send query failed: errno=%d (%s)\n",
+		ret = sockdiag_send(args, fd);
+		if (UNLIKELY(ret < 0)) {
+			pr_fail("%s: NETLINK_SOCK_DIAG send query failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-			ret = EXIT_FAILURE;
+			rc = EXIT_FAILURE;
 			(void)close(fd);
 			break;
-		} else if (rc == 0) {
+		} else if (ret == 0) {
 			/* Nothing sent or timed out? */
 			(void)close(fd);
 			break;
@@ -322,19 +324,19 @@ static int stress_sockdiag(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return ret;
+	return rc;
 }
 
-stressor_info_t stress_sockdiag_info = {
+const stressor_info_t stress_sockdiag_info = {
 	.stressor = stress_sockdiag,
-	.class = CLASS_NETWORK | CLASS_OS,
+	.classifier = CLASS_NETWORK | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sockdiag_info = {
+const stressor_info_t stress_sockdiag_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
+	.classifier = CLASS_NETWORK | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/sock_diag.h, linux/netlink.h, linux/rtnetlink.h or linux/unix_diag.h"

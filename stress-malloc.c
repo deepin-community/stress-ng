@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -40,7 +40,9 @@
 #define MAX_MALLOC_THRESHOLD	(256 * MB)
 #define DEFAULT_MALLOC_THRESHOLD (128 * KB)
 
+#define MIN_MALLOC_PTHREADS	(0)
 #define MAX_MALLOC_PTHREADS	(32)
+#define DEFAULT_MALLOC_PTHREADS	(0)
 
 #define MK_ALIGN(x)	(1U << (3 + ((x) & 7)))
 
@@ -74,8 +76,9 @@ typedef struct {
 #endif
 
 typedef struct {
-	stress_args_t *args;	/* args info */
+	stress_args_t *args;		/* args info */
 	size_t instance;		/* per thread instance number */
+	int rc;				/* return status */
 } stress_malloc_args_t;
 
 static const stress_help_t help[] = {
@@ -98,66 +101,6 @@ static inline ALWAYS_INLINE void stress_alloc_action(const char *str, const size
 	alloc_size = size;
 }
 
-static int stress_set_malloc_mlock(const char *opt)
-{
-	return stress_set_setting_true("malloc-mlock", opt);
-}
-
-static int stress_set_malloc_bytes(const char *opt)
-{
-	size_t bytes;
-
-	bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("malloc-bytes", bytes,
-		MIN_MALLOC_BYTES, MAX_MALLOC_BYTES);
-	return stress_set_setting("malloc-bytes", TYPE_ID_SIZE_T, &bytes);
-}
-
-static int stress_set_malloc_max(const char *opt)
-{
-	size_t max;
-
-	max = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range("malloc-max", max,
-		MIN_MALLOC_MAX, MAX_MALLOC_MAX);
-	return stress_set_setting("malloc-max", TYPE_ID_SIZE_T, &max);
-}
-
-static int stress_set_malloc_threshold(const char *opt)
-{
-	size_t threshold;
-
-	threshold = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range("malloc-threshold", threshold,
-		MIN_MALLOC_THRESHOLD, MAX_MALLOC_THRESHOLD);
-	return stress_set_setting("malloc-threshold", TYPE_ID_SIZE_T, &threshold);
-}
-
-static int stress_set_malloc_pthreads(const char *opt)
-{
-	size_t npthreads;
-
-	npthreads = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range("malloc-pthreads", npthreads,
-		0, MAX_MALLOC_PTHREADS);
-	return stress_set_setting("malloc-pthreads", TYPE_ID_SIZE_T, &npthreads);
-}
-
-static int stress_set_malloc_touch(const char *opt)
-{
-	return stress_set_setting_true("malloc-touch", opt);
-}
-
-static int stress_set_malloc_trim(const char *opt)
-{
-	return stress_set_setting_true("malloc-trim", opt);
-}
-
-static int stress_set_malloc_zerofree(const char *opt)
-{
-	return stress_set_setting_true("malloc-zerofree", opt);
-}
-
 /*
  *  stress_malloc_free()
  *	standard free, ignore length
@@ -175,7 +118,7 @@ static void stress_malloc_free(void *ptr, size_t len)
  */
 static void stress_malloc_zerofree(void *ptr, size_t len)
 {
-	if (len)
+	if (LIKELY(len))
 		(void)shim_memset(ptr, 0, len);
 	free(ptr);
 }
@@ -203,7 +146,7 @@ static void stress_malloc_page_touch(
 		register uint8_t *ptr;
 		const uint8_t *end = buffer + size;
 
-		for (ptr = buffer; stress_continue_flag() && (ptr < end); ptr += page_size)
+		for (ptr = buffer; LIKELY(stress_continue_flag() && (ptr < end)); ptr += page_size)
 			*ptr = 0xff;
 	} else {
 		(void)stress_mincore_touch_pages_interruptible(buffer, size);
@@ -212,12 +155,11 @@ static void stress_malloc_page_touch(
 
 static void *stress_malloc_loop(void *ptr)
 {
-	const stress_malloc_args_t *malloc_args = (stress_malloc_args_t *)ptr;
+	stress_malloc_args_t *malloc_args = (stress_malloc_args_t *)ptr;
 	register stress_malloc_info_t *info;
 	stress_args_t *args = malloc_args->args;
 	const size_t page_size = args->page_size;
 	const size_t info_size = malloc_max * sizeof(*info);
-	static void *nowt = NULL;
 	size_t j;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 #if defined(HAVE_MALLOC_TRIM)
@@ -236,10 +178,13 @@ static void *stress_malloc_loop(void *ptr)
 			MAP_PRIVATE | MAP_ANONYMOUS,
 			-1, 0);
 	if (info == MAP_FAILED) {
-		pr_inf("%s: cannot mmap address buffer of size %zd bytes: %d (%s)\n",
-			args->name, info_size, errno, strerror(errno));
-		return &nowt;
+		pr_inf("%s: failed to mmap address buffer of size %zu bytes%s, errno=%d (%s)\n",
+			args->name, info_size, stress_get_memfree_str(),
+			errno, strerror(errno));
+		malloc_args->rc = EXIT_FAILURE;
+		return &g_nowt;
 	}
+	stress_set_vma_anon_name(info, info_size, "malloc-info");
 	for (;;) {
 		const unsigned int rnd = stress_mwc32();
 		const unsigned int i = rnd % malloc_max;
@@ -257,25 +202,23 @@ static void *stress_malloc_loop(void *ptr)
 		 * exerting any more memory pressure
 		 */
 #if defined(HAVE_LIB_PTHREAD)
-		if (!keep_thread_running_flag)
+		if (UNLIKELY(!keep_thread_running_flag))
 			break;
 #endif
-		if (!stress_bogo_inc_lock(args, counter_lock, false))
-			break;
-
 		if (info[i].addr) {
 			/* 50% free, 50% realloc */
 			if (action || low_mem) {
 				if (UNLIKELY(verify && (uintptr_t)info[i].addr != *info[i].addr)) {
 					pr_fail("%s: allocation at %p does not contain correct value\n",
 						args->name, (void *)info[i].addr);
+					malloc_args->rc = EXIT_FAILURE;
+					break;
 				}
 				stress_alloc_action("free", info[i].len);
 				free_func(info[i].addr, info[i].len);
 				info[i].addr = NULL;
 				info[i].len = 0;
-
-				if (!stress_bogo_inc_lock(args, counter_lock, true))
+				if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, true)))
 					break;
 			} else {
 				void *tmp;
@@ -292,15 +235,20 @@ static void *stress_malloc_loop(void *ptr)
 					if (UNLIKELY(verify && (uintptr_t)info[i].addr != *info[i].addr)) {
 						pr_fail("%s: allocation at %p does not contain correct value\n",
 							args->name, (void *)info[i].addr);
+						malloc_args->rc = EXIT_FAILURE;
+						break;
 					}
 					if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, true)))
 						break;
 				}
 			}
 		} else {
-			/* 50% free, 50% alloc */
 			if (action && !low_mem) {
 				size_t n, len = stress_alloc_size(malloc_bytes);
+#if defined(HAVE_ALIGNED_ALLOC) &&	\
+    !defined(__OpenBSD__)
+				size_t tmp_align;
+#endif
 
 				switch (do_calloc) {
 				case 0:
@@ -309,14 +257,14 @@ static void *stress_malloc_loop(void *ptr)
 					if (len < (n * sizeof(uintptr_t)))
 						len = n * sizeof(uintptr_t);
 					stress_alloc_action("calloc", len);
-					info[i].addr = calloc(n, len / n);
+					info[i].addr = (void *)calloc(n, len / n);
 					len = n * (len / n);
 					break;
 #if defined(HAVE_POSIX_MEMALIGN)
 				case 1:
 					/* POSIX.1-2001 and POSIX.1-2008 */
 					stress_alloc_action("posix_memalign", len);
-					if (posix_memalign((void **)&info[i].addr, MK_ALIGN(i), len) != 0)
+					if (UNLIKELY(posix_memalign((void **)&info[i].addr, MK_ALIGN(i), len) != 0))
 						info[i].addr = NULL;
 					break;
 #endif
@@ -324,8 +272,11 @@ static void *stress_malloc_loop(void *ptr)
     !defined(__OpenBSD__)
 				case 2:
 					/* C11 aligned allocation */
+					tmp_align = MK_ALIGN(i);
+					/* round len to multiple of alignment */
+					len = (len + tmp_align - 1) & ~(tmp_align - 1);
 					stress_alloc_action("aligned_alloc", len);
-					info[i].addr = aligned_alloc(MK_ALIGN(i), len);
+					info[i].addr = aligned_alloc(tmp_align, len);
 					break;
 #endif
 #if defined(HAVE_MEMALIGN)
@@ -349,7 +300,7 @@ static void *stress_malloc_loop(void *ptr)
 #endif
 				default:
 					stress_alloc_action("malloc", len);
-					info[i].addr = malloc(len);
+					info[i].addr = (uintptr_t *)malloc(len);
 					break;
 				}
 				if (LIKELY(info[i].addr != NULL)) {
@@ -357,8 +308,27 @@ static void *stress_malloc_loop(void *ptr)
 					stress_malloc_page_touch((void *)info[i].addr, len, page_size);
 					*info[i].addr = (uintptr_t)info[i].addr;	/* stash address */
 					info[i].len = len;
+
+					if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+						stress_cpu_data_cache_flush((void *)info[i].addr, len);
+
 					if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, true)))
 						break;
+
+#if defined(HAVE_MALLOC_USABLE_SIZE)
+					/* add some sanity checking */
+					if (UNLIKELY(verify)) {
+						const size_t usable_size = malloc_usable_size(info[i].addr);
+
+						if (UNLIKELY(usable_size < len)) {
+							pr_fail("%s: malloc_usable_size on %p returned a "
+								"value %zu, expected %zu or larger\n",
+								args->name, info[i].addr, usable_size, len);
+							malloc_args->rc = EXIT_FAILURE;
+							break;
+						}
+					}
+#endif
 				} else {
 					info[i].len = 0;
 				}
@@ -376,6 +346,7 @@ static void *stress_malloc_loop(void *ptr)
 		if (verify && info[j].addr && ((uintptr_t)info[j].addr != *info[j].addr)) {
 			pr_fail("%s: allocation at %p does not contain correct value\n",
 				args->name, (void *)info[j].addr);
+			malloc_args->rc = EXIT_FAILURE;
 		}
 		stress_alloc_action("free", info[j].len);
 		free_func(info[j].addr, info[j].len);
@@ -383,7 +354,7 @@ static void *stress_malloc_loop(void *ptr)
 	stress_alloc_action("munmap", info_size);
 	(void)munmap((void *)info, info_size);
 
-	return &nowt;
+	return &g_nowt;
 }
 
 static void MLOCKED_TEXT stress_malloc_sigsegv_handler(int signum)
@@ -399,12 +370,13 @@ static void MLOCKED_TEXT stress_malloc_sigsegv_handler(int signum)
 static int stress_malloc_child(stress_args_t *args, void *context)
 {
 	int ret;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 	/*
 	 *  pthread instance 0 is actually the main child process,
-	 *  insances 1..N are pthreads 0..N-1
+	 *  instances 1..N are pthreads 0..N-1
 	 */
 	stress_malloc_args_t malloc_args[MAX_MALLOC_PTHREADS + 1];
-	size_t malloc_pthreads = 0;
+	size_t malloc_pthreads = DEFAULT_MALLOC_PTHREADS;
 #if defined(HAVE_LIB_PTHREAD)
 	stress_pthread_info_t pthreads[MAX_MALLOC_PTHREADS];
 	size_t j;
@@ -422,7 +394,12 @@ static int stress_malloc_child(stress_args_t *args, void *context)
 	if (stress_sighandler(args->name, SIGSEGV, stress_malloc_sigsegv_handler, NULL) < 0)
 		return EXIT_FAILURE;
 
-	(void)stress_get_setting("malloc-pthreads", &malloc_pthreads);
+	if (!stress_get_setting("malloc-pthreads", &malloc_pthreads)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			malloc_pthreads = MAX_MALLOC_PTHREADS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			malloc_pthreads = MIN_MALLOC_PTHREADS;
+	}
 
 #if defined(MCL_FUTURE)
 	if (malloc_mlock) {
@@ -433,9 +410,12 @@ static int stress_malloc_child(stress_args_t *args, void *context)
 
 	malloc_args[0].args = args;
 	malloc_args[0].instance = 0;
+	malloc_args[0].rc = EXIT_SUCCESS;
 
 	(void)context;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 #if defined(HAVE_LIB_PTHREAD)
@@ -444,19 +424,24 @@ static int stress_malloc_child(stress_args_t *args, void *context)
 	for (j = 0; j < malloc_pthreads; j++) {
 		malloc_args[j + 1].args = args;
 		malloc_args[j + 1].instance = j + 1;
+		malloc_args[j + 1].rc = EXIT_SUCCESS;
 		pthreads[j].ret = pthread_create(&pthreads[j].pthread, NULL,
-			stress_malloc_loop, (void *)&malloc_args);
+			stress_malloc_loop, (void *)&malloc_args[j + 1]);
 	}
 #else
-	if ((args->instance == 0) && (malloc_pthreads > 0))
+	if (stress_instance_zero(args) && (malloc_pthreads > 0))
 		pr_inf("%s: pthreads not supported, ignoring the "
 			"--malloc-pthreads option\n", args->name);
 #endif
-	stress_malloc_loop(&malloc_args);
+	stress_malloc_loop(&malloc_args[0]);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 #if defined(HAVE_LIB_PTHREAD)
 	keep_thread_running_flag = false;
+
+	if (malloc_args[0].rc == EXIT_FAILURE)
+		rc = EXIT_FAILURE;
+
 	for (j = 0; j < malloc_pthreads; j++) {
 		if (pthreads[j].ret)
 			continue;
@@ -466,9 +451,11 @@ static int stress_malloc_child(stress_args_t *args, void *context)
 			pr_fail("%s: pthread_join failed (parent), errno=%d (%s)\n",
 				args->name, ret, strerror(ret));
 		}
+		if (malloc_args[j].rc == EXIT_FAILURE)
+			rc = EXIT_FAILURE;
 	}
 #endif
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -483,7 +470,7 @@ static int stress_malloc(stress_args_t *args)
 
 	stress_alloc_action("<unknown>", 0);
 
-	counter_lock = stress_lock_create();
+	counter_lock = stress_lock_create("counter");
 	if (!counter_lock) {
 		pr_inf_skip("%s: failed to create counter lock. skipping stressor\n", args->name);
 		return EXIT_NO_RESOURCE;
@@ -496,7 +483,7 @@ static int stress_malloc(stress_args_t *args)
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
 			malloc_bytes = MIN_MALLOC_BYTES;
 	}
-	malloc_bytes /= args->num_instances;
+	malloc_bytes /= args->instances;
 	if (malloc_bytes < MIN_MALLOC_BYTES)
 		malloc_bytes = MIN_MALLOC_BYTES;
 
@@ -535,22 +522,22 @@ static int stress_malloc(stress_args_t *args)
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_malloc_bytes,	stress_set_malloc_bytes },
-	{ OPT_malloc_max,	stress_set_malloc_max },
-	{ OPT_malloc_mlock,	stress_set_malloc_mlock },
-	{ OPT_malloc_pthreads,	stress_set_malloc_pthreads },
-	{ OPT_malloc_threshold,	stress_set_malloc_threshold },
-	{ OPT_malloc_touch,	stress_set_malloc_touch },
-	{ OPT_malloc_trim,	stress_set_malloc_trim },
-	{ OPT_malloc_zerofree,	stress_set_malloc_zerofree },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_malloc_bytes,	"malloc-bytes",     TYPE_ID_SIZE_T_BYTES_VM, MIN_MALLOC_BYTES, MAX_MALLOC_BYTES, NULL },
+	{ OPT_malloc_max,	"malloc-max",       TYPE_ID_SIZE_T_BYTES_VM, MIN_MALLOC_MAX, MAX_MALLOC_MAX, NULL },
+	{ OPT_malloc_mlock,	"malloc-mlock",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_malloc_pthreads,	"malloc-pthreads",  TYPE_ID_SIZE_T, MIN_MALLOC_PTHREADS, MAX_MALLOC_PTHREADS, NULL },
+	{ OPT_malloc_threshold,	"malloc-thresh",    TYPE_ID_SIZE_T_BYTES_VM, MIN_MALLOC_THRESHOLD, MAX_MALLOC_THRESHOLD, NULL },
+	{ OPT_malloc_touch,	"malloc-touch",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_malloc_trim,	"malloc-trim",      TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_malloc_zerofree,	"malloc-zerofree",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_malloc_info = {
+const stressor_info_t stress_malloc_info = {
 	.stressor = stress_malloc,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY | CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY | CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -70,10 +70,12 @@ static int stress_signal(stress_args_t *args)
 {
 	int rc = EXIT_SUCCESS;
 	const pid_t pid = getpid();
-	uint64_t *pcounter = (uint64_t *)&counter;
+	const uint64_t *pcounter = (uint64_t *)&counter;
 
 	counter = 0;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -105,8 +107,8 @@ static int stress_signal(stress_args_t *args)
 
 		tmp = *pcounter;
 		if (LIKELY(shim_kill(pid, SIGCHLD) == 0)) {
-			while ((tmp == *pcounter) && stress_continue_flag()) {
-				shim_sched_yield();
+			while (LIKELY((tmp == *pcounter) && stress_continue_flag())) {
+				(void)shim_sched_yield();
 			}
 		}
 
@@ -124,16 +126,16 @@ static int stress_signal(stress_args_t *args)
 		}
 
 		stress_bogo_set(args, *pcounter);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return rc;
 }
 
-stressor_info_t stress_signal_info = {
+const stressor_info_t stress_signal_info = {
 	.stressor = stress_signal,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,8 +36,6 @@
 
 #include <arpa/inet.h>
 
-#define MIN_RAWUDP_PORT		(1024)
-#define MAX_RAWUDP_PORT		(65535)
 #define DEFAULT_RAWUDP_PORT	(13000)
 
 #if !defined(SOL_UDP)
@@ -67,28 +65,10 @@ static int stress_rawudp_supported(const char *name)
 	return 0;
 }
 
-/*
- *  stress_set_rawudp_port()
- *	set port to use
- */
-static int stress_set_rawudp_port(const char *opt)
-{
-	int port;
-
-	stress_set_net_port("rawudp-port", opt,
-		MIN_RAWUDP_PORT, MAX_RAWUDP_PORT, &port);
-	return stress_set_setting("rawudp-port", TYPE_ID_INT, &port);
-}
-
-static int stress_set_rawudp_if(const char *name)
-{
-	return stress_set_setting("rawudp-if", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_rawudp_port,	stress_set_rawudp_port },
-	{ OPT_rawudp_if,	stress_set_rawudp_if },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_rawudp_port, "rawudp-port", TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	{ OPT_rawudp_if,   "rawudp-if",   TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LINUX_UDP_H)
@@ -242,11 +222,11 @@ static int OPTIMIZE3 stress_rawudp_server(
 	duration = stress_time_now() - t_start;
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB recv'd per sec",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (duration > 0.0) ? (double)stress_bogo_get(args) / duration : 0.0;
 	(void)snprintf(msg, sizeof(msg), "packets (%zu bytes) received per sec", PACKET_SIZE);
 	stress_metrics_set(args, 1, msg,
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 die_close:
 	(void)close(fd);
@@ -294,6 +274,8 @@ static int stress_rawudp(stress_args_t *args)
 	}
 
 	rawudp_port += args->instance;
+	if (rawudp_port > MAX_PORT)
+		rawudp_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(rawudp_port, rawudp_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -308,6 +290,8 @@ static int stress_rawudp(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGPIPE, stress_sock_sigpipe_handler, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -315,7 +299,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto finish;
 		}
@@ -336,19 +320,19 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_rawudp_info = {
+const stressor_info_t stress_rawudp_info = {
 	.stressor = stress_rawudp,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_rawudp_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_rawudp_info = {
+const stressor_info_t stress_rawudp_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_rawudp_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-asm-x86.h"
 #include "core-builtin.h"
 #include "core-cpu-cache.h"
 #include "core-madvise.h"
@@ -26,8 +27,11 @@
 #include "core-target-clones.h"
 #include "core-vecmath.h"
 
-#define MR_RD			(0)
-#define MR_WR			(1)
+#include <time.h>
+
+#define MR_RD			(0x0001)
+#define MR_WR			(0x0002)
+#define MR_RW			(MR_RD | MR_WR)
 
 #define MIN_MEMRATE_BYTES       (4 * KB)
 #define MAX_MEMRATE_BYTES       (MAX_MEM_LIMIT)
@@ -39,10 +43,11 @@
 static const stress_help_t help[] = {
 	{ NULL,	"memrate N",		"start N workers exercised memory read/writes" },
 	{ NULL,	"memrate-bytes N",	"size of memory buffer being exercised" },
+	{ NULL,	"memrate-flush",	"flush cache before each iteration" },
+	{ NULL, "memrate-method M",	"specify read/write memory exercising method" },
 	{ NULL,	"memrate-ops N",	"stop after N memrate bogo operations" },
 	{ NULL,	"memrate-rd-mbs N",	"read rate from buffer in megabytes per second" },
 	{ NULL,	"memrate-wr-mbs N",	"write rate to buffer in megabytes per second" },
-	{ NULL,	"memrate-flush",	"flush cache before each iteration" },
 	{ NULL,	NULL,			NULL }
 };
 
@@ -53,6 +58,7 @@ typedef uint64_t stress_uint32w256_t	__attribute__ ((vector_size(256 / 8)));
 typedef uint64_t stress_uint32w128_t	__attribute__ ((vector_size(128 / 8)));
 #endif
 
+static volatile bool do_jmp = true;
 static sigjmp_buf jmpbuf;
 
 typedef struct {
@@ -66,6 +72,7 @@ typedef struct {
 	uint64_t memrate_bytes;
 	uint64_t memrate_rd_mbs;
 	uint64_t memrate_wr_mbs;
+	size_t memrate_method;
 	void *start;
 	void *end;
 	bool memrate_flush;
@@ -80,45 +87,14 @@ typedef struct {
 	const stress_memrate_func_t	func_rate;
 } stress_memrate_info_t;
 
-static int stress_set_memrate_bytes(const char *opt)
-{
-	uint64_t memrate_bytes;
-
-	memrate_bytes = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("memrate-bytes", memrate_bytes,
-		MIN_MEMRATE_BYTES, MAX_MEMRATE_BYTES);
-	return stress_set_setting("memrate-bytes", TYPE_ID_UINT64, &memrate_bytes);
-}
-
-static int stress_set_memrate_rd_mbs(const char *opt)
-{
-	uint64_t memrate_rd_mbs;
-
-	memrate_rd_mbs = stress_get_uint64(opt);
-	stress_check_range_bytes("memrate-rd-mbs", memrate_rd_mbs,
-		1, 1000000);
-	return stress_set_setting("memrate-rd-mbs", TYPE_ID_UINT64, &memrate_rd_mbs);
-}
-
-static int stress_set_memrate_wr_mbs(const char *opt)
-{
-	uint64_t memrate_wr_mbs;
-
-	memrate_wr_mbs = stress_get_uint64(opt);
-	stress_check_range_bytes("memrate-wr-mbs", memrate_wr_mbs,
-		1, 1000000);
-	return stress_set_setting("memrate-wr-mbs", TYPE_ID_UINT64, &memrate_wr_mbs);
-}
-
-static void NORETURN MLOCKED_TEXT stress_memrate_alarm_handler(int signum)
+static void stress_memrate_alarm_handler(int signum)
 {
         (void)signum;
-        siglongjmp(jmpbuf, 1);
-}
 
-static int stress_set_memrate_flush(const char *opt)
-{
-	return stress_set_setting_true("memrate-flush", opt);
+	if (do_jmp) {
+		do_jmp = false;
+	        siglongjmp(jmpbuf, 1);
+	}
 }
 
 static uint64_t stress_memrate_loops(
@@ -126,8 +102,8 @@ static uint64_t stress_memrate_loops(
 	const size_t size)
 {
 	uint64_t chunk_shift = 20;	/* 1 MB */
-	uint64_t bytes = context->memrate_bytes;
-	uint64_t best_fit = bytes / size;
+	const uint64_t bytes = context->memrate_bytes;
+	const uint64_t best_fit = bytes / size;
 
 	/* check for powers of 2 size, from 1MB down to 1K */
 	for (chunk_shift = 20; chunk_shift >= 10; chunk_shift--) {
@@ -271,7 +247,7 @@ static uint64_t TARGET_CLONES OPTIMIZE3 stress_memrate_read_rate##size(		\
 			time_t sec = (time_t)dur_remainder;	\
 								\
 			t.tv_sec = sec;				\
-			t.tv_nsec = (long)((dur_remainder -	\
+			t.tv_nsec = (long int)((dur_remainder -	\
 				(double)sec) *			\
 				STRESS_NANOSECOND);		\
 			(void)nanosleep(&t, NULL);		\
@@ -353,7 +329,7 @@ static uint64_t OPTIMIZE3 stress_memrate_memset_rate(
 			time_t sec = (time_t)dur_remainder;
 
 			t.tv_sec = sec;
-			t.tv_nsec = (long)((dur_remainder -
+			t.tv_nsec = (long int)((dur_remainder -
 				(double)sec) *
 				STRESS_NANOSECOND);
 			(void)nanosleep(&t, NULL);
@@ -371,7 +347,7 @@ static uint64_t OPTIMIZE3 stress_memrate_memset_rate(
 			time_t sec = (time_t)dur_remainder;
 
 			t.tv_sec = sec;
-			t.tv_nsec = (long)((dur_remainder -
+			t.tv_nsec = (long int)((dur_remainder -
 				(double)sec) *
 				STRESS_NANOSECOND);
 			(void)nanosleep(&t, NULL);
@@ -481,7 +457,7 @@ static inline uint64_t OPTIMIZE3 stress_memrate_stos_rate(
 			time_t sec = (time_t)dur_remainder;
 
 			t.tv_sec = sec;
-			t.tv_nsec = (long)((dur_remainder -
+			t.tv_nsec = (long int)((dur_remainder -
 				(double)sec) *
 				STRESS_NANOSECOND);
 			(void)nanosleep(&t, NULL);
@@ -501,7 +477,7 @@ static inline uint64_t OPTIMIZE3 stress_memrate_stos_rate(
 			time_t sec = (time_t)dur_remainder;
 
 			t.tv_sec = sec;
-			t.tv_nsec = (long)((dur_remainder -
+			t.tv_nsec = (long int)((dur_remainder -
 				(double)sec) *
 				STRESS_NANOSECOND);
 			(void)nanosleep(&t, NULL);
@@ -704,7 +680,7 @@ static uint64_t TARGET_CLONES OPTIMIZE3 stress_memrate_write_rate##size(	\
 			time_t sec = (time_t)dur_remainder;	\
 								\
 			t.tv_sec = sec;				\
-			t.tv_nsec = (long)((dur_remainder -	\
+			t.tv_nsec = (long int)((dur_remainder -	\
 				(double)sec) * 			\
 				STRESS_NANOSECOND);		\
 			(void)nanosleep(&t, NULL);		\
@@ -714,14 +690,8 @@ static uint64_t TARGET_CLONES OPTIMIZE3 stress_memrate_write_rate##size(	\
 	return ((uintptr_t)ptr - (uintptr_t)start) / KB;	\
 }
 
-/*
- *
- * See https://akkadia.org/drepper/cpumemory.pdf - section 6.1
- *  non-temporal writes using movntdq. Data is not going to be
- *  read, so no need to cache. Write directly to memory.
- */
-#define STRESS_MEMRATE_WRITE_NT(size, type, op, init)		\
-static uint64_t OPTIMIZE3 stress_memrate_write_nt##size(	\
+#define STRESS_MEMRATE_WRITE_OP(size, type, op, write_op, check)	\
+static uint64_t OPTIMIZE3 stress_memrate_write_ ## write_op ## size (	\
 	const stress_memrate_context_t *context,		\
 	bool *valid)						\
 {								\
@@ -729,7 +699,7 @@ static uint64_t OPTIMIZE3 stress_memrate_write_nt##size(	\
 	const type *end ALIGNED(4096) = (type *)context->end;	\
 	register type v, *ptr;					\
 								\
-	if (!stress_cpu_x86_has_sse2()) {			\
+	if (!check()) {						\
 		*valid = false;					\
 		return 0;					\
 	}							\
@@ -766,8 +736,8 @@ static uint64_t OPTIMIZE3 stress_memrate_write_nt##size(	\
 	return ((uintptr_t)ptr - (uintptr_t)start) / KB;	\
 }
 
-#define STRESS_MEMRATE_WRITE_NT_RATE(size, type, op, init)	\
-static uint64_t OPTIMIZE3 stress_memrate_write_nt_rate##size(	\
+#define STRESS_MEMRATE_WRITE_OP_RATE(size, type, op, write_op, check)	\
+static uint64_t OPTIMIZE3 stress_memrate_write_ ## write_op ## _rate ## size( \
 	const stress_memrate_context_t *context,		\
 	bool *valid)						\
 {								\
@@ -782,7 +752,7 @@ static uint64_t OPTIMIZE3 stress_memrate_write_nt_rate##size(	\
 		(MB * (double)context->memrate_wr_mbs);		\
 	register type v, *ptr;					\
 								\
-	if (!stress_cpu_x86_has_sse2()) {			\
+	if (!check()) {						\
 		*valid = false;					\
 		return 0;					\
 	}							\
@@ -831,7 +801,7 @@ static uint64_t OPTIMIZE3 stress_memrate_write_nt_rate##size(	\
 			time_t sec = (time_t)dur_remainder;	\
 								\
 			t.tv_sec = sec;				\
-			t.tv_nsec = (long)((dur_remainder -	\
+			t.tv_nsec = (long int)((dur_remainder -	\
 				(double)sec) * 			\
 				STRESS_NANOSECOND);		\
 			(void)nanosleep(&t, NULL);		\
@@ -841,19 +811,30 @@ static uint64_t OPTIMIZE3 stress_memrate_write_nt_rate##size(	\
 	return ((uintptr_t)ptr - (uintptr_t)start) / KB;	\
 }
 
+/*
+ * See https://akkadia.org/drepper/cpumemory.pdf - section 6.1
+ *  non-temporal writes using movntdq. Data is not going to be
+ *  read, so no need to cache. Write directly to memory.
+ */
 #if defined(HAVE_NT_STORE128)
-STRESS_MEMRATE_WRITE_NT(128, __uint128_t, stress_nt_store128, i)
-STRESS_MEMRATE_WRITE_NT_RATE(128, __uint128_t, stress_nt_store128, i)
+STRESS_MEMRATE_WRITE_OP(128, __uint128_t, stress_nt_store128, nt, stress_cpu_x86_has_sse2)
+STRESS_MEMRATE_WRITE_OP_RATE(128, __uint128_t, stress_nt_store128, nt, stress_cpu_x86_has_sse2)
 #endif
 
 #if defined(HAVE_NT_STORE64)
-STRESS_MEMRATE_WRITE_NT(64, uint64_t, stress_nt_store64, i)
-STRESS_MEMRATE_WRITE_NT_RATE(64, uint64_t, stress_nt_store64, i)
+STRESS_MEMRATE_WRITE_OP(64, uint64_t, stress_nt_store64, nt, stress_cpu_x86_has_sse2)
+STRESS_MEMRATE_WRITE_OP_RATE(64, uint64_t, stress_nt_store64, nt, stress_cpu_x86_has_sse2)
 #endif
 
 #if defined(HAVE_NT_STORE32)
-STRESS_MEMRATE_WRITE_NT(32, uint32_t, stress_nt_store32, i)
-STRESS_MEMRATE_WRITE_NT_RATE(32, uint32_t, stress_nt_store32, i)
+STRESS_MEMRATE_WRITE_OP(32, uint32_t, stress_nt_store32, nt, stress_cpu_x86_has_sse2)
+STRESS_MEMRATE_WRITE_OP_RATE(32, uint32_t, stress_nt_store32, nt, stress_cpu_x86_has_sse2)
+#endif
+
+#if defined(HAVE_ASM_X86_MOVDIRI) &&	\
+    defined(STRESS_ARCH_X86_64)
+STRESS_MEMRATE_WRITE_OP(64, uint64_t, stress_ds_store64, ds, stress_cpu_x86_has_movdiri)
+STRESS_MEMRATE_WRITE_OP_RATE(64, uint64_t, stress_ds_store64, ds, stress_cpu_x86_has_movdiri)
 #endif
 
 #if defined(HAVE_VECMATH)
@@ -879,7 +860,8 @@ STRESS_MEMRATE_WRITE_RATE(16, uint16_t)
 STRESS_MEMRATE_WRITE(8, uint8_t)
 STRESS_MEMRATE_WRITE_RATE(8, uint8_t)
 
-static stress_memrate_info_t memrate_info[] = {
+static const stress_memrate_info_t memrate_info[] = {
+	{ "all",	MR_RW,  NULL,				NULL },
 #if defined(HAVE_ASM_X86_REP_STOSQ) &&	\
     !defined(__ILP32__)
 	{ "write64stoq", MR_WR,	stress_memrate_write_stos64,	stress_memrate_write_stos_rate64 },
@@ -895,6 +877,10 @@ static stress_memrate_info_t memrate_info[] = {
 #if defined(HAVE_ASM_X86_REP_STOSB) &&	\
     !defined(__ILP32__)
 	{ "write8stob",	MR_WR,	stress_memrate_write_stos8,	stress_memrate_write_stos_rate8 },
+#endif
+#if defined(HAVE_ASM_X86_MOVDIRI) && 	\
+    defined(STRESS_ARCH_X86_64)
+	{ "write64ds",	MR_WR, stress_memrate_write_ds64,	stress_memrate_write_ds_rate64 },
 #endif
 #if defined(HAVE_NT_STORE128)
 	{ "write128nt",	MR_WR, stress_memrate_write_nt128,	stress_memrate_write_nt_rate128 },
@@ -965,8 +951,9 @@ static inline void *stress_memrate_mmap(stress_args_t *args, uint64_t sz)
 		MAP_ANONYMOUS, -1, 0);
 	/* Coverity Scan believes NULL can be returned, doh */
 	if (!ptr || (ptr == MAP_FAILED)) {
-		pr_err("%s: cannot allocate %" PRIu64 " K\n",
-			args->name, sz / 1024);
+		pr_err("%s: failed to mmap %" PRIu64 " K%s, errno=%d (%s)\n",
+			args->name, sz / 1024, stress_get_memfree_str(),
+			errno, strerror(errno));
 		ptr = MAP_FAILED;
 	} else {
 #if defined(HAVE_MADVISE) &&	\
@@ -984,11 +971,34 @@ static inline uint64_t stress_memrate_dispatch(
 	const stress_memrate_context_t *context,
 	bool *valid)
 {
-	if (((info->rdwr == MR_RD) && (context->memrate_rd_mbs == ~0ULL)) ||
-	    ((info->rdwr == MR_WR) && (context->memrate_wr_mbs == ~0ULL))) {
+	if (((info->rdwr == MR_RD) && (context->memrate_rd_mbs == 0ULL)) ||
+	    ((info->rdwr == MR_WR) && (context->memrate_wr_mbs == 0ULL))) {
+		return 0;
+	} else if (((info->rdwr == MR_RD) && (context->memrate_rd_mbs == ~0ULL)) ||
+		 ((info->rdwr == MR_WR) && (context->memrate_wr_mbs == ~0ULL))) {
 		return info->func(context, valid);
+	} else {
+		return info->func_rate(context, valid);
 	}
-	return info->func_rate(context, valid);
+}
+
+static void stress_memrate_dispatch_method(
+	const stress_memrate_context_t *context,
+	const size_t method)
+{
+	double t1, t2;
+	uint64_t kbytes;
+	const stress_memrate_info_t *info = &memrate_info[method];
+	bool valid = false;
+
+	if (context->memrate_flush)
+		stress_memrate_flush(context);
+	t1 = stress_time_now();
+	kbytes = stress_memrate_dispatch(info, context, &valid);
+	context->stats[method].kbytes += (double)kbytes;
+	t2 = stress_time_now();
+	context->stats[method].duration += (t2 - t1);
+	context->stats[method].valid = valid;
 }
 
 static int stress_memrate_child(stress_args_t *args, void *ctxt)
@@ -1002,6 +1012,8 @@ static int stress_memrate_child(stress_args_t *args, void *ctxt)
 	if (buffer == MAP_FAILED)
 		return EXIT_NO_RESOURCE;
 
+	stress_set_vma_anon_name(buffer, context->memrate_bytes, "memrate-buffer");
+	(void)stress_madvise_collapse(buffer, context->memrate_bytes);
 	buffer_end = (uint8_t *)buffer + context->memrate_bytes;
 	stress_memrate_init_data(buffer, buffer_end);
 
@@ -1015,30 +1027,22 @@ static int stress_memrate_child(stress_args_t *args, void *ctxt)
 		return EXIT_NO_RESOURCE;
 
 	do {
-		size_t i;
+		if (context->memrate_method == 0) {
+			size_t i;
 
-		for (i = 0; i < memrate_items; i++) {
-			double t1, t2;
-			uint64_t kbytes;
-			const stress_memrate_info_t *info = &memrate_info[i];
-			bool valid = false;
-
-			if (context->memrate_flush)
-				stress_memrate_flush(context);
-			t1 = stress_time_now();
-			kbytes = stress_memrate_dispatch(info, context, &valid);
-			context->stats[i].kbytes += (double)kbytes;
-			t2 = stress_time_now();
-			context->stats[i].duration += (t2 - t1);
-			context->stats[i].valid = valid;
-
-			if (!stress_continue(args))
-				break;
+			for (i = 1; i < memrate_items; i++) {
+				stress_memrate_dispatch_method(context, i);
+				if (UNLIKELY(!stress_continue(args)))
+					break;
+			}
+		} else {
+			stress_memrate_dispatch_method(context, context->memrate_method);
 		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 tidy:
+	do_jmp = false;
 	(void)munmap((void *)buffer, context->memrate_bytes);
 	return EXIT_SUCCESS;
 }
@@ -1057,11 +1061,26 @@ static int stress_memrate(stress_args_t *args)
 	context.memrate_rd_mbs = ~0ULL;
 	context.memrate_wr_mbs = ~0ULL;
 	context.memrate_flush = false;
+	context.memrate_method = 0; 	/* all */
+	int flag;
 
 	(void)stress_get_setting("memrate-bytes", &context.memrate_bytes);
 	(void)stress_get_setting("memrate-flush", &context.memrate_flush);
 	(void)stress_get_setting("memrate-rd-mbs", &context.memrate_rd_mbs);
 	(void)stress_get_setting("memrate-wr-mbs", &context.memrate_wr_mbs);
+	(void)stress_get_setting("memrate-method", &context.memrate_method);
+
+	if ((context.memrate_rd_mbs == 0ULL) && (context.memrate_wr_mbs == 0ULL)) {
+		pr_fail("%s: cannot use zero MB rates for read and write\n", args->name);
+		return EXIT_FAILURE;
+	}
+	flag = ((context.memrate_rd_mbs == 0) ? 0 : MR_RD) |
+	       ((context.memrate_wr_mbs == 0) ? 0 : MR_WR);
+	if ((flag & memrate_info[context.memrate_method].rdwr) == 0) {
+		pr_fail("%s: cannot use zero MB rate and just methood %s\n",
+			args->name, memrate_info[context.memrate_method].name);
+		return EXIT_FAILURE;
+	}
 
 	stats_size = memrate_items * sizeof(*context.stats);
 	stats_size = (stats_size + args->page_size - 1) & ~(args->page_size - 1);
@@ -1069,8 +1088,10 @@ static int stress_memrate(stress_args_t *args)
 	context.stats = (stress_memrate_stats_t *)stress_mmap_populate(NULL, stats_size,
 		PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (context.stats == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap %zd byte statistics buffer, skipping stressor\n",
-			args->name, stats_size);
+		pr_inf_skip("%s: failed to mmap %zu byte statistics buffer%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, stats_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 	for (i = 0; i < memrate_items; i++) {
@@ -1080,17 +1101,17 @@ static int stress_memrate(stress_args_t *args)
 	}
 
 	context.memrate_bytes = (context.memrate_bytes + 1023) & ~(1023ULL);
-	if (args->instance == 0) {
-		pr_inf("%s: using buffer size of %" PRIu64 "K, cache flushing %s\n", args->name,
-			context.memrate_bytes >> 10,
-			context.memrate_flush ? "enabled" : "disabled");
-		if ((context.memrate_bytes > MB) && (context.memrate_bytes & MB)) {
+	if (stress_instance_zero(args)) {
+		stress_usage_bytes(args, context.memrate_bytes, context.memrate_bytes);
+		pr_inf("%s: cache flushing %s\n", args->name,
+			context.memrate_flush ? "enabled" :
+			"disabled, cache flushing can be enabled with --memrate-flush option");
+		if ((context.memrate_bytes > MB) && (context.memrate_bytes & MB))
 			pr_inf("%s: for optimal speed, use multiples of 1 MB for --memrate-bytes\n", args->name);
-		}
-		if (!context.memrate_flush)
-			pr_inf("%s: cache flushing can be enabled with --memrate-flush option\n", args->name);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = stress_oomable_child(args, &context, stress_memrate_child, STRESS_OOMABLE_NORMAL);
@@ -1098,7 +1119,7 @@ static int stress_memrate(stress_args_t *args)
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	pr_block_begin();
-	for (i = 0; i < memrate_items; i++) {
+	for (i = 1; i < memrate_items; i++) {
 		if (!context.stats[i].valid)
 			continue;
 		if (context.stats[i].duration > 0.0) {
@@ -1107,7 +1128,7 @@ static int stress_memrate(stress_args_t *args)
 
 			(void)snprintf(tmp, sizeof(tmp), "%s MB per sec", memrate_info[i].name);
 			stress_metrics_set(args, i, tmp,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 		} else {
 			pr_inf("%s: %10.10s: interrupted early\n",
 				args->name, memrate_info[i].name);
@@ -1120,17 +1141,24 @@ static int stress_memrate(stress_args_t *args)
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_memrate_bytes,	stress_set_memrate_bytes },
-	{ OPT_memrate_flush,	stress_set_memrate_flush },
-	{ OPT_memrate_rd_mbs,	stress_set_memrate_rd_mbs },
-	{ OPT_memrate_wr_mbs,	stress_set_memrate_wr_mbs },
-	{ 0,			NULL }
+static const char *stress_memmap_method(const size_t i)
+{
+        return (i < SIZEOF_ARRAY(memrate_info)) ? memrate_info[i].name : NULL;
+}
+
+
+static const stress_opt_t opts[] = {
+	{ OPT_memrate_bytes,  "memrate-bytes",  TYPE_ID_UINT64_BYTES_VM, MIN_MEMRATE_BYTES, MAX_MEMRATE_BYTES, NULL },
+	{ OPT_memrate_flush,  "memrate-flush",  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_memrate_rd_mbs, "memrate-rd-mbs", TYPE_ID_UINT64, 0, 1000000, NULL },
+	{ OPT_memrate_wr_mbs, "memrate-wr-mbs", TYPE_ID_UINT64, 0, 1000000, NULL },
+	{ OPT_memrate_method, "memrate-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_memmap_method },
+	END_OPT,
 };
 
-stressor_info_t stress_memrate_info = {
+const stressor_info_t stress_memrate_info = {
 	.stressor = stress_memrate,
-	.class = CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_MEMORY,
+	.opts = opts,
 	.help = help
 };

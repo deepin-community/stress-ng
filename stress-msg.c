@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,28 +43,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_msg_bytes(const char *opt)
-{
-	size_t bytes;
-
-	bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("msg-bytes", bytes,
-		MIN_MSG_BYTES, MAX_MSG_BYTES);
-	return stress_set_setting("msg-bytes", TYPE_ID_SIZE_T, &bytes);
-}
-
-static int stress_set_msg_types(const char *opt) {
-	int32_t msg_types;
-
-	msg_types = stress_get_int32(opt);
-	stress_check_range("msg-types", (uint64_t)msg_types, 0, 100);
-	return stress_set_setting("msg-types", TYPE_ID_INT32, &msg_types);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_msg_types,	stress_set_msg_types },
-	{ OPT_msg_bytes,	stress_set_msg_bytes },
-	{ 0,                    NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_msg_types, "msg-types", TYPE_ID_INT32, 0, 100, NULL },
+	{ OPT_msg_bytes, "msg-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_MSG_BYTES, MAX_MSG_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_IPC_H) &&	\
@@ -72,7 +54,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
     defined(HAVE_MQ_SYSV)
 
 typedef struct {
-	long mtype;
+	long int mtype;
 	union {
 		uint32_t value;
 		char data[MAX_MSG_BYTES];
@@ -85,7 +67,7 @@ static int stress_msg_get_stats(stress_args_t *args, const int msgq_id)
 	{
 		struct msqid_ds buf;
 
-		if (msgctl(msgq_id, IPC_STAT, &buf) < 0) {
+		if (UNLIKELY(msgctl(msgq_id, IPC_STAT, &buf) < 0)) {
 			pr_fail("%s: msgctl IPC_STAT failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -errno;
@@ -118,7 +100,7 @@ static int stress_msg_get_stats(stress_args_t *args, const int msgq_id)
 	{
 		struct msginfo info;
 
-		if (msgctl(msgq_id, IPC_INFO, (struct msqid_ds *)&info) < 0) {
+		if (UNLIKELY(msgctl(msgq_id, IPC_INFO, (struct msqid_ds *)&info) < 0)) {
 			pr_fail("%s: msgctl IPC_INFO failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -errno;
@@ -130,7 +112,7 @@ static int stress_msg_get_stats(stress_args_t *args, const int msgq_id)
 	{
 		struct msginfo info;
 
-		if (msgctl(msgq_id, MSG_INFO, (struct msqid_ds *)&info) < 0) {
+		if (UNLIKELY(msgctl(msgq_id, MSG_INFO, (struct msqid_ds *)&info) < 0)) {
 			pr_fail("%s: msgctl MSG_INFO failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -errno;
@@ -229,10 +211,10 @@ static inline size_t stress_max_ids(stress_args_t *args)
 	size_t max_ids;
 
 	/* Avoid static analysis complaining about division errors */
-	if (args->num_instances < 1)
+	if (args->instances < 1)
 		return STRESS_MAX_IDS;
 
-	max_ids = STRESS_MAX_IDS / args->num_instances;
+	max_ids = STRESS_MAX_IDS / args->instances;
 	if (max_ids < 2)
 		return 2;
 	return max_ids;
@@ -253,9 +235,9 @@ static int OPTIMIZE3 stress_msg_receiver(
 
 	while (stress_continue(args)) {
 		register uint32_t i;
-		register const long mtype = msg_types == 0 ? 0 : -(msg_types + 1);
+		register const long int mtype = msg_types == 0 ? 0 : -(msg_types + 1);
 
-		for (i = 0; stress_continue(args); i++) {
+		for (i = 0; LIKELY(stress_continue(args)); i++) {
 #if defined(IPC_NOWAIT)
 			int msg_flag = (i & 0x1ff) ? 0 : IPC_NOWAIT;
 #else
@@ -292,7 +274,7 @@ redo:
 					msg_flag = 0;
 					goto redo;
 				}
-				if ((errno == E2BIG) || (errno == EINTR))
+				if (LIKELY((errno == E2BIG) || (errno == EINTR)))
 					continue;
 
 				pr_fail("%s: msgrcv failed, errno=%d (%s)\n",
@@ -358,7 +340,7 @@ resend:
 		msg.u.value++;
 		stress_bogo_inc(args);
 		if (UNLIKELY((msg.u.value & 0xff) == 0)) {
-			if (stress_msg_get_stats(args, msgq_id) < 0)
+			if (UNLIKELY(stress_msg_get_stats(args, msgq_id) < 0))
 				break;
 #if defined(__NetBSD__)
 			/*
@@ -400,11 +382,18 @@ static int stress_msg(stress_args_t *args)
 	size_t j, n, msg_bytes = sizeof(msg.u.value);
 
 	(void)stress_get_setting("msg-types", &msg_types);
-	(void)stress_get_setting("msg-bytes", &msg_bytes);
+	if (!stress_get_setting("msg-bytes", &msg_bytes)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			msg_bytes = MAX_MSG_BYTES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			msg_bytes = MIN_MSG_BYTES;
+	}
 
-	msgq_ids = calloc(max_ids, sizeof(*msgq_ids));
+	msgq_ids = (int *)calloc(max_ids, sizeof(*msgq_ids));
 	if (!msgq_ids) {
-		pr_inf_skip("%s: failed to allocate msgq id array, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to allocate %zu item msgq id array%s, "
+			"skipping stressor\n", args->name, max_ids,
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -416,7 +405,7 @@ static int stress_msg(stress_args_t *args)
 			pr_fail("%s: msgget failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		} else {
-			pr_inf_skip("%s: msgget out of resources or not implemented, skipping stessor\n", args->name);
+			pr_inf_skip("%s: msgget out of resources or not implemented, skipping stressor\n", args->name);
 		}
 		free(msgq_ids);
 		return ret;
@@ -425,7 +414,7 @@ static int stress_msg(stress_args_t *args)
 
 	stress_msgget();
 	for (n = 0; n < max_ids; n++) {
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		msgq_ids[n] = msgget(IPC_PRIVATE, S_IRUSR | S_IWUSR | IPC_CREAT | IPC_EXCL);
 		if ((msgq_ids[n] < 0) &&
@@ -434,9 +423,11 @@ static int stress_msg(stress_args_t *args)
 	}
 	stress_bogo_inc(args);
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		goto cleanup;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -444,7 +435,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto cleanup;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -479,18 +470,18 @@ cleanup:
 	return rc;
 }
 
-stressor_info_t stress_msg_info = {
+const stressor_info_t stress_msg_info = {
 	.stressor = stress_msg,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_msg_info = {
+const stressor_info_t stress_msg_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/ipc.h, sys/msg.h or System V message queues support"

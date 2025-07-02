@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2015 Christian Ehrhardt.
  * Copyright (C) 2015-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,14 +21,14 @@
 #include "stress-ng.h"
 #include "core-arch.h"
 
-#if defined(HAVE_BSD_WCHAR)
+#if defined(HAVE_BSD_WCHAR_H)
 #include <bsd/wchar.h>
-#define HAVE_WCHAR_H
+#define HAVE_WCHAR
 #endif
 
-#if defined(HAVE_WCHAR)
+#if defined(HAVE_WCHAR_H)
 #include <wchar.h>
-#define HAVE_WCHAR_H
+#define HAVE_WCHAR
 #endif
 
 #define STR1LEN 256
@@ -100,7 +100,7 @@ static void stress_wcs_fill(wchar_t *wcstr, const size_t len)
      defined(HAVE_WCSLEN)  || 		\
      defined(HAVE_WCSCOLL) ||		\
      defined(HAVE_WCSXFRM)) &&		\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 
 static void wcschk(
 	stress_wcs_args_t *info,
@@ -120,7 +120,7 @@ static void wcschk(
 #define WCSCHK(info, test)	wcschk(info, test, STR(test))
 
 #if defined(HAVE_WCSCASECMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcscasecmp()
  *	stress on wcscasecmp
@@ -135,7 +135,7 @@ static size_t stress_wcscasecmp(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		WCSCHK(info, 0 == test_wcscasecmp(str1, str1));
 		WCSCHK(info, 0 == test_wcscasecmp(str2, str2));
 
@@ -155,7 +155,7 @@ static size_t stress_wcscasecmp(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSNCASECMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcsncasecmp()
  *	stress on wcsncasecmp
@@ -171,7 +171,7 @@ static size_t stress_wcsncasecmp(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		WCSCHK(info, 0 == test_wcsncasecmp(str1, str1, len1));
 		WCSCHK(info, 0 == test_wcsncasecmp(str2, str2, len2));
 
@@ -192,7 +192,7 @@ static size_t stress_wcsncasecmp(stress_args_t *args, stress_wcs_args_t *info)
 
 #if defined(HAVE_WCSLCPY) &&		\
     defined(HAVE_WCSLEN) &&		\
-    defined(HAVE_WCHAR_H) &&		\
+    defined(HAVE_WCHAR) &&		\
     !defined(HAVE_COMPILER_PCC) &&	\
     !defined(BUILD_STATIC)
 /*
@@ -213,7 +213,7 @@ static size_t stress_wcslcpy(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t strlen2 = wcslen(str2);
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		WCSCHK(info, strlen1 == test_wcslcpy(strdst, str1, strdstlen));
 		WCSCHK(info, strlen2 == test_wcslcpy(strdst, str2, strdstlen));
 	}
@@ -221,7 +221,7 @@ static size_t stress_wcslcpy(stress_args_t *args, stress_wcs_args_t *info)
 	return i * 2;
 }
 #elif defined(HAVE_WCSCPY) &&	\
-      defined(HAVE_WCHAR_H)
+      defined(HAVE_WCHAR)
 /*
  *  stress_wcscpy()
  *	stress on wcscpy
@@ -237,7 +237,7 @@ static size_t stress_wcscpy(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		WCSCHK(info, strdst == test_wcscpy(strdst, str1));
 		WCSCHK(info, strdst == test_wcscpy(strdst, str2));
 	}
@@ -248,7 +248,7 @@ static size_t stress_wcscpy(stress_args_t *args, stress_wcs_args_t *info)
 
 #if defined(HAVE_WCSLCAT) &&		\
     defined(HAVE_WCSLEN) &&		\
-    defined(HAVE_WCHAR_H) &&		\
+    defined(HAVE_WCHAR) &&		\
     !defined(HAVE_COMPILER_PCC) &&	\
     !defined(BUILD_STATIC)
 /*
@@ -270,7 +270,7 @@ static size_t stress_wcslcat(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t strdstlen = info->strdstlen;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = L'\0';
 		WCSCHK(info, str1_len == test_wcslcat(strdst, str1, strdstlen));
 		*strdst = L'\0';
@@ -286,7 +286,7 @@ static size_t stress_wcslcat(stress_args_t *args, stress_wcs_args_t *info)
 	return i * 6;
 }
 #elif defined(HAVE_WCSCAT) &&	\
-      defined(HAVE_WCHAR_H)
+      defined(HAVE_WCHAR)
 /*
  *  stress_wcscat()
  *	stress on wcscat
@@ -302,7 +302,7 @@ static size_t stress_wcscat(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = L'\0';
 		WCSCHK(info, strdst == test_wcscat(strdst, str1));
 		*strdst = L'\0';
@@ -320,7 +320,7 @@ static size_t stress_wcscat(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSNCAT) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcsncat()
  *	stress on wcsncat
@@ -337,7 +337,7 @@ static size_t stress_wcsncat(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		WCSCHK(info, strdst == test_wcsncat(strdst, str1, len1));
 		*strdst = '\0';
@@ -355,7 +355,7 @@ static size_t stress_wcsncat(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSCHR) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcschr()
  *	stress on wcschr
@@ -370,7 +370,7 @@ static size_t stress_wcschr(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		WCSCHK(info, NULL == test_wcschr(str1, '_'));
 		WCSCHK(info, NULL != test_wcschr(str1, str1[0]));
 
@@ -383,7 +383,7 @@ static size_t stress_wcschr(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSRCHR) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcsrchr()
  *	stress on wcsrchr
@@ -398,7 +398,7 @@ static size_t stress_wcsrchr(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		WCSCHK(info, NULL == test_wcsrchr(str1, '_'));
 		WCSCHK(info, NULL != test_wcsrchr(str1, str1[0]));
 
@@ -411,7 +411,7 @@ static size_t stress_wcsrchr(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSCMP) &&	\
-    defined(HAVE_WCHAR_H) &&	\
+    defined(HAVE_WCHAR) &&	\
     !defined(STRESS_ARCH_M68K)
 /*
  *  stress_wcscmp()
@@ -427,7 +427,7 @@ static size_t stress_wcscmp(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		WCSCHK(info, 0 == test_wcscmp(str1, str1));
 		WCSCHK(info, 0 == test_wcscmp(str2, str2));
 
@@ -447,7 +447,7 @@ static size_t stress_wcscmp(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSNCMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcsncmp()
  *	stress on wcsncmp
@@ -463,7 +463,7 @@ static size_t stress_wcsncmp(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		WCSCHK(info, 0 == test_wcsncmp(str1, str1, len1));
 		WCSCHK(info, 0 == test_wcsncmp(str2, str2, len2));
 
@@ -483,7 +483,7 @@ static size_t stress_wcsncmp(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSLEN) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcslen()
  *	stress on wcslen
@@ -499,12 +499,12 @@ static size_t stress_wcslen(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		WCSCHK(info, len1 - 1 == test_wcslen(str1));
 		WCSCHK(info, len1 - 1 - i == test_wcslen(str1 + i));
 	}
 
-	for (i = 0; stress_continue_flag() && (i < len2 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len2 - 1)); i++) {
 		WCSCHK(info, len2 - 1 == test_wcslen(str2));
 		WCSCHK(info, len2 - 1 - i == test_wcslen(str2 + i));
 	}
@@ -514,7 +514,7 @@ static size_t stress_wcslen(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSCOLL) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcscoll()
  *	stress on wcscoll
@@ -529,7 +529,7 @@ static size_t stress_wcscoll(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		WCSCHK(info, 0 == test_wcscoll(str1, str1));
 		WCSCHK(info, 0 == test_wcscoll(str2, str2));
 
@@ -549,7 +549,7 @@ static size_t stress_wcscoll(stress_args_t *args, stress_wcs_args_t *info)
 #endif
 
 #if defined(HAVE_WCSXFRM) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 /*
  *  stress_wcsxfrm()
  *	stress on wcsxfrm
@@ -566,7 +566,7 @@ static size_t stress_wcsxfrm(stress_args_t *args, stress_wcs_args_t *info)
 	const size_t strdstlen = info->strdstlen;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		WCSCHK(info, 0 != test_wcsxfrm(strdst, str1, strdstlen));
 		*strdst = '\0';
@@ -591,64 +591,64 @@ static size_t stress_wcs_all(stress_args_t *args, stress_wcs_args_t *info);
 static const stress_wcs_method_info_t wcs_methods[] = {
 	{ "all",		stress_wcs_all,		NULL },	/* Special "all" test */
 #if defined(HAVE_WCSCASECMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcscasecmp",		stress_wcscasecmp,	(void *)wcscasecmp },
 #endif
 #if defined(HAVE_WCSLCAT) &&		\
     defined(HAVE_WCSLEN) &&		\
-    defined(HAVE_WCHAR_H) &&		\
+    defined(HAVE_WCHAR) &&		\
     !defined(HAVE_COMPILER_PCC) &&	\
     !defined(BUILD_STATIC)
 	{ "wcslcat",		stress_wcslcat,		(void *)wcslcat },
 #elif defined(HAVE_WCSCAT) &&	\
-      defined(HAVE_WCHAR_H)
+      defined(HAVE_WCHAR)
 	{ "wcscat",		stress_wcscat,		(void *)wcscat },
 #endif
 #if defined(HAVE_WCSCHR) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcschr",		stress_wcschr,		(void *)wcschr },
 #endif
 #if defined(HAVE_WCSCMP) &&	\
-    defined(HAVE_WCHAR_H) &&	\
+    defined(HAVE_WCHAR) &&	\
     !defined(STRESS_ARCH_M68K)
 	{ "wcscmp",		stress_wcscmp,		(void *)wcscmp },
 #endif
 #if defined(HAVE_WCSLCPY) &&		\
     defined(HAVE_WCSLEN) &&		\
-    defined(HAVE_WCHAR_H) &&		\
+    defined(HAVE_WCHAR) &&		\
     !defined(HAVE_COMPILER_PCC) &&	\
     !defined(BUILD_STATIC)
 	{ "wcslcpy",		stress_wcslcpy,		(void *)wcslcpy },
 #elif defined(HAVE_WCSCPY) &&	\
-      defined(HAVE_WCHAR_H)
+      defined(HAVE_WCHAR)
 	{ "wcscpy",		stress_wcscpy,		(void *)wcscpy },
 #endif
 #if defined(HAVE_WCSLEN) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcslen",		stress_wcslen,		(void *)wcslen },
 #endif
 #if defined(HAVE_WCSNCASECMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcsncasecmp",	stress_wcsncasecmp,	(void *)wcsncasecmp },
 #endif
 #if defined(HAVE_WCSNCAT) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcsncat",		stress_wcsncat,		(void *)wcsncat },
 #endif
 #if defined(HAVE_WCSNCMP) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcsncmp",		stress_wcsncmp,		(void *)wcsncmp },
 #endif
 #if defined(HAVE_WCSRCHR) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcsrchr",		stress_wcsrchr,		(void *)wcschr },
 #endif
 #if defined(HAVE_WCSCOLL) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcscoll",		stress_wcscoll,		(void *)wcscoll },
 #endif
 #if defined(HAVE_WCSXFRM) &&	\
-    defined(HAVE_WCHAR_H)
+    defined(HAVE_WCHAR)
 	{ "wcsxfrm",		stress_wcsxfrm,		(void *)wcsxfrm },
 #endif
 };
@@ -681,31 +681,6 @@ static size_t stress_wcs_all(stress_args_t *args, stress_wcs_args_t *info)
 	return 0;
 }
 
-
-/*
- *  stress_set_wcs_method()
- *	set the specified wcs stress method
- */
-static int stress_set_wcs_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(wcs_methods); i++) {
-		if (!strcmp(wcs_methods[i].name, name)) {
-			stress_set_setting("wcs-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "wcs-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(wcs_methods); i++) {
-		(void)fprintf(stderr, " %s", wcs_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
 /*
  *  stress_wcs()
  *	stress CPU by doing wide character string ops
@@ -736,12 +711,10 @@ static int stress_wcs(stress_args_t *args)
 	info.name = args->name;
 
 	stress_wcs_fill(info.str1, info.len1);
+	stress_zero_metrics(metrics, SIZEOF_ARRAY(metrics));
 
-	for (i = 0; i < SIZEOF_ARRAY(metrics); i++) {
-		metrics[i].duration = 0.0;
-		metrics[i].count = 0.0;
-	}
-
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -781,7 +754,7 @@ static int stress_wcs(stress_args_t *args)
 
 			(void)snprintf(msg, sizeof(msg), "%s calls per sec", wcs_methods[i].name);
 			stress_metrics_set(args, j, msg,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
@@ -789,21 +762,20 @@ static int stress_wcs(stress_args_t *args)
 	return info.failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-static void stress_wcs_set_default(void)
+static const char *stress_wcs_method(const size_t i)
 {
-	stress_set_wcs_method("all");
+	return (i < SIZEOF_ARRAY(wcs_methods)) ? wcs_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_wcs_method,	stress_set_wcs_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_wcs_method, "wcs-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_wcs_method },
+	END_OPT,
 };
 
-stressor_info_t stress_wcs_info = {
+const stressor_info_t stress_wcs_info = {
 	.stressor = stress_wcs,
-	.set_default = stress_wcs_set_default,
-	.class = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without wchar.h or bsd/wchar.h"

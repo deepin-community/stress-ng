@@ -1,6 +1,6 @@
-/*
+/*.
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,6 +24,8 @@
 #include "core-killpid.h"
 #include "core-madvise.h"
 #include "core-net.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_SOCKIOS_H)
 #include <linux/sockios.h>
@@ -58,9 +60,7 @@ UNEXPECTED
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define MIN_SOCKET_PORT		(1025)
-#define MAX_SOCKET_PORT		(65535)
-#define DEFAULT_SOCKET_PORT	(1000)
+#define DEFAULT_SOCKET_PORT	(2000)
 
 #define MIN_SOCKET_MSGS		(1)
 #define MAX_SOCKET_MSGS		(10000000)
@@ -106,54 +106,16 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_sock_option()
- *	generic helper to set an option
- */
-static int stress_set_sock_option(
-	const char *setting,
-	const stress_sock_options_t options[],
-	const char *opt)
-{
-	size_t i;
-
-	for (i = 0; options[i].optname; i++) {
-		if (!strcmp(opt, options[i].optname)) {
-			int type = options[i].optval;
-
-			stress_set_setting(setting, TYPE_ID_INT, &type);
-			return 0;
-		}
-	}
-	(void)fprintf(stderr, "%s option '%s' not known, options are:", setting, opt);
-	for (i = 0; options[i].optname; i++) {
-		(void)fprintf(stderr, "%s %s",
-			i == 0 ? "" : ",", options[i].optname);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-/*
- *  stress_set_sock_opts()
- *	parse --sock-opts
- */
-static int stress_set_sock_opts(const char *opt)
-{
-	static const stress_sock_options_t sock_opts[] = {
-		{ "random",	SOCKET_OPT_RANDOM },
-		{ "send",	SOCKET_OPT_SEND },
-		{ "sendmsg",	SOCKET_OPT_SENDMSG },
+static const stress_sock_options_t sock_options_opts[] = {
+	{ "random",	SOCKET_OPT_RANDOM },
+	{ "send",	SOCKET_OPT_SEND },
+	{ "sendmsg",	SOCKET_OPT_SENDMSG },
 #if defined(HAVE_SENDMMSG)
-		{ "sendmmsg",	SOCKET_OPT_SENDMMSG },
+	{ "sendmmsg",	SOCKET_OPT_SENDMMSG },
 #else
-		UNEXPECTED
+	UNEXPECTED
 #endif
-		{ NULL,		0 }
-	};
-
-	return stress_set_sock_option("sock-opts", sock_opts, opt);
-}
+};
 
 static const char * PURE stress_recv_func_str(const int sock_opts)
 {
@@ -168,107 +130,24 @@ static const char * PURE stress_recv_func_str(const int sock_opts)
 	return "unknown";
 }
 
-/*
- *  stress_set_sock_type()
- *	parse --sock-type
- */
-static int stress_set_sock_type(const char *opt)
-{
-	static const stress_sock_options_t sock_types[] = {
+static const stress_sock_options_t sock_options_types[] = {
 #if defined(SOCK_STREAM)
-		{ "stream",	SOCK_STREAM  },
+	{ "stream",	SOCK_STREAM  },
 #endif
 #if defined(SOCK_SEQPACKET)
-		{ "seqpacket",	SOCK_SEQPACKET },
+	{ "seqpacket",	SOCK_SEQPACKET },
 #endif
 #if defined(SOCK_DGRAM)
-		{ "dgram",	SOCK_DGRAM },
+	{ "dgram",	SOCK_DGRAM },
 #endif
-		{ NULL,		0 }
-	};
+};
 
-	return stress_set_sock_option("sock-type", sock_types, opt);
-}
-
-/*
- *  stress_set_sock_msgs()
- *	set number of messages to send per connection
- */
-static int stress_set_sock_msgs(const char *opt)
-{
-	size_t sock_msgs;
-
-	sock_msgs = (size_t)stress_get_uint64(opt);
-	stress_check_range("sock-msgs", (uint64_t)sock_msgs,
-                MIN_SOCKET_MSGS, MAX_SOCKET_MSGS);
-	return stress_set_setting("sock-msgs", TYPE_ID_SIZE_T, &sock_msgs);
-}
-
-/*
- *  stress_set_sock_port()
- *	set port to use
- */
-static int stress_set_sock_port(const char *opt)
-{
-	int sock_port;
-
-	stress_set_net_port("sock-port", opt,
-		MIN_SOCKET_PORT, MAX_SOCKET_PORT, &sock_port);
-	return stress_set_setting("sock-port", TYPE_ID_INT, &sock_port);
-}
-
-static int stress_set_sock_if(const char *name)
-{
-	return stress_set_setting("sock-if", TYPE_ID_STR, name);
-}
-
-/*
- *  stress_set_sock_protocol()
- *	parse --sock-protocol
- */
-static int stress_set_sock_protocol(const char *opt)
-{
-	static const stress_sock_options_t sock_protocols[] = {
-		{ "tcp",	IPPROTO_TCP},
+static const stress_sock_options_t sock_options_protocols[] = {
+	{ "tcp",	IPPROTO_TCP},
 #if defined(IPPROTO_MPTCP)
-		{ "mptcp",	IPPROTO_MPTCP},
+	{ "mptcp",	IPPROTO_MPTCP},
 #endif
-		{ NULL,		0 }
-	};
-
-	return stress_set_sock_option("sock-protocol", sock_protocols, opt);
-}
-
-
-/*
- *  stress_set_sock_domain()
- *	set the sock domain option
- */
-static int stress_set_sock_domain(const char *name)
-{
-	int ret, sock_domain;
-
-	ret = stress_set_net_domain(DOMAIN_ALL, "sock-domain",
-				     name, &sock_domain);
-	stress_set_setting("sock-domain", TYPE_ID_INT, &sock_domain);
-
-	return ret;
-}
-
-/*
- *  stress_set_sock_zerocopy()
- *	set the sock zerocopy option
- */
-static int stress_set_sock_zerocopy(const char *opt)
-{
-#if defined(MSG_ZEROCOPY)
-	return stress_set_setting_true("sock-zerocopy", opt);
-#else
-	(void)opt;
-	pr_inf("sock: cannot enable sock-zerocopy, MSG_ZEROCOPY is not available\n");
-	return 0;
-#endif
-}
+};
 
 /*
  *  stress_get_congestion_controls()
@@ -298,7 +177,7 @@ static char **stress_get_congestion_controls(const int sock_domain, size_t *n_ct
 	 *  Over-allocate ctrls, it is impossible to have more than
 	 *  buf_len strings strok'd from the array buf.
 	 */
-	ctrls = calloc((size_t)buf_len, sizeof(char *));
+	ctrls = (char **)calloc((size_t)buf_len, sizeof(char *));
 	if (!ctrls)
 		return NULL;
 
@@ -625,58 +504,63 @@ static int OPTIMIZE3 stress_sock_client(
 		double metric;
 
 retry:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			goto free_controls;
 
 		/* Exercise illegal socket family  */
 		fd = socket(~0, sock_type, sock_protocol);
-		if (fd >= 0)
+		if (UNLIKELY(fd >= 0))
 			(void)close(fd);
 
 		/* Exercise illegal socket type */
 		fd = socket(sock_domain, ~0, sock_protocol);
-		if (fd >= 0)
+		if (UNLIKELY(fd >= 0))
 			(void)close(fd);
 
 		/* Exercise illegal socket protocol */
 		fd = socket(sock_domain, sock_type, ~0);
-		if (fd >= 0)
+		if (UNLIKELY(fd >= 0))
 			(void)close(fd);
 
 		fd = socket(sock_domain, sock_type, sock_protocol);
-		if (fd < 0) {
+		if (UNLIKELY(fd < 0)) {
 			pr_fail("%s: socket failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto free_controls;
 		}
-#if defined(MSG_ZEROCOPY)
+#if defined(MSG_ZEROCOPY) && defined(SO_ZEROCOPY)
 		if (sock_zerocopy) {
 			int so_zerocopy = 1;
+			static bool warned = false;
 
-			if (setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &so_zerocopy, sizeof(so_zerocopy)) == 0) {
-				recvflag |= MSG_ZEROCOPY;
-			} else {
-				if (args->instance == 0)
-					pr_inf("%s: cannot enable zerocopy on data being received\n", args->name);
+			if (!warned) {
+				if (setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &so_zerocopy, sizeof(so_zerocopy)) == 0) {
+					recvflag |= MSG_ZEROCOPY;
+				} else {
+					if (stress_instance_zero(args)) {
+						warned = true;
+						pr_inf("%s: cannot enable zerocopy on data being received\n", args->name);
+					}
+				}
 			}
 		}
 #else
 		(void)sock_zerocopy;
 #endif
 
-		if (stress_set_sockaddr_if(args->name, args->instance, mypid,
-				sock_domain, sock_port, sock_if,
-				&addr, &addr_len, NET_ADDR_ANY) < 0) {
+		if (UNLIKELY(stress_set_sockaddr_if(args->name, args->instance, mypid,
+						    sock_domain, sock_port, sock_if,
+						    &addr, &addr_len, NET_ADDR_ANY) < 0)) {
 			(void)close(fd);
 			goto free_controls;
 		}
-		if (connect(fd, addr, addr_len) < 0) {
-			int errno_tmp = errno;
+		if (UNLIKELY(connect(fd, addr, addr_len) < 0)) {
+			const int errno_tmp = errno;
 
 			(void)close(fd);
 			(void)shim_usleep(10000);
 			retries++;
-			if (retries > 100) {
+			if (UNLIKELY(retries > 100)) {
 				/* Give up.. */
 				pr_fail("%s: connect failed, errno=%d (%s)\n",
 					args->name, errno_tmp, strerror(errno_tmp));
@@ -892,7 +776,7 @@ retry:
 			 *  to ensure we exercise it without impacting
 			 *  performance.
 			 */
-			if ((count & 0x3ff) == 0) {
+			if (UNLIKELY((count & 0x3ff) == 0)) {
 				int val;
 
 				VOID_RET(int, ioctl(fd, FIONREAD, &val));
@@ -909,7 +793,7 @@ retry:
 			}
 #endif
 			/*  Periodically exercise invalid recv calls */
-			if ((count & 0x7ff) == 0)
+			if (UNLIKELY((count & 0x7ff) == 0))
 				stress_sock_invalid_recv(fd, opt);
 
 			/*
@@ -952,10 +836,11 @@ retry:
 			if (UNLIKELY(n <= 0)) {
 				if (n == 0)
 					break;
-				if ((errno != EINTR) && (errno != ECONNRESET))
+				if (UNLIKELY((errno != EINTR) && (errno != ECONNRESET))) {
 					pr_fail("%s: %s failed, errno=%d (%s)\n",
 						args->name, stress_recv_func_str(opt),
 						errno, strerror(errno));
+				}
 				break;
 			}
 			count++;
@@ -978,7 +863,7 @@ retry:
 		(void)close(fd);
 		metric = (inq_samples > 0) ? (double)inq_bytes / (double)inq_samples : 0.0;
 		stress_metrics_set(args, 2, "byte average in queue length",
-			metric, STRESS_GEOMETRIC_MEAN);
+			metric, STRESS_METRIC_GEOMETRIC_MEAN);
 	} while (stress_continue(args));
 
 #if defined(AF_UNIX) &&		\
@@ -997,7 +882,7 @@ free_controls:
 	return rc;
 }
 
-static bool stress_send_error(const int err)
+static bool PURE stress_send_error(const int err)
 {
 	return ((err != EINTR) &&
 		(err != EPIPE) &&
@@ -1039,7 +924,12 @@ static int OPTIMIZE3 stress_sock_server(
 	uint32_t count = 0;
 #endif
 
-	(void)stress_get_setting("sock-msgs", &sock_msgs);
+	if (!stress_get_setting("sock-msgs", &sock_msgs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			sock_msgs = MAX_SOCKET_MSGS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			sock_msgs = MIN_SOCKET_MSGS;
+	}
 
 	if (stress_sig_stop_stressing(args->name, SIGALRM) < 0) {
 		rc = EXIT_FAILURE;
@@ -1053,15 +943,20 @@ static int OPTIMIZE3 stress_sock_server(
 		goto die;
 	}
 
-#if defined(MSG_ZEROCOPY)
+#if defined(MSG_ZEROCOPY) && defined(SO_ZEROCOPY)
 	if (sock_zerocopy) {
 		int so_zerocopy = 1;
+		static bool warned = false;
 
-		if (setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &so_zerocopy, sizeof(so_zerocopy)) == 0) {
-			sendflag |= MSG_ZEROCOPY;
-		} else {
-			if (args->instance == 0)
-				pr_inf("%s: cannot enable zerocopy on data being sent\n", args->name);
+		if (!warned) {
+			if (setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &so_zerocopy, sizeof(so_zerocopy)) == 0) {
+				sendflag |= MSG_ZEROCOPY;
+			} else {
+				if (stress_instance_zero(args)) {
+					pr_inf("%s: cannot enable zerocopy on data being sent\n", args->name);
+					warned = true;
+				}
+			}
 		}
 	}
 #else
@@ -1129,7 +1024,7 @@ static int OPTIMIZE3 stress_sock_server(
 	do {
 		int sfd;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 #if defined(HAVE_ACCEPT4)
@@ -1142,7 +1037,7 @@ static int OPTIMIZE3 stress_sock_server(
 #else
 		sfd = accept(fd, (struct sockaddr *)NULL, NULL);
 #endif
-		if (sfd >= 0) {
+		if (LIKELY(sfd >= 0)) {
 			size_t i, j, k;
 			struct sockaddr saddr;
 			socklen_t len;
@@ -1154,7 +1049,7 @@ static int OPTIMIZE3 stress_sock_server(
 #endif
 
 			len = sizeof(saddr);
-			if (getsockname(fd, &saddr, &len) < 0) {
+			if (UNLIKELY(getsockname(fd, &saddr, &len) < 0)) {
 				pr_fail("%s: getsockname failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				(void)close(sfd);
@@ -1184,7 +1079,7 @@ static int OPTIMIZE3 stress_sock_server(
 			}
 
 			len = sizeof(sndbuf);
-			if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) < 0) {
+			if (UNLIKELY(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) < 0)) {
 				pr_fail("%s: getsockopt failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				(void)close(sfd);
@@ -1217,7 +1112,7 @@ static int OPTIMIZE3 stress_sock_server(
 			if (g_opt_flags & OPT_FLAGS_SOCKET_NODELAY) {
 				int one = 1;
 
-				if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+				if (UNLIKELY(setsockopt(fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) < 0)) {
 					pr_inf("%s: setsockopt TCP_NODELAY "
 						"failed and disabled, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
@@ -1229,7 +1124,7 @@ static int OPTIMIZE3 stress_sock_server(
 
 			opt = sock_opts;
 
-			for (k = 0; (k < sock_msgs) && stress_continue(args); k++) {
+			for (k = 0; LIKELY((k < sock_msgs) && stress_continue(args)); k++) {
 				int flag = sendflag;
 
 				if (UNLIKELY(sock_opts == SOCKET_OPT_RANDOM))
@@ -1316,7 +1211,7 @@ retry_sendmmsg:
 						args->name, errno, strerror(errno));
 			}
 #if defined(SIOCOUTQ)
-			if ((count & 0x3ff) == 0) {
+			if (UNLIKELY((count & 0x3ff) == 0)) {
 				int outq_len;
 
 				if (LIKELY(ioctl(sfd, SIOCOUTQ, &outq_len) == 0)) {
@@ -1337,7 +1232,7 @@ retry_sendmmsg:
 		 *  Exercise accept4 with invalid flags
 		 */
 		sfd = accept4(fd, (struct sockaddr *)NULL, NULL, ~0);
-		if (sfd >= 0)
+		if (UNLIKELY(sfd >= 0))
 			(void)close(sfd);
 #endif
 	} while (stress_continue(args));
@@ -1345,10 +1240,10 @@ retry_sendmmsg:
 	duration = stress_time_now() - t;
 	metric = (duration > 0.0) ? (double)msgs / duration : 0.0;
 	stress_metrics_set(args, 0, "messages sent per sec",
-		metric, STRESS_HARMONIC_MEAN);
+		metric, STRESS_METRIC_HARMONIC_MEAN);
 	metric = (outq_samples > 0) ? (double)outq_bytes / (double)outq_samples : 0.0;
 	stress_metrics_set(args, 1, "byte average out queue length",
-		metric, STRESS_HARMONIC_MEAN);
+		metric, STRESS_METRIC_HARMONIC_MEAN);
 
 die_close:
 	(void)close(fd);
@@ -1406,9 +1301,10 @@ static bool stress_sock_kernel_rt(void)
 static int stress_sock(stress_args_t *args)
 {
 	pid_t pid, mypid = getpid();
-	int sock_opts = SOCKET_OPT_SEND;
+	size_t idx;
+	int sock_opts;
 	int sock_domain = AF_INET;
-	int sock_type = SOCK_STREAM;
+	int sock_type;
 	int sock_port = DEFAULT_SOCKET_PORT;
 	int sock_protocol = 0;
 	int sock_zerocopy = false;
@@ -1422,11 +1318,24 @@ static int stress_sock(stress_args_t *args)
 
 	(void)stress_get_setting("sock-if", &sock_if);
 	(void)stress_get_setting("sock-domain", &sock_domain);
-	(void)stress_get_setting("sock-type", &sock_type);
-	(void)stress_get_setting("sock-protocol", &sock_protocol);
 	(void)stress_get_setting("sock-port", &sock_port);
-	(void)stress_get_setting("sock-opts", &sock_opts);
 	(void)stress_get_setting("sock-zerocopy", &sock_zerocopy);
+	sock_opts = stress_get_setting("sock-opts", &idx) ?
+		sock_options_opts[idx].optval : SOCKET_OPT_SEND;
+#if defined(SOCK_STREAM)
+	sock_type = stress_get_setting("sock-type", &idx) ?
+		sock_options_types[idx].optval : SOCK_STREAM;
+#else
+	sock_type = stress_get_setting("sock-type", &idx) ?
+		sock_options_types[idx].optval : 1;
+#endif
+	sock_protocol = stress_get_setting("sock-protocol", &idx) ?
+		sock_options_protocols[idx].optval : IPPROTO_TCP;
+
+#if !defined(MSG_ZEROCOPY)
+	if (sock_zerocopy)
+		pr_inf("sock: cannot enable sock-zerocopy, MSG_ZEROCOPY is not available\n");
+#endif
 
 	if (sock_if) {
 		int ret;
@@ -1440,6 +1349,8 @@ static int stress_sock(stress_args_t *args)
 		}
 	}
 	sock_port += args->instance;
+	if (sock_port > MAX_PORT)
+		sock_port -= (MAX_PORT- MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(sock_port, sock_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -1458,11 +1369,16 @@ static int stress_sock(stress_args_t *args)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (mmap_buffer == MAP_FAILED) {
-		pr_inf("%s: cannot mmap I/O buffer, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %d byte I/O buffer%s, errno=%d (%s), "
+			"skipping stressor\n",
+			args->name, MMAP_BUF_SIZE,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(mmap_buffer, MMAP_BUF_SIZE, "io-buffer");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -1470,7 +1386,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			(void)munmap((void *)mmap_buffer, MMAP_BUF_SIZE);
 			goto finish;
@@ -1501,22 +1417,40 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sock_domain,	stress_set_sock_domain },
-	{ OPT_sock_if,		stress_set_sock_if },
-	{ OPT_sock_msgs,	stress_set_sock_msgs },
-	{ OPT_sock_opts,	stress_set_sock_opts },
-	{ OPT_sock_type,	stress_set_sock_type },
-	{ OPT_sock_port,	stress_set_sock_port },
-	{ OPT_sock_protocol,	stress_set_sock_protocol },
-	{ OPT_sock_zerocopy,	stress_set_sock_zerocopy },
-	{ 0,			NULL }
+static int sock_domain_mask = DOMAIN_ALL;
+
+static const char *stress_sock_opts(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(sock_options_opts)) ? sock_options_opts[i].optname : NULL;
+}
+
+static const char *stress_sock_types(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(sock_options_types)) ? sock_options_types[i].optname : NULL;
+}
+
+static const char *stress_sock_protocols(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(sock_options_protocols)) ? sock_options_protocols[i].optname : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_sock_domain,   "sock-domain",   TYPE_ID_INT_DOMAIN, 0, 0, &sock_domain_mask },
+	{ OPT_sock_if,	     "sock-if",       TYPE_ID_STR, 0, 0, NULL },
+	{ OPT_sock_msgs,     "sock-msgs",     TYPE_ID_SIZE_T, MIN_SOCKET_MSGS, MAX_SOCKET_MSGS, NULL },
+	{ OPT_sock_nodelay,  "sock-nodelay",  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_sock_opts,     "sock-opts",     TYPE_ID_SIZE_T_METHOD, 0, 0, stress_sock_opts },
+	{ OPT_sock_type,     "sock-type",     TYPE_ID_SIZE_T_METHOD, 0, 0, stress_sock_types },
+	{ OPT_sock_port,     "sock-port",     TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	{ OPT_sock_protocol, "sock-protocol", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_sock_protocols },
+	{ OPT_sock_zerocopy, "sock-zerocopy", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_sock_info = {
+const stressor_info_t stress_sock_info = {
 	.stressor = stress_sock,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

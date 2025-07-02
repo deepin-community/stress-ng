@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -68,7 +68,7 @@ static bool keep_running(void)
  */
 static void stress_exit_group_sleep(void)
 {
-	shim_nanosleep_uint64(10000);
+	(void)shim_nanosleep_uint64(10000);
 }
 
 /*
@@ -77,9 +77,9 @@ static void stress_exit_group_sleep(void)
  */
 static void *stress_exit_group_func(void *arg)
 {
-	static void *nowt = NULL;
-
 	(void)arg;
+
+	stress_random_small_sleep();
 
 	if (pthread_mutex_lock(&mutex) == 0) {
 		pthread_count++;
@@ -94,7 +94,7 @@ static void *stress_exit_group_func(void *arg)
 
 	/* should never get here */
 	exit_group_failed++;
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -114,9 +114,9 @@ static void NORETURN stress_exit_group_child(stress_args_t *args)
 	 *  in pthread or this process to check if
 	 *  SIGALRM has been sent.
 	 */
-	sigemptyset(&set);
-	sigaddset(&set, SIGALRM);
-	sigprocmask(SIG_BLOCK, &set, NULL);
+	(void)sigemptyset(&set);
+	(void)sigaddset(&set, SIGALRM);
+	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
 	(void)shim_memset(&pthreads, 0, sizeof(pthreads));
 	ret = pthread_mutex_lock(&mutex);
@@ -145,7 +145,7 @@ static void NORETURN stress_exit_group_child(stress_args_t *args)
 			exit_group_failed++;
 			_exit(0);
 		}
-		if (!(keep_running() && stress_continue(args)))
+		if (UNLIKELY(!(keep_running() && stress_continue(args))))
 			break;
 	}
 	ret = pthread_mutex_unlock(&mutex);
@@ -162,7 +162,7 @@ static void NORETURN stress_exit_group_child(stress_args_t *args)
 	for (j = 0; j < 1000; j++) {
 		bool all_running = false;
 
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			stop_running();
 			shim_exit_group(0);
 			break;
@@ -186,6 +186,8 @@ static void NORETURN stress_exit_group_child(stress_args_t *args)
  */
 static int stress_exit_group(stress_args_t *args)
 {
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
         stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue(args)) {
@@ -210,10 +212,11 @@ again:
 			stress_exit_group_child(args);
 		} else {
 			int status;
+			pid_t wret;
 
-			ret = waitpid(pid, &status, 0);
+			wret = waitpid(pid, &status, 0);
 			(void)pthread_mutex_destroy(&mutex);
-			if (ret < 0)
+			if (wret < 0)
 				break;
 
 			stress_bogo_inc(args);
@@ -222,24 +225,24 @@ again:
 
         stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	if (exit_group_failed > 0)
+	if (exit_group_failed > 0) {
 		pr_fail("%s: at least %" PRIu64 " exit_group() calls failed to exit\n",
 			args->name, exit_group_failed);
-
+		return EXIT_FAILURE;
+	}
 	return EXIT_SUCCESS;
 }
 
-
-stressor_info_t stress_exit_group_info = {
+const stressor_info_t stress_exit_group_info = {
 	.stressor = stress_exit_group,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_exit_group_info = {
+const stressor_info_t stress_exit_group_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without pthread support or exit_group() system call"

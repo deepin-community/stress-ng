@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,7 +19,16 @@
 #ifndef CORE_AFFINITY_H
 #define CORE_AFFINITY_H
 
+#include "config.h"
+
 extern int stress_set_cpu_affinity(const char *arg);
 extern int stress_change_cpu(stress_args_t *args, const int old_cpu);
+
+#if defined(HAVE_CPU_SET_T)
+extern int stress_parse_cpu_affinity(const char *arg, cpu_set_t *set, int *setbits);
+#endif
+
+extern WARN_UNUSED uint32_t stress_get_usable_cpus(uint32_t **cpus, const bool use_affinity);
+extern void stress_free_usable_cpus(uint32_t **cpus);
 
 #endif

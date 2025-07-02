@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,6 +26,11 @@
 #define MAX_FPUNCH_BYTES	(2 * GB)
 #define DEFAULT_FPUNCH_BYTES	(16 * MB)
 
+#if defined(HAVE_PREADV) || \
+    defined(HAVE_PWRITEV)
+#define HAVE_PREADV_WRITEV
+#endif
+
 static const stress_help_t help[] = {
 	{ NULL,	"fpunch N",		"start N workers punching holes in a 16MB file" },
 	{ NULL,	"fpunch-bytes N",	"size of file being punched" },
@@ -33,19 +38,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_fpunch_bytes(const char *opt)
-{
-	uint64_t fpunch_bytes;
-
-	fpunch_bytes = stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("fpunch-bytes", fpunch_bytes,
-		MIN_FPUNCH_BYTES, MAX_FPUNCH_BYTES);
-	return stress_set_setting("fpunch-bytes", TYPE_ID_UINT64, &fpunch_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fpunch_bytes,	stress_set_fpunch_bytes },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_fpunch_bytes, "fpunch-bytes", TYPE_ID_UINT64_BYTES_FS, MIN_FPUNCH_BYTES, MAX_FPUNCH_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_FALLOCATE)
@@ -107,16 +102,15 @@ static ssize_t stress_punch_pwrite(
 	const off_t offset)
 {
 #if defined(HAVE_PWRITEV)
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 	return pwrite(fd, data, size, offset);
 #else
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
-	if (lseek(fd, offset, SEEK_SET) < (off_t)-1)
+	if (lseek(fd, offset, SEEK_SET) < 0)
 		return 0;
-
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 	return write(fd, data, size);
 #endif
@@ -134,12 +128,12 @@ static inline int stress_punch_check_zero(
 	const size_t size)
 {
 	ssize_t ret;
-	register char *ptr, *ptr_end;
+	register const char *ptr, *ptr_end;
 
 #if defined(HAVE_PREADV)
 	ret = pread(fd, data, size, offset);
 #else
-	if (lseek(fd, offset, SEEK_SET) < (off_t)-1)
+	if (lseek(fd, offset, SEEK_SET) < 0)
 		return 0;
 	ret = read(fd, data, size);
 #endif
@@ -151,7 +145,7 @@ static inline int stress_punch_check_zero(
 	while (ptr < ptr_end) {
 		if (*ptr) {
 			pr_inf("%s: data at file offset 0x%" PRIxMAX " was 0x%2.2x and not zero\n",
-				args->name, (intmax_t)(offset + (ptr_end - ptr)), *ptr & 0xff);
+				args->name, (intmax_t)(offset + (ptr - data)), *ptr & 0xff);
 			return -1;
 		}
 		ptr++;
@@ -178,14 +172,14 @@ static int stress_punch_action(
 	static off_t prev_offset = ~(off_t)0;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	/* Don't duplicate writes to previous location */
 	if ((mode->write_before) &&
 	    (prev_size == size) && (prev_offset == offset))
 		(void)stress_punch_pwrite(args, buf->buf_before, fd, size, offset);
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 	(void)shim_fallocate(fd, mode->mode, offset, (off_t)size);
 	if (verify &&
@@ -195,12 +189,12 @@ static int stress_punch_action(
 		if (stress_punch_check_zero(args, buf->buf_read, fd, offset, size) < 0)
 			return -1;
 	}
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	if (mode->write_after)
 		(void)stress_punch_pwrite(args, buf->buf_after, fd, size, offset);
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	prev_size = size;
@@ -269,13 +263,13 @@ static int stress_punch_file(
 		/* Create some holes to make more extents */
 
 		(void)shim_fallocate(fd, FALLOC_FL_PUNCH_HOLE, offset, 16);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_fallocate(fd, FALLOC_FL_PUNCH_HOLE, offset + 128, 16);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_fallocate(fd, FALLOC_FL_PUNCH_HOLE, (off_t)stress_mwc64modn(fpunch_bytes), 16);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #endif
 		offset += (256 * (instance + 1));
@@ -285,7 +279,7 @@ static int stress_punch_file(
 		VOID_RET(int, ftruncate(fd, (off_t)fpunch_bytes));
 
 		stress_bogo_inc(args);
-	} while ((rc == 0) && stress_continue(args));
+	} while (LIKELY((rc == 0) && stress_continue(args)));
 
 	return rc;
 }
@@ -299,23 +293,41 @@ static int stress_fpunch(stress_args_t *args)
 	int fd = -1, ret, rc = EXIT_SUCCESS;
 	char filename[PATH_MAX];
 	off_t offset;
-	pid_t pids[STRESS_PUNCH_PIDS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	size_t i, extents, n;
 	const size_t stride = (size_t)BUF_SIZE << 1;
 	stress_punch_buf_t *buf;
-	uint64_t punches, fpunch_bytes = DEFAULT_FPUNCH_BYTES, max_punches;
+	uint64_t punches, fpunch_bytes, fpunch_bytes_total = DEFAULT_FPUNCH_BYTES, max_punches;
 
-	(void)stress_get_setting("fpunch-bytes", &fpunch_bytes);
+	if (!stress_get_setting("fpunch-bytes", &fpunch_bytes_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			fpunch_bytes_total = MAX_FPUNCH_BYTES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			fpunch_bytes_total = MIN_FPUNCH_BYTES;
+	}
+	fpunch_bytes = fpunch_bytes_total / args->instances;
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, fpunch_bytes, fpunch_bytes_total);
 	max_punches = (off_t)(fpunch_bytes / (off_t)stride);
+
+	s_pids = stress_sync_s_pids_mmap(STRESS_PUNCH_PIDS);
+	if (s_pids == MAP_FAILED) {
+                pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, STRESS_PUNCH_PIDS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+        }
 
 	buf = (stress_punch_buf_t *)stress_mmap_populate(NULL, sizeof(*buf),
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buf == MAP_FAILED) {
-		pr_inf("%s: failed to mmap %zd sized buffer, errno=%d (%s), skipping stressor\n",
-			args->name, sizeof(*buf), errno, strerror(errno));
-		return EXIT_NO_RESOURCE;
+		pr_inf("%s: failed to mmap %zu sized buffer%s, errno=%d (%s), skipping stressor\n",
+			args->name, sizeof(*buf), stress_get_memfree_str(),
+			errno, strerror(errno));
+		rc = EXIT_NO_RESOURCE;
+		goto tidy_s_pids;
 	}
+	stress_set_vma_anon_name(buf, sizeof(*buf), "fpunch-buffer");
 	(void)stress_madvise_mergeable(buf, sizeof(*buf));
 
 	ret = stress_temp_dir_mk_args(args);
@@ -332,8 +344,6 @@ static int stress_fpunch(stress_args_t *args)
 			args->name, filename, errno, strerror(errno));
 		goto tidy_temp;
 	}
-	(void)shim_unlink(filename);
-
 	stress_file_rw_hint_short(fd);
 
 	(void)shim_memset(&buf->buf_before, 0xff, sizeof(buf->buf_before));
@@ -346,7 +356,7 @@ static int stress_fpunch(stress_args_t *args)
 	 */
 	offset = (off_t)fpunch_bytes;
 	n = 0;
-	for (punches = 0; stress_continue(args) && (punches < max_punches); punches++) {
+	for (punches = 0; LIKELY(stress_continue(args) && (punches < max_punches)); punches++) {
 		ssize_t r;
 
 		offset -= stride;
@@ -354,7 +364,7 @@ static int stress_fpunch(stress_args_t *args)
 		n += (r > 0) ? (size_t)r : 0;
 	}
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		goto tidy;
 
 	/* Zero sized file is a bit concerning, so abort */
@@ -365,32 +375,62 @@ static int stress_fpunch(stress_args_t *args)
 		goto tidy;
 	}
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-
-	(void)shim_memset(pids, 0, sizeof(pids));
 	for (i = 0; i < STRESS_PUNCH_PIDS; i++) {
-		pids[i] = fork();
-		if (pids[i] == 0) {
+		stress_sync_start_init(&s_pids[i]);
+
+		s_pids[i].pid = fork();
+		if (s_pids[i].pid == 0) {
+			s_pids[i].pid = getpid();
+			stress_sync_start_wait_s_pid(&s_pids[i]);
+#if !defined(HAVE_PREADV_WRITEV)
+			int tmp_fd;
+#endif
+
 			VOID_RET(int, stress_sighandler(args->name, SIGALRM, stress_fpunch_child_handler, NULL));
-			if (stress_punch_file(args, buf, fpunch_bytes, i, fd) < 0)
+#if defined(HAVE_PREADV_WRITEV)
+			ret = stress_punch_file(args, buf, fpunch_bytes, i, fd);
+			(void)close(fd);
+#else
+			/*
+			 *  If system does not support preadv/pwritev then
+			 *  each child requires it's own fd. This is because
+			 *  lseeks on a shared fd will set the offset for all
+			 *  the child processes sharing the fd and we want to
+			 *  avoid this.
+			 */
+			if ((tmp_fd = open(filename, O_RDWR, S_IRUSR | S_IWUSR)) < 0) {
+				rc = stress_exit_status(errno);
+				pr_fail("%s: open %s failed, errno=%d (%s)\n",
+					args->name, filename, errno, strerror(errno));
 				_exit(EXIT_FAILURE);
-			_exit(EXIT_SUCCESS);
+			}
+			ret = stress_punch_file(args, buf, fpunch_bytes, i, tmp_fd);
+			(void)close(tmp_fd);
+#endif
+			_exit((ret < 0) ? EXIT_FAILURE : EXIT_SUCCESS);
+		} else if (s_pids[i].pid > 0) {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Wait for test run duration to complete */
 	(void)sleep((unsigned int)g_opt_timeout);
 
-	if (stress_kill_and_wait_many(args, pids, STRESS_PUNCH_PIDS, SIGALRM, true) != EXIT_SUCCESS)
+	if (stress_kill_and_wait_many(args, s_pids, STRESS_PUNCH_PIDS, SIGALRM, true) != EXIT_SUCCESS)
 		rc = EXIT_FAILURE;
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	extents = stress_get_extents(fd);
 	stress_metrics_set(args, 0, "extents per file",
-		(double)extents, STRESS_GEOMETRIC_MEAN);
+		(double)extents, STRESS_METRIC_GEOMETRIC_MEAN);
 
 tidy:
+	(void)shim_unlink(filename);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	if (fd != -1)
 		(void)close(fd);
@@ -398,22 +438,24 @@ tidy_temp:
 	(void)stress_temp_dir_rm_args(args);
 tidy_buf:
 	(void)munmap((void *)buf, sizeof(*buf));
+tidy_s_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, STRESS_PUNCH_PIDS);
 
 	return rc;
 }
 
-stressor_info_t stress_fpunch_info = {
+const stressor_info_t stress_fpunch_info = {
 	.stressor = stress_fpunch,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_fpunch_info = {
+const stressor_info_t stress_fpunch_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without fallocate() support"

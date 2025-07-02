@@ -144,8 +144,8 @@ static int stress_smi_count(const int cpus, uint64_t *count)
 		uint64_t val;
 		int ret;
 
-		ret = stress_x86_smi_readmsr64(i, MSR_SMI_COUNT, &val);
-		if (ret < 0)
+		ret = stress_x86_readmsr64(i, MSR_SMI_COUNT, &val);
+		if (UNLIKELY(ret < 0))
 			return -1;
 		*count += val;
 	}
@@ -173,14 +173,14 @@ static int stress_smi(stress_args_t *args)
 	 *  If MSR can't be read maybe we need to load
 	 *  the module to do so
 	 */
-	if (stress_x86_smi_readmsr64(0, MSR_SMI_COUNT, &val) < 0)
+	if (stress_x86_readmsr64(0, MSR_SMI_COUNT, &val) < 0)
 		load_module = true;
 
 	/*
 	 *  Module load failure is not a problem, it just means
 	 *  we can't get the SMI count
 	 */
-	if (load_module && (args->instance == 0)) {
+	if (load_module && (stress_instance_zero(args))) {
 		VOID_RET(int, stress_module_load(args->name, "msr", NULL, &already_loaded));
 	}
 
@@ -189,9 +189,12 @@ static int stress_smi(stress_args_t *args)
 			"permissions on the APM port 0x%2x\n",
 			args->name, APM_PORT);
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		d1 = stress_time_now();
 		if (stress_smi_count(cpus, &s1) < 0)
 			read_msr_ok = false;
@@ -222,7 +225,7 @@ static int stress_smi(stress_args_t *args)
 
 		/* check for register clobbering */
 		for (i = 0; i < SIZEOF_ARRAY(r1.regs); i++) {
-			if (r1.regs[i] != r2.regs[i]) {
+			if (UNLIKELY(r1.regs[i] != r2.regs[i])) {
 				pr_fail("%s: register %s, before SMI: %" PRIx64 ", after SMI: %" PRIx64 "\n",
 					args->name, reg_names[i],
 					r1.regs[i], r2.regs[i]);
@@ -237,7 +240,7 @@ static int stress_smi(stress_args_t *args)
 
 	VOID_RET(int, ioperm(APM_PORT, 2, 0));
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		uint64_t s2;
 		const double d2 = stress_time_now();
 
@@ -270,17 +273,17 @@ static int stress_smi(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_smi_info = {
+const stressor_info_t stress_smi_info = {
 	.stressor = stress_smi,
-	.class = CLASS_CPU | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_CPU | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.supported = stress_smi_supported
 };
 #else
-stressor_info_t stress_smi_info = {
+const stressor_info_t stress_smi_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_CPU | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built for non-x86 target without sys/io.h or ioperm() or out op-code"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,8 @@
 #include "core-builtin.h"
 #include "core-killpid.h"
 
+#include <time.h>
+
 #if defined(HAVE_MQUEUE_H)
 #include <mqueue.h>
 #endif
@@ -41,20 +43,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_mq_size(const char *opt)
-{
-	uint64_t sz;
-	int mq_size;
-
-	sz = stress_get_uint64(opt);
-	stress_check_range("mq-size", sz, MIN_MQ_SIZE, MAX_MQ_SIZE);
-	mq_size = (int)sz;
-	return stress_set_setting("mq-size", TYPE_ID_INT, &mq_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mq_size,	stress_set_mq_size },
-	{ 0,		NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mq_size, "mq-size", TYPE_ID_INT, MIN_MQ_SIZE, MAX_MQ_SIZE, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MQUEUE_H) &&	\
@@ -86,7 +77,7 @@ static void stress_mq_invalid_open(
 	mqd_t mq;
 
 	mq = mq_open(name, oflag, mode, attr);
-	if (mq >= 0) {
+	if (UNLIKELY(mq >= 0)) {
 		(void)mq_close(mq);
 		(void)mq_unlink(name);
 	}
@@ -108,6 +99,7 @@ static int stress_mq(stress_args_t *args)
 	time_t time_start;
 	struct timespec abs_timeout;
 	unsigned int max_prio = UINT_MAX;
+	int rc = EXIT_SUCCESS;
 
 #if defined(SIGUSR2)
 	if (stress_sighandler(args->name, SIGUSR2, stress_sighandler_nop, NULL) < 0)
@@ -116,10 +108,10 @@ static int stress_mq(stress_args_t *args)
 
 #if defined(_SC_MQ_PRIO_MAX)
 	{
-		long sysconf_ret;
+		long int sysconf_ret;
 
 		sysconf_ret = sysconf(_SC_MQ_PRIO_MAX);
-		if ((sysconf_ret > 0) && (sysconf_ret < (long)UINT_MAX))
+		if ((sysconf_ret > 0) && (sysconf_ret < (long int)UINT_MAX))
 			max_prio = (unsigned int)(sysconf_ret + 1);
 	}
 #endif
@@ -152,6 +144,8 @@ static int stress_mq(stress_args_t *args)
 
 	if (sz > max_sz)
 		sz = max_sz;
+	if (sz <= 0)
+		sz = 1;
 	/*
 	 *  Determine a workable MQ size if we can't determine it from /proc
 	 */
@@ -170,7 +164,7 @@ static int stress_mq(stress_args_t *args)
 			return EXIT_NO_RESOURCE;
 		}
 		if (errno == ENOSYS) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: POSIX message queues not implemented, skipping stressor\n",
 					args->name);
 			return EXIT_NOT_IMPLEMENTED;
@@ -203,7 +197,7 @@ static int stress_mq(stress_args_t *args)
 			args->name, mq_size, sz);
 	}
 	pr_dbg("%s: POSIX message queue %s with %lu messages\n",
-		args->name, mq_name, (unsigned long)attr.mq_maxmsg);
+		args->name, mq_name, (unsigned long int)attr.mq_maxmsg);
 
 	if (time(&time_start) == ((time_t)-1)) {
 		do_timed = false;
@@ -215,7 +209,8 @@ static int stress_mq(stress_args_t *args)
 		abs_timeout.tv_nsec = 0;
 	}
 
-
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -226,7 +221,7 @@ again:
 		(void)mq_close(mq);
 		(void)mq_unlink(mq_name);
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -254,7 +249,8 @@ again:
 					char buffer[1024];
 					struct stat statbuf;
 					void *ptr;
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 					struct pollfd fds[1];
 #endif
 					/* On Linux, one can seek on a mq descriptor */
@@ -265,9 +261,10 @@ again:
 
 					/* illegal mmap, should be ENODEV */
 					ptr = mmap(NULL, 16, PROT_READ, MAP_SHARED, mq, 0);
-					if (ptr != MAP_FAILED)
+					if (UNLIKELY(ptr != MAP_FAILED))
 						(void)munmap(ptr, 16);
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 					/* ..and poll too */
 					fds[0].fd = mq;
 					fds[0].events = POLLIN;
@@ -276,11 +273,12 @@ again:
 #endif
 					/* Read state of queue from mq fd */
 					sret = read(mq, buffer, sizeof(buffer));
-					if (sret < 0) {
+					if (UNLIKELY(sret < 0)) {
 						if (errno == EINTR)
 							break;
 						pr_fail("%s: mq read failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 #endif
 					(void)shim_memset(&sigev, 0, sizeof sigev);
@@ -375,25 +373,28 @@ again:
 					sret = mq_timedreceive(mq, (char *)&msg, sizeof(msg), &prio, &abs_timeout);
 				else
 					sret = mq_receive(mq, (char *)&msg, sizeof(msg), &prio);
-				if (sret < 0) {
+				if (UNLIKELY(sret < 0)) {
 					if ((errno != EINTR) && (errno != ETIMEDOUT)) {
 						pr_fail("%s: %s failed, errno=%d (%s)\n",
 							args->name,
 							timed ? "mq_timedreceive" : "mq_receive",
 							errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 					break;
 				}
-				if (prio >= PRIOS_MAX) {
+				if (UNLIKELY(prio >= PRIOS_MAX)) {
 					pr_fail("%s: mq_receive: unexpected priority %u, expected 0..%d\n",
 						args->name, prio, PRIOS_MAX - 1);
+					rc = EXIT_FAILURE;
 				} else {
 					if (g_opt_flags & OPT_FLAGS_VERIFY) {
-						if (msg.value != values[prio]) {
+						if (UNLIKELY(msg.value != values[prio])) {
 							pr_fail("%s: mq_receive: expected message "
 								"containing 0x%" PRIx64
 								" but received 0x%" PRIx64 " instead\n",
 								args->name, values[prio], msg.value);
+							rc = EXIT_FAILURE;
 						}
 						values[prio]++;
 					}
@@ -415,7 +416,7 @@ again:
 					(void)mq_receive(mq, (char *)&msg, (size_t)0, &prio);
 				}
 			}
-			_exit(EXIT_SUCCESS);
+			_exit(rc);
 		}
 	} else {
 		int attr_count = 0;
@@ -429,15 +430,16 @@ again:
 
 		do {
 			int ret;
-			unsigned int prio = stress_mwc8modn(PRIOS_MAX);
+			const unsigned int prio = stress_mwc8modn(PRIOS_MAX);
 			const uint64_t timed = (msg.value & 1);
 
-			if ((attr_count++ & 31) == 0) {
+			if (UNLIKELY((attr_count++ & 31) == 0)) {
 				struct mq_attr old_attr;
 
-				if (mq_getattr(mq, &attr) < 0) {
+				if (UNLIKELY(mq_getattr(mq, &attr) < 0)) {
 					pr_fail("%s: mq_getattr failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				} else {
 					(void)mq_setattr(mq, &attr, &old_attr);
 				}
@@ -461,11 +463,13 @@ again:
 			else
 				ret = mq_send(mq, (char *)&msg, sizeof(msg), prio);
 			if (ret < 0) {
-				if ((errno != EINTR) && (errno != ETIMEDOUT))
+				if (UNLIKELY((errno != EINTR) && (errno != ETIMEDOUT))) {
 					pr_fail("%s: %s failed, errno=%d (%s)\n",
 						args->name,
 						timed ? "mq_timedsend" : "mq_send",
 						errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 				break;
 			}
 
@@ -499,13 +503,16 @@ again:
 		} while (stress_continue(args));
 
 		(void)stress_kill_pid_wait(pid, NULL);
-		if (mq_close(mq) < 0)
+		if (mq_close(mq) < 0) {
 			pr_fail("%s: mq_close failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-		if (mq_unlink(mq_name) < 0)
+			rc = EXIT_FAILURE;
+		}
+		if (mq_unlink(mq_name) < 0) {
 			pr_fail("%s: mq_unlink failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-
+			rc = EXIT_FAILURE;
+		}
 		/* Exercise invalid mq_close, already closed mq */
 		(void)mq_close(mq);
 		/* Exercise invalid mq_unlink */
@@ -516,21 +523,21 @@ again:
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_mq_info = {
+const stressor_info_t stress_mq_info = {
 	.stressor = stress_mq,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_mq_info = {
+const stressor_info_t stress_mq_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without mqueue.h, POSIX message queues or librt support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,7 @@
 #include "core-attribute.h"
 #include "core-cpu-cache.h"
 #include "core-madvise.h"
+#include "core-pragma.h"
 
 #define DEBUG_TAG_INFO		(0)
 
@@ -35,41 +36,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_l1cache_set(const char *opt, const char *name, const size_t max)
-{
-	uint32_t val32;
-	uint64_t val64;
-
-        val64 = stress_get_uint64_byte(opt);
-        stress_check_range_bytes(name, val64, 1, max);
-	val32 = (uint32_t)val64;
-        return stress_set_setting(name, TYPE_ID_UINT32, &val32);
-}
-
-static int stress_l1cache_set_ways(const char *opt)
-{
-	return stress_l1cache_set(opt, "l1cache-ways", 65536);
-}
-
-static int stress_l1cache_set_size(const char *opt)
-{
-	return stress_l1cache_set(opt, "l1cache-size", INT_MAX);
-}
-
-static int stress_l1cache_set_line_size(const char *opt)
-{
-	return stress_l1cache_set(opt, "l1cache-line-size", INT_MAX);
-}
-
-static int stress_l1cache_set_sets(const char *opt)
-{
-	return stress_l1cache_set(opt, "l1cache-sets", 65536);
-}
-
-static int stress_l1cache_set_mlock(const char *opt)
-{
-	return stress_set_setting_true("l1cache-mlock", opt);
-}
 
 #if DEBUG_TAG_INFO
 /*
@@ -98,13 +64,13 @@ static int stress_l1cache_info_check(
 	const uint32_t sets,
 	const uint32_t line_size)
 {
-	uint64_t sz = size ? size :
+	const uint64_t sz = size ? size :
 		(uint64_t)ways * (uint64_t)sets * (uint64_t)line_size;
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		char szstr[64];
 
-		stress_uint64_to_str(szstr, sizeof(szstr), sz);
+		stress_uint64_to_str(szstr, sizeof(szstr), sz, 0, true);
 
 		pr_inf("%s: l1cache: size: %s, sets: %" PRIu32
 			", ways: %" PRIu32 ", line size: %" PRIu32 " bytes\n",
@@ -152,7 +118,7 @@ static int stress_l1cache_info_ok(
 	int ret;
 #if defined(__linux__)
 	stress_cpu_cache_cpus_t *cpu_caches;
-	stress_cpu_cache_t *cache = NULL;
+	const stress_cpu_cache_t *cache = NULL;
 #endif
 
 	if ((*ways > 0) && (*size > 0) && (*sets > 0) && (*line_size > 0)) {
@@ -221,7 +187,7 @@ bad_cache:
 	return EXIT_NO_RESOURCE;
 }
 
-static void OPTIMIZE3 stress_l1cache_forward(
+static int OPTIMIZE3 stress_l1cache_forward(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -245,19 +211,22 @@ static void OPTIMIZE3 stress_l1cache_forward(
 	for (i = 0; i < 1000000; i++) {
 		register volatile uint8_t *ptr;
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
 			*(ptr);
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
 			*(ptr) = (uint8_t)set;
 
 		set++;
-		if (set >= l1cache_sets)
+		if (UNLIKELY(set >= l1cache_sets))
 			set = 0;
 	}
+	return EXIT_SUCCESS;
 }
 
-static void OPTIMIZE3 stress_l1cache_forward_and_verify(
+static int OPTIMIZE3 stress_l1cache_forward_and_verify(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -279,23 +248,30 @@ static void OPTIMIZE3 stress_l1cache_forward_and_verify(
 	for (i = 0; i < 1000000; i++) {
 		register volatile uint8_t *ptr;
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
 			(void)*(ptr);
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
 			*(ptr) = (uint8_t)set;
 
-		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
-			if (*ptr != (uint8_t)set)
-				pr_fail("%s: cache value mismatch at offset %zd\n",
-					args->name, (size_t)(ptr - cache_start));
+		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size) {
+			if (UNLIKELY(*ptr != (uint8_t)set)) {
+				pr_fail("%s: cache value mismatch at offset %zd, 0x%2.2x vs 0x%2.2x\n",
+					args->name, (size_t)(ptr - cache_start),
+					*ptr, (uint8_t)set);
+				return EXIT_FAILURE;
+			}
+		}
 		set++;
-		if (set >= l1cache_sets)
+		if (UNLIKELY(set >= l1cache_sets))
 			set = 0;
 	}
+	return EXIT_SUCCESS;
 }
 
-static void OPTIMIZE3 stress_l1cache_reverse(
+static int OPTIMIZE3 stress_l1cache_reverse(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -319,19 +295,22 @@ static void OPTIMIZE3 stress_l1cache_reverse(
 	for (i = 0; i < 1000000; i++) {
 		register volatile uint8_t *ptr;
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size)
 			*(ptr);
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size)
 			*(ptr) = (uint8_t)set;
 
 		set++;
-		if (set >= l1cache_sets)
+		if (UNLIKELY(set >= l1cache_sets))
 			set = 0;
 	}
+	return EXIT_SUCCESS;
 }
 
-static void OPTIMIZE3 stress_l1cache_reverse_and_verify(
+static int OPTIMIZE3 stress_l1cache_reverse_and_verify(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -355,25 +334,30 @@ static void OPTIMIZE3 stress_l1cache_reverse_and_verify(
 	for (i = 0; i < 1000000; i++) {
 		register volatile uint8_t *ptr;
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size)
 			*(ptr);
 
+PRAGMA_UNROLL_N(2)
 		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size)
 			*(ptr) = (uint8_t)set;
 
-		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size)
-			if (*ptr != (uint8_t)set)
-				pr_fail("%s: cache value mismatch at offset %zd\n",
-					args->name, (size_t)(ptr - cache_start));
-
+		for (ptr = cache_end - l1cache_set_size + 1; ptr >= cache_start; ptr -= l1cache_set_size) {
+			if (UNLIKELY(*ptr != (uint8_t)set)) {
+				pr_fail("%s: cache value mismatch at offset %zd, 0x%2.2x vs 0x%2.2x\n",
+					args->name, (size_t)(ptr - cache_start),
+					*ptr, (uint8_t)set);
+				return EXIT_FAILURE;
+			}
+		}
 		set++;
-		if (set >= l1cache_sets)
+		if (UNLIKELY(set >= l1cache_sets))
 			set = 0;
 	}
+	return EXIT_SUCCESS;
 }
 
-
-static void OPTIMIZE3 stress_l1cache_random(
+static int OPTIMIZE3 stress_l1cache_random(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -403,20 +387,23 @@ static void OPTIMIZE3 stress_l1cache_random(
 		register size_t j;
 
 		stress_mwc_set_seed(w, z);
+PRAGMA_UNROLL_N(2)
 		for (j = 0; j < loops; j++)
 			(void)*(ptr + stress_mwc32modn((uint32_t)cache_size));
 
 		stress_mwc_set_seed(w, z);
+PRAGMA_UNROLL_N(2)
 		for (j = 0; j < loops; j++)
 			*(ptr + stress_mwc32modn((uint32_t)cache_size)) = (uint8_t)set;
 
-		set++;
-		if (set >= l1cache_sets)
-			set = 0;
 	}
+	set++;
+	if (UNLIKELY(set >= l1cache_sets))
+		set = 0;
+	return EXIT_SUCCESS;
 }
 
-static void OPTIMIZE3 stress_l1cache_random_and_verify(
+static int OPTIMIZE3 stress_l1cache_random_and_verify(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -446,29 +433,35 @@ static void OPTIMIZE3 stress_l1cache_random_and_verify(
 		register size_t j;
 
 		stress_mwc_set_seed(w, z);
+PRAGMA_UNROLL_N(2)
 		for (j = 0; j < loops; j++)
 			(void)*(ptr + stress_mwc32modn((uint32_t)cache_size));
 
 		stress_mwc_set_seed(w, z);
-		for (ptr = cache_start; ptr < cache_end; ptr += l1cache_set_size)
+PRAGMA_UNROLL_N(2)
+		for (j = 0; j < loops; j++)
 			*(ptr + stress_mwc32modn((uint32_t)cache_size)) = (uint8_t)set;
 
 		stress_mwc_set_seed(w, z);
 		for (j = 0; j < loops; j++) {
-			size_t idx = stress_mwc32modn((uint32_t)cache_size);
-			if (*(ptr + idx) != (uint8_t)set)
-				pr_fail("%s: cache value mismatch at offset %zd\n",
-					args->name, idx);
+			register const size_t idx = stress_mwc32modn((uint32_t)cache_size);
+
+			if (UNLIKELY(*(ptr + idx) != (uint8_t)set)) {
+				pr_fail("%s: cache value mismatch at offset %zd, 0x%2.2x vs 0x%2.2x\n",
+					args->name, (size_t)(ptr - cache_start),
+					*(ptr + idx), (uint8_t)set);
+				return EXIT_FAILURE;
+			}
 		}
 
-		set++;
-		if (set >= l1cache_sets)
-			set = 0;
 	}
+	set++;
+	if (UNLIKELY(set >= l1cache_sets))
+		set = 0;
+	return EXIT_SUCCESS;
 }
 
-
-typedef void (*l1cache_func_t)(
+typedef int (*l1cache_func_t)(
 	stress_args_t *args,
 	uint8_t *cache_aligned,
 	const uint32_t l1cache_size,
@@ -486,36 +479,24 @@ static const stress_l1cache_method_t stress_l1cache_methods[] = {
 	{ "reverse",	{ stress_l1cache_reverse,	stress_l1cache_reverse_and_verify } },
 };
 
-static int stress_l1cache_set_method(const char *name)
+static const char *stress_l1cache_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_l1cache_methods); i++) {
-		if (!strcmp(stress_l1cache_methods[i].name, name)) {
-			return stress_set_setting("l1cache-method", TYPE_ID_SIZE_T, &i);
-		}
-	}
-	(void)fprintf(stderr, "l1cache-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_l1cache_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_l1cache_methods[i].name);
-        }
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_l1cache_methods)) ? stress_l1cache_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_l1cache_sets,	 stress_l1cache_set_sets },
-	{ OPT_l1cache_size,	 stress_l1cache_set_size },
-	{ OPT_l1cache_line_size, stress_l1cache_set_line_size },
-	{ OPT_l1cache_method,	 stress_l1cache_set_method },
-	{ OPT_l1cache_mlock,	 stress_l1cache_set_mlock },
-	{ OPT_l1cache_ways,	 stress_l1cache_set_ways },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_l1cache_sets,      "l1cache-sets",      TYPE_ID_UINT32, 1, 65536, NULL },
+	{ OPT_l1cache_size,      "l1cache-size",      TYPE_ID_UINT32, 1, INT_MAX, NULL },
+	{ OPT_l1cache_line_size, "l1cache-line-size", TYPE_ID_UINT32, 1, INT_MAX, NULL },
+	{ OPT_l1cache_method,    "l1cache-method",    TYPE_ID_SIZE_T_METHOD, 0, 0, stress_l1cache_method },
+	{ OPT_l1cache_mlock,     "l1cache-mlock",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_l1cache_ways,      "l1cache-ways",      TYPE_ID_UINT32, 1, 65536, NULL },
+	END_OPT,
 };
 
 static int stress_l1cache(stress_args_t *args)
 {
-	int ret;
+	int ret, rc = EXIT_SUCCESS;
 	uint32_t l1cache_ways = 0;
 	uint32_t l1cache_size = 0;
 	uint32_t l1cache_sets = 0;
@@ -547,10 +528,13 @@ static int stress_l1cache(stress_args_t *args)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (cache == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap cache test buffer, skipping stressor, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: cannot mmap cache %" PRIu32" byte test buffer%s, "
+			"skipping stressor, errno=%d (%s)\n",
+			args->name, l1cache_size << 2,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(cache, l1cache_size, "l1cache");
 	(void)stress_madvise_mergeable(cache, l1cache_size << 2);
 
 	if (l1cache_mlock)
@@ -572,10 +556,15 @@ static int stress_l1cache(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		stress_l1cache_func(args, cache_aligned, l1cache_size, l1cache_sets, l1cache_set_size);
+		if (UNLIKELY(stress_l1cache_func(args, cache_aligned, l1cache_size, l1cache_sets, l1cache_set_size) == EXIT_FAILURE)) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		stress_bogo_add(args, l1cache_sets);
 	} while (stress_continue(args));
@@ -584,13 +573,13 @@ static int stress_l1cache(stress_args_t *args)
 
 	(void)munmap((void *)cache, l1cache_size << 2);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_l1cache_info = {
+const stressor_info_t stress_l1cache_info = {
 	.stressor = stress_l1cache,
-	.class = CLASS_CPU_CACHE,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -141,7 +141,7 @@
 /* Force alignment macros */
 #define ALIGN128	ALIGNED(128)
 #define ALIGN64		ALIGNED(64)
-
+#define ALIGN8		ALIGNED(8)
 
 #if (defined(HAVE_COMPILER_GCC_OR_MUSL) && NEED_GNUC(4, 6, 0)) ||	\
     (defined(HAVE_COMPILER_CLANG) && NEED_CLANG(3, 0, 0))
@@ -154,19 +154,17 @@
 #define SECTION(s)
 #endif
 
-/* GCC hot attribute */
-#if defined(HAVE_ATTRIBUTE_HOT) &&					\
-    ((defined(HAVE_COMPILER_GCC_OR_MUSL) && NEED_GNUC(4, 6, 0)) ||	\
-     (defined(HAVE_COMPILER_CLANG) && NEED_CLANG(3, 3, 0)))
-#define HOT	__attribute__((hot))
-#else
-#define HOT
-#endif
-
 #if defined(HAVE_ATTRIBUTE_PURE)
 #define PURE	__attribute__((pure))
 #else
 #define PURE
+#endif
+
+#if defined(HAVE_ATTRIBUTE_NONSTRING) &&				\
+    (defined(HAVE_COMPILER_GCC_OR_MUSL) && NEED_GNUC(15, 0, 0))
+#define NONSTRING __attribute__((nonstring))
+#else
+#define NONSTRING
 #endif
 
 /* GCC mlocked data and data section attribute */
@@ -187,6 +185,13 @@
 #define FORMAT(func, a, b) __attribute__((format(func, a, b)))
 #else
 #define FORMAT(func, a, b)
+#endif
+
+#if defined(HAVE_ATTRIBUTE_RETURNS_NONNULL) &&				\
+    (defined(HAVE_COMPILER_GCC_OR_MUSL) && NEED_GNUC(7, 5, 0))
+#define RETURNS_NONNULL __attribute__((returns_nonnull))
+#else
+#define RETURNS_NONNULL
 #endif
 
 #endif

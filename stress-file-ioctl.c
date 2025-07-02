@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,9 +20,35 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 
+#include <sys/ioctl.h>
+
+#if defined(HAVE_SYS_STATFS_H)
+#include <sys/statfs.h>
+#endif
+
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
 #endif
+
+#if defined(HAVE_LINUX_BTRFS_H)
+#include <linux/btrfs.h>
+#endif
+
+#if defined(_IOR)
+#if !defined(EXT4_IOC_GETVERSION)
+#define EXT4_IOC_GETVERSION	_IOR('f', 3, long)
+#endif
+#if !defined(EXT4_IOC_GETRSVSZ)
+#define EXT4_IOC_GETRSVSZ	_IOR('f', 5, long)
+#endif
+#endif
+
+typedef void (*stress_file_ioctl_fs_func_t)(const int fd);
+
+typedef struct {
+	const char *name;
+	const stress_file_ioctl_fs_func_t fs_func;
+} stress_file_ioctl_fs_t;
 
 static const stress_help_t help[] = {
 	{ NULL,	"file-ioctl N",		"start N workers exercising file specific ioctls" },
@@ -38,7 +64,8 @@ static void check_flag(
 	const int fd,
 	const int flag,
 	const int ret,
-	const bool set)
+	const bool set,
+	int *rc)
 {
 #if defined(F_GETFL)
 	if (ret == 0) {
@@ -52,9 +79,11 @@ static void check_flag(
 		if (errno != 0)
 			return;
 		if ((set && !(flags & flag)) ||
-		    (!set && (flags & flag)))
+		    (!set && (flags & flag))) {
 			pr_fail("%s: ioctl %s failed, unexpected flags when checked with F_GETFL\n",
 				args->name, ioctl_name);
+			*rc = EXIT_FAILURE;
+		}
 	}
 #else
 	(void)args;
@@ -106,6 +135,128 @@ struct shim_space_resv {
 
 #endif
 
+static void stress_file_ioctl_btrfs(const int fd)
+{
+	(void)fd;
+
+#if defined(FS_IOC_GETVERSION)
+	{
+		int version;
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETVERSION, &version));
+	}
+#endif
+#if defined(FS_IOC_GETFSLABEL)
+	{
+		char label[257];
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETFSLABEL, label));
+	}
+#endif
+#if defined(BTRFS_IOC_SYNC)
+	VOID_RET(int, ioctl(fd, BTRFS_IOC_SYNC, NULL));
+#endif
+#if defined(BTRFS_IOC_SUBVOL_GETFLAGS)
+	{
+		uint64_t flags;
+
+		/* EINVAL */
+		VOID_RET(int, ioctl(fd, BTRFS_IOC_SUBVOL_GETFLAGS, &flags));
+	}
+#endif
+}
+
+static void stress_file_ioctl_ext(const int fd)
+{
+	(void)fd;
+
+#if defined(EXT4_IOC_GETVERSION)
+	{
+		long version;
+
+		VOID_RET(int, ioctl(fd, EXT4_IOC_GETVERSION, &version));
+	}
+#endif
+#if defined(EXT4_IOC_GETRSVSZ)
+	{
+		long rsvsz;
+
+		VOID_RET(int, ioctl(fd, EXT4_IOC_GETRSVSZ, &rsvsz));
+	}
+#endif
+#if defined(FS_IOC_GETFSLABEL)
+	{
+		char label[17];
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETFSLABEL, label));
+	}
+#endif
+}
+
+static void stress_file_ioctl_nilfs(const int fd)
+{
+	(void)fd;
+
+#if defined(FS_IOC_GETVERSION)
+	{
+		int version;
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETVERSION, &version));
+	}
+#endif
+#if defined(FS_IOC_GETFSLABEL)
+	{
+		char label[81];
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETFSLABEL, label));
+	}
+#endif
+}
+
+static void stress_file_ioctl_reiserfs(const int fd)
+{
+	(void)fd;
+
+#if defined(FS_IOC_GETVERSION)
+	{
+		int version;
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETVERSION, &version));
+	}
+#endif
+}
+
+static void stress_file_ioctl_xfs(const int fd)
+
+{
+	(void)fd;
+
+#if defined(FS_IOC_GETVERSION)
+	{
+		int version;
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETVERSION, &version));
+	}
+#endif
+#if defined(FS_IOC_GETFSLABEL)
+	{
+		char label[17];
+
+		VOID_RET(int, ioctl(fd, FS_IOC_GETFSLABEL, label));
+	}
+#endif
+}
+
+static const stress_file_ioctl_fs_t stress_file_ioctl_fs[] = {
+	{ "btrfs",	stress_file_ioctl_btrfs },
+	{ "ext2",	stress_file_ioctl_ext },
+	{ "ext3",	stress_file_ioctl_ext },
+	{ "ext4",	stress_file_ioctl_ext },
+	{ "nilfs",	stress_file_ioctl_nilfs },
+	{ "reiserfs",	stress_file_ioctl_reiserfs },
+	{ "xfs",	stress_file_ioctl_xfs }
+};
+
 /*
  *  stress_file_ioctl
  *	stress file ioctls
@@ -113,13 +264,17 @@ struct shim_space_resv {
 static int stress_file_ioctl(stress_args_t *args)
 {
 	char filename[PATH_MAX];
-	int ret, fd;
+	int ret, fd, rc = EXIT_SUCCESS;
 	const int bad_fd = stress_get_bad_fd();
 #if defined(FICLONE) || defined(FICLONERANGE)
 	int dfd;
 #endif
 	const off_t file_sz = 1024 * 1024;
 	const uint32_t rnd = stress_mwc32();
+	const char *fs_type = NULL;
+	stress_file_ioctl_fs_func_t fs_func = NULL;
+	size_t i;
+	uintmax_t blocks;
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -133,6 +288,16 @@ static int stress_file_ioctl(stress_args_t *args)
 		(void)stress_temp_dir_rm_args(args);
 		return ret;
 	}
+
+	fs_type = stress_get_fs_info(filename, &blocks);
+	if (fs_type) {
+		for (i = 0; i < SIZEOF_ARRAY(stress_file_ioctl_fs); i++) {
+			if (strcmp(fs_type, stress_file_ioctl_fs[i].name) == 0) {
+				fs_func = stress_file_ioctl_fs[i].fs_func;
+			}
+		}
+	}
+
 	(void)shim_unlink(filename);
 
 #if defined(FICLONE) || defined(FICLONERANGE)
@@ -156,6 +321,8 @@ static int stress_file_ioctl(stress_args_t *args)
 
 	(void)bad_fd;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -184,7 +351,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			opt = 1;
 			ret = ioctl(fd, FIONBIO, &opt);
 #if defined(O_NONBLOCK)
-			check_flag(args, "FIONBIO", fd, O_NONBLOCK, ret, true);
+			check_flag(args, "FIONBIO", fd, O_NONBLOCK, ret, true, &rc);
 #else
 			(void)ret;
 #endif
@@ -192,7 +359,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			opt = 0;
 			ret = ioctl(fd, FIONBIO, &opt);
 #if defined(O_NONBLOCK)
-			check_flag(args, "FIONBIO", fd, O_NONBLOCK, ret, false);
+			check_flag(args, "FIONBIO", fd, O_NONBLOCK, ret, false, &rc);
 #else
 			(void)ret;
 #endif
@@ -209,7 +376,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			opt = 1;
 			ret = ioctl(fd, FIOASYNC, &opt);
 #if defined(O_ASYNC)
-			check_flag(args, "FIONASYNC", fd, O_ASYNC, ret, true);
+			check_flag(args, "FIONASYNC", fd, O_ASYNC, ret, true, &rc);
 #else
 			(void)ret;
 #endif
@@ -217,7 +384,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			opt = 0;
 			ret = ioctl(fd, FIOASYNC, &opt);
 #if defined(O_ASYNC)
-			check_flag(args, "FIONASYNC", fd, O_ASYNC, ret, false);
+			check_flag(args, "FIONASYNC", fd, O_ASYNC, ret, false, &rc);
 #else
 			(void)ret;
 #endif
@@ -257,9 +424,11 @@ static int stress_file_ioctl(stress_args_t *args)
 			int isz;
 
 			ret = ioctl(fd, FIGETBSZ, &isz);
-			if ((ret == 0) && (isz < 1))
+			if ((ret == 0) && (isz < 1)) {
 				pr_fail("%s: ioctl FIGETBSZ returned unusual block size %d\n",
 					args->name, isz);
+				rc = EXIT_FAILURE;
+			}
 			exercised++;
 		}
 #else
@@ -394,6 +563,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			struct fsxattr xattr;
 
 			ret = ioctl(fd, FS_IOC_FSGETXATTR, &xattr);
+			exercised++;
 #if defined(FS_IOC_FSSETXATTR)
 			if (ret == 0)
 				ret = ioctl(fd, FS_IOC_FSSETXATTR, &xattr);
@@ -412,7 +582,7 @@ static int stress_file_ioctl(stress_args_t *args)
 			r.l_len = (int64_t)file_sz * 2;
 			VOID_RET(int, ioctl(fd, FS_IOC_RESVSP, &r));
 
-			if (lseek(fd, (off_t)0, SEEK_SET) != (off_t)-1) {
+			if (lseek(fd, (off_t)0, SEEK_SET) >= 0) {
 				(void)shim_memset(&r, 0, sizeof(r));
 				r.l_whence = SEEK_CUR;
 				r.l_start = (int64_t)0;
@@ -442,7 +612,7 @@ static int stress_file_ioctl(stress_args_t *args)
 
 			VOID_RET(int, ioctl(fd, FS_IOC_RESVSP64, &r));
 
-			if (lseek(fd, (off_t)0, SEEK_SET) != (off_t)-1) {
+			if (lseek(fd, (off_t)0, SEEK_SET) >= 0) {
 				(void)shim_memset(&r, 0, sizeof(r));
 				r.l_whence = SEEK_CUR;
 				r.l_start = (int64_t)0;
@@ -527,17 +697,43 @@ static int stress_file_ioctl(stress_args_t *args)
 #else
 		UNEXPECTED
 #endif
+
+#if defined(FS_IOC_GETFSUUID) &&	\
+    defined(HAVE_FSUUID2)
+		{
+			struct fsuuid2 uuid2;
+
+			(void)shim_memset(&uuid2, 0, sizeof(uuid2));
+			VOID_RET(int, ioctl(fd, FS_IOC_GETFSUUID, &uuid2));
+			exercised++;
+
+		}
+#endif
+
+#if defined(FS_IOC_GETFSSYSFSPATH) &&	\
+    defined(HAVE_FS_SYSFS_PATH)
+		{
+			struct fs_sysfs_path	sysfs_path;
+
+			(void)shim_memset(&sysfs_path, 0, sizeof(sysfs_path));
+			VOID_RET(int, ioctl(fd, FS_IOC_GETFSSYSFSPATH, &sysfs_path));
+			exercised++;
+		}
+#endif
+
 		if (!exercised) {	/* cppcheck-suppress knownConditionTrueFalse */
-			pr_inf("%s: no available file ioctls to exercise\n",
-				args->name);
-			ret = EXIT_NOT_IMPLEMENTED;
+			if (stress_instance_zero(args))
+				pr_inf("%s: no available file ioctls to exercise\n",
+					args->name);
+			rc = EXIT_NOT_IMPLEMENTED;
 			goto tidy;
 		}
 
+		if (fs_func)
+			fs_func(fd);
+
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
-
-	ret = EXIT_SUCCESS;
 
 tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -547,12 +743,12 @@ tidy:
 	(void)close(fd);
 	(void)stress_temp_dir_rm_args(args);
 
-	return ret;
+	return rc;
 }
 
-stressor_info_t stress_file_ioctl_info = {
+const stressor_info_t stress_file_ioctl_info = {
 	.stressor = stress_file_ioctl,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

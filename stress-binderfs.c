@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -45,13 +45,47 @@ static const stress_help_t help[] = {
  */
 static int stress_binderfs_supported(const char *name)
 {
+#if defined(__linux__) &&			\
+    defined(HAVE_LINUX_ANDROID_BINDER_H) &&	\
+    defined(HAVE_LINUX_ANDROID_BINDERFS_H)
+	int ret;
+	const char *tmppath = stress_get_temp_path();
+	char path[PATH_MAX];
+
 	if (!stress_check_capability(SHIM_CAP_SYS_ADMIN)) {
 		pr_inf_skip("%s stressor will be skipped, "
 			"need to be running with CAP_SYS_ADMIN "
 			"rights for this stressor\n", name);
 		return -1;
 	}
-	return 0;
+
+	if (!tmppath)
+		return 0;	/* defer */
+
+	if (stress_temp_dir(path, sizeof(path), "binderfs", getpid(), 0) < 0)
+		return 0;	/* defer */
+	if (mkdir(path, S_IRWXU) < 0)
+		return 0;	/* defer */
+	ret = mount("binder", path, "binder", 0, 0);
+	if (ret >= 0) {
+		(void)umount(path);
+		(void)rmdir(path);
+		return 0;
+	}
+
+	if (errno == ENODEV) {
+		pr_inf_skip("%s stressor will be skipped, binderfs not supported\n", name);
+	} else {
+		pr_inf_skip("%s stressor will be skipped, binderfs cannot be mounted\n", name);
+	}
+	/* umount just in case it got mounted and mount way lying */
+	(void)umount(path);
+	(void)rmdir(path);
+	return -1;
+#else
+	pr_inf_skip("%s stressor will be skipped, binderfs not supported\n", name);
+	return -1;
+#endif
 }
 
 #if defined(__linux__) &&			\
@@ -92,7 +126,7 @@ static int stress_binderfs_umount(
 				args->name, t2 - t1);
 			return EXIT_FAILURE;
 		}
-		shim_usleep_interruptible(100000);
+		(void)shim_usleep_interruptible(100000);
 	}
 
 	/* Exercise mount on already umounted path */
@@ -122,6 +156,8 @@ static int stress_binderfs(stress_args_t *args)
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -145,7 +181,9 @@ static int stress_binderfs(stress_args_t *args)
 					args->name, errno, strerror(errno));
 				rc = EXIT_NO_RESOURCE;
 				goto clean;
-			} else if ((errno == ENOSPC) || (errno == ENOMEM)) {
+			} else if ((errno == ENOSPC) ||
+				   (errno == ENOMEM) ||
+				   (errno == EPERM)) {
 				/* ..ran out of resources, skip */
 				pr_inf_skip("%s: mount failed on binderfs at %s, errno=%d (%s), skipping stress test\n",
 					args->name, pathname, errno, strerror(errno));
@@ -173,10 +211,18 @@ static int stress_binderfs(stress_args_t *args)
 #if defined(BINDER_CTL_ADD)
 		for (i = 0; i < 256; i++) {
 			(void)shim_memset(&device, 0, sizeof(device));
-			(void)snprintf(device.name, sizeof(device.name), "sng-%d\n", i);
+			(void)snprintf(device.name, sizeof(device.name), "sng-%d", i);
 			ret = ioctl(fd, BINDER_CTL_ADD, &device);
 			if (ret < 0)
 				goto close_control;
+		}
+		for (i = 0; i < 256; i++) {
+			char devpath[PATH_MAX];
+			char devname[32];
+
+			(void)snprintf(devname, sizeof(devname), "sng-%d", i);
+			(void)stress_mk_filename(devpath, sizeof(devpath), pathname, devname);
+			(void)unlink(devpath);
 		}
 close_control:
 #else
@@ -198,26 +244,26 @@ clean:
 
 	rate = (mount_count > 0.0) ? (double)mount_duration / mount_count : 0.0;
 	stress_metrics_set(args, 0, "microsecs per mount",
-		rate * STRESS_DBL_MICROSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MICROSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (umount_count > 0.0) ? (double)umount_duration / umount_count : 0.0;
 	stress_metrics_set(args, 1, "microsecs per umount",
-		rate * STRESS_DBL_MICROSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MICROSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
 
-stressor_info_t stress_binderfs_info = {
+const stressor_info_t stress_binderfs_info = {
 	.stressor = stress_binderfs,
 	.supported = stress_binderfs_supported,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_binderfs_info = {
+const stressor_info_t stress_binderfs_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_binderfs_supported,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without android linux/android/binder.h or linux/android/binderfs.h"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -73,6 +73,8 @@ static int stress_ioprio(stress_args_t *args)
 	}
 	(void)shim_unlink(filename);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -88,7 +90,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (shim_ioprio_get(IOPRIO_WHO_PROCESS, 0) < 0) {
 			if (errno != EINVAL) {
@@ -98,7 +100,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #if defined(HAVE_GETPGRP)
 		if (shim_ioprio_get(IOPRIO_WHO_PGRP, grp) < 0) {
@@ -109,7 +111,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #else
 		UNEXPECTED
@@ -122,7 +124,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		/*
 		 *  Exercise invalid ioprio_get arguments
@@ -140,7 +142,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		for (i = 0; i < MAX_IOV; i++) {
@@ -156,10 +158,10 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_fsync(fd);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
@@ -182,7 +184,7 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		if (pwritev(fd, iov, MAX_IOV, (off_t)512 * stress_mwc16()) < 0) {
@@ -192,10 +194,10 @@ static int stress_ioprio(stress_args_t *args)
 				goto cleanup_file;
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_fsync(fd);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		for (i = 0; i < 8; i++) {
@@ -220,7 +222,7 @@ static int stress_ioprio(stress_args_t *args)
 			}
 			(void)shim_fsync(fd);
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		for (i = 0; i < 8; i++) {
 			if (shim_ioprio_set(IOPRIO_WHO_PROCESS, args->pid,
@@ -259,16 +261,16 @@ cleanup_dir:
 	return rc;
 }
 
-stressor_info_t stress_ioprio_info = {
+const stressor_info_t stress_ioprio_info = {
 	.stressor = stress_ioprio,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_ioprio_info = {
+const stressor_info_t stress_ioprio_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/uio.h, ioprio_get(), ioprio_set() or pwritev() support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-mincore.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_LOOP_H)
 #include <linux/loop.h>
@@ -124,15 +126,17 @@ static int stress_loop(stress_args_t *args)
 		goto tidy;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		int ctrl_dev, loop_dev;
 		void *ptr;
 		size_t i;
-		long dev_num;
+		long int dev_num;
 #if defined(LOOP_SET_DIRECT_IO)
-		unsigned long dio;
+		unsigned long int dio;
 #endif
 		char dev_name[PATH_MAX];
 #if defined(LOOP_GET_STATUS)
@@ -142,7 +146,7 @@ static int stress_loop(stress_args_t *args)
 		struct loop_info64 info64;
 #endif
 #if defined(LOOP_SET_BLOCK_SIZE)
-		unsigned long blk_size;
+		unsigned long int blk_size;
 		static const uint16_t blk_sizes[] = {
 			256,	/* Invalid */
 			512,	/* Valid */
@@ -161,7 +165,7 @@ static int stress_loop(stress_args_t *args)
 		 */
 		ctrl_dev = open("/dev/loop-control", O_RDWR);
 		if (ctrl_dev < 0) {
-			pr_fail("%s: cannot open /dev/loop-control: %d (%s)\n",
+			pr_fail("%s: cannot open /dev/loop-control, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			break;
 		}
@@ -245,6 +249,7 @@ static int stress_loop(stress_args_t *args)
 		ptr = stress_mmap_populate(NULL, backing_size, PROT_READ | PROT_WRITE,
 			MAP_SHARED, loop_dev, 0);
 		if (ptr != MAP_FAILED) {
+			stress_set_vma_anon_name(ptr, backing_size, "data");
 			(void)stress_mincore_touch_pages_interruptible(ptr, backing_size);
 #if defined(MS_ASYNC)
 			(void)shim_msync(ptr, backing_size, MS_ASYNC);
@@ -290,7 +295,7 @@ static int stress_loop(stress_args_t *args)
 		 *  produce kernel warnings but should not break the
 		 *  kernel.
 		 */
-		blk_size = (unsigned long)blk_sizes[stress_mwc8modn((uint8_t)SIZEOF_ARRAY(blk_sizes))];
+		blk_size = (unsigned long int)blk_sizes[stress_mwc8modn((uint8_t)SIZEOF_ARRAY(blk_sizes))];
 		VOID_RET(int, ioctl(loop_dev, LOOP_SET_BLOCK_SIZE, blk_size));
 
 #endif
@@ -397,10 +402,10 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_loop_info = {
+const stressor_info_t stress_loop_info = {
 	.stressor = stress_loop,
 	.supported = stress_loop_supported,
-	.class = CLASS_OS | CLASS_DEV,
+	.classifier = CLASS_OS | CLASS_DEV,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -412,10 +417,10 @@ static int stress_loop_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_loop_info = {
+const stressor_info_t stress_loop_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_loop_supported,
-	.class = CLASS_OS | CLASS_DEV,
+	.classifier = CLASS_OS | CLASS_DEV,
 	.help = help,
 	.unimplemented_reason = "built without linux/loop.h or loop ioctl() commands"
 };

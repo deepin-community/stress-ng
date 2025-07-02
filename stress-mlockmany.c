@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,8 +24,11 @@
 #include "core-mincore.h"
 #include "core-out-of-memory.h"
 
-#define UNSET_MLOCK_PROCS		(0)
-#define DEFAULT_MLOCK_PROCS		(1024)
+#define UNSET_MLOCKMANY_PROCS		(0)
+#define DEFAULT_MLOCKMANY_PROCS		(1024)
+
+#define MIN_MLOCKMANY_PROCS		(1)
+#define MAX_MLOCKMANY_PROCS		(1000000)
 
 static const stress_help_t help[] = {
 	{ NULL,	"mlockmany N",	   	"start N workers exercising many mlock/munlock processes" },
@@ -34,23 +37,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   	NULL }
 };
 
-/*
- *  stress_set_mlockmany_procs()
- *      set number of processes to spawn to mlock pages
- */
-static int stress_set_mlockmany_procs(const char *opt)
-{
-	size_t mlockmany_procs;
-
-	mlockmany_procs = (size_t)stress_get_uint64(opt);
-	stress_check_range("mlockmany-procs", mlockmany_procs,
-		1, 1000000);
-	return stress_set_setting("mlockmany-procs", TYPE_ID_SIZE_T, &mlockmany_procs);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mlockmany_procs,	stress_set_mlockmany_procs },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mlockmany_procs, "mlockmany-procs", TYPE_ID_SIZE_T, MIN_MLOCKMANY_PROCS, MAX_MLOCKMANY_PROCS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MLOCK)
@@ -64,9 +53,11 @@ static int stress_mlock_interruptible(
 	uintptr_t ptr = (uintptr_t)addr;
 
 	while ((len > 0) && (stress_continue(args))) {
-		size_t sz = (len > chunk_size) ? chunk_size : len;
+		const size_t sz = (len > chunk_size) ? chunk_size : len;
 		int ret;
 
+		if (stress_low_memory(sz))
+			break;
 		ret = shim_mlock((void *)ptr, sz);
 		if (ret < 0)
 			return ret;
@@ -85,7 +76,7 @@ static int stress_munlock_interruptible(
 	uintptr_t ptr = (uintptr_t)addr;
 
 	while ((len > 0) && (stress_continue(args))) {
-		size_t sz = (len > chunk_size) ? chunk_size : len;
+		const size_t sz = (len > chunk_size) ? chunk_size : len;
 		int ret;
 
 		ret = shim_munlock((void *)ptr, sz);
@@ -101,31 +92,39 @@ static int stress_munlock_interruptible(
  *  stress_mlockmany()
  *	stress by forking and exiting
  */
-static int stress_mlockmany(stress_args_t *args)
+static int stress_mlockmany_child(stress_args_t *args, void *context)
 {
-	pid_t *pids;
+	stress_pid_t *s_pids;
 	int ret;
 #if defined(RLIMIT_MEMLOCK)
 	struct rlimit rlim;
 #endif
-	size_t mlock_size, mlockmany_procs = UNSET_MLOCK_PROCS;
+	size_t mlock_size, mlockmany_procs = UNSET_MLOCKMANY_PROCS;
 
-	(void)stress_get_setting("mlockmany-procs", &mlockmany_procs);
+	(void)context;
+
+	if (!stress_get_setting("mlockmany-procs", &mlockmany_procs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			mlockmany_procs = MAX_MLOCKMANY_PROCS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			mlockmany_procs = MIN_MLOCKMANY_PROCS;
+	}
 
 	stress_set_oom_adjustment(args, true);
 
 	/* Explicitly drop capabilities, makes it more OOM-able */
 	VOID_RET(int, stress_drop_capabilities(args->name));
 
-	if (mlockmany_procs == UNSET_MLOCK_PROCS) {
-		mlockmany_procs = args->num_instances > 0 ? DEFAULT_MLOCK_PROCS / args->num_instances : 1;
+	if (mlockmany_procs == UNSET_MLOCKMANY_PROCS) {
+		mlockmany_procs = args->instances > 0 ? DEFAULT_MLOCKMANY_PROCS / args->instances : 1;
 		if (mlockmany_procs < 1)
 			mlockmany_procs = 1;
 	}
 
-	pids = calloc((size_t)mlockmany_procs, sizeof(*pids));
-	if (!pids) {
-		pr_inf_skip("%s: cannot allocate pids array, skipping stressor\n", args->name);
+	s_pids = stress_sync_s_pids_mmap(mlockmany_procs);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu PIDs%s, skipping stressor\n",
+			args->name, mlockmany_procs, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -139,20 +138,25 @@ static int stress_mlockmany(stress_args_t *args)
 #else
 	mlock_size = args->page_size * 1024;
 #endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		unsigned int n;
 		size_t shmall, freemem, totalmem, freeswap, totalswap, last_freeswap, last_totalswap;
 
-		(void)shim_memset(pids, 0, sizeof(*pids) * mlockmany_procs);
+		(void)shim_memset(s_pids, 0, sizeof(*s_pids) * mlockmany_procs);
 		stress_get_memlimits(&shmall, &freemem, &totalmem, &last_freeswap, &last_totalswap);
 
-		for (n = 0; stress_continue(args) && (n < mlockmany_procs); n++) {
+		for (n = 0; LIKELY(stress_continue(args) && (n < mlockmany_procs)); n++) {
 			pid_t pid;
 
+			s_pids[n].pid = -1;
+
 			/* In case we've missed SIGALRM */
-			if (stress_time_now() > args->time_end) {
+			if (UNLIKELY(stress_time_now() > args->time_end)) {
 				stress_continue_set_flag(false);
 				break;
 			}
@@ -173,7 +177,7 @@ static int stress_mlockmany(stress_args_t *args)
 				size_t mmap_size = mlock_size;
 
 				/* In case we've missed SIGALRM */
-				if (stress_time_now() > args->time_end)
+				if (UNLIKELY(stress_time_now() > args->time_end))
 					_exit(0);
 
 				stress_parent_died_alarm();
@@ -187,7 +191,7 @@ static int stress_mlockmany(stress_args_t *args)
 					_exit(0);
 
 				while (mmap_size > args->page_size) {
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						_exit(0);
 					ptr = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
 						MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -198,12 +202,13 @@ static int stress_mlockmany(stress_args_t *args)
 				if (ptr == MAP_FAILED)
 					_exit(0);
 
+				stress_set_vma_anon_name(ptr, mmap_size, "mlocked-pages");
 				(void)stress_mincore_touch_pages(ptr, mmap_size);
 				(void)stress_madvise_mergeable(ptr, mmap_size);
 
 				mlock_size = mmap_size;
 				while (mlock_size > args->page_size) {
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						_exit(0);
 					ret = stress_mlock_interruptible(args, ptr, mlock_size);
 					if (ret == 0)
@@ -213,24 +218,24 @@ static int stress_mlockmany(stress_args_t *args)
 
 				while (stress_continue(args)) {
 					(void)stress_munlock_interruptible(args, ptr, mlock_size);
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto unmap;
 					(void)stress_mlock_interruptible(args, ptr, mlock_size);
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto unlock;
 					/* Try invalid sizes */
 					(void)shim_mlock(ptr, 0);
 					(void)shim_munlock(ptr, 0);
 
 					(void)stress_mlock_interruptible(args, ptr, mlock_size << 1);
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto unlock;
 					(void)stress_munlock_interruptible(args, ptr, mlock_size << 1);
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto unlock;
 
 					(void)shim_munlock(ptr, ~(size_t)0);
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto unlock;
 					(void)shim_usleep_interruptible(10000);
 				}
@@ -240,37 +245,46 @@ unmap:
 				(void)munmap(ptr, mmap_size);
 				_exit(0);
 			}
-			pids[n] = pid;
+			s_pids[n].pid = pid;
 			if (pid > 1) {
 				stress_bogo_inc(args);
 			} else if (pid < 0)
 				break;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 		}
-		stress_kill_and_wait_many(args, pids, n, SIGALRM, false);
+		stress_kill_and_wait_many(args, s_pids, n, SIGALRM, false);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	free(pids);
+	(void)stress_sync_s_pids_munmap(s_pids, mlockmany_procs);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_mlockmany_info = {
+/*
+ *  stress_mlockmany()
+ *	stress by forking and exiting
+ */
+static int stress_mlockmany(stress_args_t *args)
+{
+	return stress_oomable_child(args, NULL, stress_mlockmany_child, STRESS_OOMABLE_NORMAL);
+}
+
+const stressor_info_t stress_mlockmany_info = {
 	.stressor = stress_mlockmany,
-	.class = CLASS_VM | CLASS_OS | CLASS_PATHOLOGICAL,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_PATHOLOGICAL,
+	.opts = opts,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_mlockmany_info = {
+const stressor_info_t stress_mlockmany_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS | CLASS_PATHOLOGICAL,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_PATHOLOGICAL,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without mlock() support"
 };

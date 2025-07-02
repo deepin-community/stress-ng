@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,7 +66,7 @@ static volatile int sigcode;
  */
 static const char *stress_bigheap_phase(void)
 {
-	static const char *phases[] = {
+	static const char * const phases[] = {
 		"initialization",
 		"low memory check",
 		"malloc trim",
@@ -83,43 +83,6 @@ static const char *stress_bigheap_phase(void)
 	if ((phase < 0) || (phase >= (int)SIZEOF_ARRAY(phases)))
 		return "unknown";
 	return phases[phase];
-}
-
-/*
- *  stress_set_bigheap_mlock
- *	enable mlocking on allocated pages
- */
-static int stress_set_bigheap_mlock(const char *opt)
-{
-	return stress_set_setting_true("bigheap-mlock", opt);
-}
-
-/*
- *  stress_set_bigheap_bytes()
- *  	Set maximum allocation amount in bytes
- */
-static int stress_set_bigheap_bytes(const char *opt)
-{
-	size_t bigheap_bytes;
-
-	bigheap_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("bigheap-bytes", (uint64_t)bigheap_bytes,
-		MIN_BIGHEAP_BYTES, MAX_BIGHEAP_BYTES);
-	return stress_set_setting("bigheap-bytes", TYPE_ID_SIZE_T, &bigheap_bytes);
-}
-
-/*
- *  stress_set_bigheap_growth()
- *  	Set bigheap growth from given opt arg string
- */
-static int stress_set_bigheap_growth(const char *opt)
-{
-	uint64_t bigheap_growth;
-
-	bigheap_growth = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("bigheap-growth", bigheap_growth,
-		MIN_BIGHEAP_GROWTH, MAX_BIGHEAP_GROWTH);
-	return stress_set_setting("bigheap-growth", TYPE_ID_UINT64, &bigheap_growth);
 }
 
 /*
@@ -154,20 +117,23 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 {
 	uint64_t bigheap_growth = DEFAULT_BIGHEAP_GROWTH;
 	size_t bigheap_bytes = DEFAULT_BIGHEAP_BYTES;
-	NOCLOBBER void *ptr = NULL, *last_ptr = NULL;
+	NOCLOBBER void *ptr = NULL;
+	NOCLOBBER const void *last_ptr = NULL;
 	NOCLOBBER uint8_t *last_ptr_end = NULL;
-	NOCLOBBER size_t size = 0;
+	NOCLOBBER size_t size = 0, stride;
 	NOCLOBBER double duration = 0.0, count = 0.0;
 	NOCLOBBER bool segv_reported = false;
 	const size_t page_size = args->page_size;
-	const size_t stride = page_size;
 	double rate;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 	const bool oom_avoid = !!(g_opt_flags & OPT_FLAGS_OOM_AVOID);
+	const bool aggressive = !!(g_opt_flags & OPT_FLAGS_AGGRESSIVE);
 	bool bigheap_mlock = false;
 	struct sigaction action;
 	int ret;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 
+	stride = (g_opt_flags & OPT_FLAGS_AGGRESSIVE) ? sizeof(uintptr_t) : page_size;
 	fault_addr = NULL;
 	signo = -1;
 	sigcode = -1;
@@ -176,7 +142,12 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 	(void)context;
 
 	(void)stress_get_setting("bigheap-mlock", &bigheap_mlock);
-	(void)stress_get_setting("bigheap-bytes", &bigheap_bytes);
+	if (!stress_get_setting("bigheap-bytes", &bigheap_bytes)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			bigheap_bytes = MAX_BIGHEAP_BYTES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			bigheap_bytes = MIN_BIGHEAP_BYTES;
+	}
 	if (!stress_get_setting("bigheap-growth", &bigheap_growth)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
 			bigheap_growth = MAX_BIGHEAP_GROWTH;
@@ -218,6 +189,8 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 #if defined(MCL_FUTURE)
@@ -238,7 +211,7 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 		 * some time and we should bail out before
 		 * exerting any more memory pressure
 		 */
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 
 		phase = STRESS_BIGHEAP_LOWMEM_CHECK;
@@ -259,11 +232,24 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 		if (old_ptr) {
 			phase = STRESS_BIGHEAP_REALLOC;
 			ptr = realloc(old_ptr, size);
+			if (g_opt_flags & OPT_FLAGS_AGGRESSIVE) {
+				if (LIKELY(ptr != NULL)) {
+					old_ptr = ptr;
+					size += 64;
+					ptr = realloc(old_ptr, size);
+					if (LIKELY(ptr != NULL))
+						stress_bogo_inc(args);
+				}
+			}
 		} else {
 			phase = STRESS_BIGHEAP_MALLOC;
-			ptr = malloc(size);
+			if (UNLIKELY(aggressive)) {
+				ptr = calloc(1, size);
+			} else {
+				ptr = malloc(size);
+			}
 		}
-		if (ptr == NULL) {
+		if (UNLIKELY(ptr == NULL)) {
 			phase = STRESS_BIGHEAP_OUT_OF_MEMORY;
 			pr_dbg("%s: out of memory at %" PRIu64
 				" MB (instance %d)\n",
@@ -278,7 +264,7 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 			duration += stress_time_now() - t;
 			count += 1.0;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
 
 			if (last_ptr == ptr) {
@@ -290,7 +276,7 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 				*uintptr = (uintptr_t)uintptr;
 			}
 			while (uintptr < uintptr_end) {
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					goto finish;
 				*uintptr = (uintptr_t)uintptr;
 				uintptr += stride / sizeof(uintptr_t);
@@ -305,13 +291,15 @@ static int stress_bigheap_child(stress_args_t *args, void *context)
 					uintptr = (uintptr_t *)ptr;
 				}
 				while (uintptr < uintptr_end) {
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						goto finish;
-					if (*uintptr != (uintptr_t)uintptr)
+					if (UNLIKELY(*uintptr != (uintptr_t)uintptr)) {
 						pr_fail("%s: data at location %p was 0x%" PRIxPTR
 							" instead of 0x%" PRIxPTR "\n",
 							args->name, (void *)uintptr, *uintptr,
 							(uintptr_t)uintptr);
+						rc = EXIT_FAILURE;
+					}
 					uintptr += stride / sizeof(uintptr_t);
 				}
 			}
@@ -325,11 +313,11 @@ finish:
 	phase = STRESS_BIGHEAP_FINISHED;
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (duration > 0.0) ? count / duration : 0.0;
-	stress_metrics_set(args, 0, "realloc calls per sec", rate, STRESS_HARMONIC_MEAN);
+	stress_metrics_set(args, 0, "realloc calls per sec", rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	free(ptr);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -341,17 +329,17 @@ static int stress_bigheap(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_bigheap_child, STRESS_OOMABLE_NORMAL);
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_bigheap_bytes,	stress_set_bigheap_bytes },
-	{ OPT_bigheap_growth,	stress_set_bigheap_growth },
-	{ OPT_bigheap_mlock,	stress_set_bigheap_mlock },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_bigheap_bytes,  "bigheap-bytes",  TYPE_ID_SIZE_T_BYTES_VM, MIN_BIGHEAP_BYTES,  MAX_BIGHEAP_BYTES,  NULL },
+	{ OPT_bigheap_growth, "bigheap-growth", TYPE_ID_UINT64,          MIN_BIGHEAP_GROWTH, MAX_BIGHEAP_GROWTH, NULL },
+	{ OPT_bigheap_mlock,  "bigheap-mlock",  TYPE_ID_BOOL,            0,                  1,                  NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_bigheap_info = {
+const stressor_info_t stress_bigheap_info = {
 	.stressor = stress_bigheap,
-	.class = CLASS_OS | CLASS_VM,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_VM,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

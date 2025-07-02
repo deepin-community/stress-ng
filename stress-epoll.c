@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-net.h"
 #include "core-pragma.h"
 
+#include <time.h>
+
 #if defined(HAVE_SYS_UN_H)
 #include <sys/un.h>
 #endif
@@ -31,8 +33,6 @@
 #include <sys/epoll.h>
 #endif
 
-#define MIN_EPOLL_PORT		(1024)
-#define MAX_EPOLL_PORT		(65535)
 #define DEFAULT_EPOLL_PORT	(6000)
 
 #define MAX_EPOLL_EVENTS 	(1024)
@@ -64,70 +64,20 @@ typedef void (stress_epoll_func_t)(
 	const pid_t mypid,
 	const int epoll_port,
 	const int epoll_domain,
-	const int epoll_sockets);
+	const int epoll_sockets,
+	const int max_servers);
 
 static timer_t epoll_timerid;
 
 #endif
 
-static int max_servers = 1;
+static int epoll_domain_mask = DOMAIN_ALL;
 
-/*
- *  stress_set_epoll_port()
- *	set the default port base
- */
-static int stress_set_epoll_port(const char *opt)
-{
-	int epoll_port;
-
-	stress_set_net_port("epoll-port", opt,
-		MIN_EPOLL_PORT, MAX_EPOLL_PORT, &epoll_port);
-	return stress_set_setting("epoll-port", TYPE_ID_INT, &epoll_port);
-}
-
-/*
- *  stress_set_epoll_domain()
- *	set the socket domain option
- */
-static int stress_set_epoll_domain(const char *opt)
-{
-	int ret, epoll_domain;
-
-	ret = stress_set_net_domain(DOMAIN_ALL, "epoll-domain",
-		opt, &epoll_domain);
-	stress_set_setting("epoll-domain", TYPE_ID_INT, &epoll_domain);
-
-	switch (epoll_domain) {
-	case AF_INET:
-	case AF_INET6:
-		max_servers = 4;
-		break;
-	case AF_UNIX:
-	default:
-		max_servers = 1;
-	}
-
-	return ret;
-}
-
-/*
- *  stress_set_epoll_sockets()
- *	set the maximum number of open sockets
- */
-static int stress_set_epoll_sockets(const char *opt)
-{
-	int epoll_sockets;
-
-        epoll_sockets = (int)stress_get_uint32(opt);
-        stress_check_range(opt, (uint64_t)epoll_sockets, MIN_EPOLL_SOCKETS, MAX_EPOLL_SOCKETS);
-        return stress_set_setting("epoll-sockets", TYPE_ID_INT, &epoll_sockets);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_epoll_domain,	stress_set_epoll_domain },
-	{ OPT_epoll_port,	stress_set_epoll_port },
-	{ OPT_epoll_sockets,	stress_set_epoll_sockets },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_epoll_domain,  "epoll-domain",  TYPE_ID_INT_DOMAIN, 0, 0, &epoll_domain_mask },
+	{ OPT_epoll_port,    "epoll-port",    TYPE_ID_INT_PORT,   MIN_PORT, MAX_PORT, NULL },
+	{ OPT_epoll_sockets, "epoll-sockets", TYPE_ID_INT,        MIN_EPOLL_SOCKETS, MAX_EPOLL_SOCKETS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_EPOLL_H) &&	\
@@ -155,7 +105,7 @@ static int stress_epoll_pwait(
     defined(HAVE_SYSCALL)
 	if (stress_mwc1()) {
 		struct timespec timeout_ts;
-		int64_t timeout_ns = (int64_t)timeout * 1000;
+		const int64_t timeout_ns = (int64_t)timeout * 1000;
 		int ret;
 
 		timeout_ts.tv_sec = timeout_ns / STRESS_NANOSECOND;
@@ -191,7 +141,7 @@ static void MLOCKED_TEXT epoll_timer_handler(int sig)
 	(void)sig;
 
 	/* Cancel timer if we detect no more runs */
-	if (!stress_continue_flag()) {
+	if (UNLIKELY(!stress_continue_flag())) {
 		struct itimerspec timer;
 
 		timer.it_value.tv_sec = 0;
@@ -210,28 +160,33 @@ static void MLOCKED_TEXT epoll_timer_handler(int sig)
 static pid_t epoll_spawn(
 	stress_args_t *args,
 	stress_epoll_func_t func,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid,
 	const int child,
 	const pid_t mypid,
 	const int epoll_port,
 	const int epoll_domain,
-	const int epoll_sockets)
+	const int epoll_sockets,
+	const int max_servers)
 {
-	pid_t pid;
-
 again:
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
 		return -1;
-	}
-	if (pid == 0) {
+	} else if (s_pid->pid == 0) {
+		s_pid->pid = getpid();
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
-		func(args, child, mypid, epoll_port, epoll_domain, epoll_sockets);
+		stress_sync_start_wait_s_pid(s_pid);
+
+		func(args, child, mypid, epoll_port, epoll_domain, epoll_sockets, max_servers);
 		_exit(EXIT_SUCCESS);
+	}  else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
 
 /*
@@ -344,7 +299,7 @@ static int epoll_notification(
 		int fd;
 		struct epoll_event event;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return -1;
 		/* Try to limit too many open fds */
 		if (*fd_count > epoll_sockets)
@@ -553,7 +508,8 @@ static int epoll_client(
 	stress_args_t *args,
 	const pid_t mypid,
 	const int epoll_port,
-	const int epoll_domain)
+	const int epoll_domain,
+	const int max_servers)
 {
 	int port_counter = 0;
 	uint64_t connect_timeouts = 0;
@@ -582,7 +538,7 @@ static int epoll_client(
 		if (port_counter >= max_servers)
 			port_counter = 0;
 retry:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		if (UNLIKELY((fd = socket(epoll_domain, SOCK_STREAM, 0)) < 0)) {
@@ -655,7 +611,7 @@ retry:
 			case ENOENT:	   /* unix domain not yet created */
 				break;
 			default:
-				pr_dbg("%s: connect failed: %d (%s)\n",
+				pr_dbg("%s: connect failed, errno=%d (%s)\n",
 					args->name, saved_errno, strerror(saved_errno));
 				break;
 			}
@@ -683,7 +639,7 @@ retry:
 		}
 		(void)close(fd);
 		stress_bogo_inc(args);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_sched_yield();
 	} while (stress_continue(args));
@@ -691,7 +647,7 @@ retry:
 #if defined(AF_UNIX) &&		\
     defined(HAVE_SOCKADDR_UN)
 	if (addr && (epoll_domain == AF_UNIX)) {
-		struct sockaddr_un *addr_un = (struct sockaddr_un *)addr;
+		const struct sockaddr_un *addr_un = (struct sockaddr_un *)addr;
 
 		(void)shim_unlink(addr_un->sun_path);
 	}
@@ -714,7 +670,8 @@ static void NORETURN epoll_server(
 	const pid_t mypid,
 	const int epoll_port,
 	const int epoll_domain,
-	const int epoll_sockets)
+	const int epoll_sockets,
+	const int max_servers)
 {
 	NOCLOBBER int efd = -1, efd2 = -1, sfd = -1, rc = EXIT_SUCCESS;
 	int so_reuseaddr = 1;
@@ -779,7 +736,7 @@ static void NORETURN epoll_server(
 		efd = epoll_create1(INT_MIN);
 		if (efd >= 0) {
 			(void)close(efd);
-			pr_fail("%s: epoll_create1 unexpectedly succeeded with an invalid flag,"
+			pr_fail("%s: epoll_create1 unexpectedly succeeded with an invalid flag, "
 				"errno=%d (%s)\n", args->name, errno, strerror(errno));
 		}
 
@@ -813,7 +770,7 @@ static void NORETURN epoll_server(
 		efd = epoll_create(INT_MIN);
 		if (efd >= 0) {
 			(void)close(efd);
-			pr_fail("%s: epoll_create unexpectedly succeeded with an invalid size,"
+			pr_fail("%s: epoll_create unexpectedly succeeded with an invalid size, "
 				"errno=%d (%s)\n", args->name, errno, strerror(errno));
 		}
 
@@ -837,7 +794,7 @@ static void NORETURN epoll_server(
 	efd = epoll_create(INT_MIN);
 	if (efd >= 0) {
 		(void)close(efd);
-		pr_fail("%s: epoll_create unexpectedly succeeded with an invalid size,"
+		pr_fail("%s: epoll_create unexpectedly succeeded with an invalid size, "
 			"errno=%d (%s)\n", args->name, errno, strerror(errno));
 	}
 
@@ -862,9 +819,10 @@ static void NORETURN epoll_server(
 		rc = EXIT_FAILURE;
 		goto die_close;
 	}
-	events = calloc(MAX_EPOLL_EVENTS, sizeof(*events));
+	events = (struct epoll_event *)calloc(MAX_EPOLL_EVENTS, sizeof(*events));
 	if (!events) {
-		pr_fail("%s: calloc failed, out of memory\n", args->name);
+		pr_fail("%s: calloc of %d events failed%s, out of memory\n",
+			args->name, MAX_EPOLL_EVENTS, stress_get_memfree_str());
 		rc = EXIT_FAILURE;
 		goto die_close;
 	}
@@ -881,7 +839,7 @@ static void NORETURN epoll_server(
 		errno = 0;
 
 		ret = sigsetjmp(jmp_env, 1);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (UNLIKELY(ret != 0))
 			wait_segv = true;
@@ -986,17 +944,17 @@ static void NORETURN epoll_server(
 	} while (stress_continue(args));
 
 die_close:
-	if (efd != -1)
+	if (efd > -1)
 		(void)close(efd);
-	if (efd2 != -1)
+	if (efd2 > -1)
 		(void)close(efd2);
-	if (sfd != -1)
+	if (sfd > -1)
 		(void)close(sfd);
 die:
 #if defined(AF_UNIX) &&		\
     defined(HAVE_SOCKADDR_UN)
 	if (addr && (epoll_domain == AF_UNIX)) {
-		struct sockaddr_un *addr_un = (struct sockaddr_un *)addr;
+		const struct sockaddr_un *addr_un = (struct sockaddr_un *)addr;
 
 		(void)shim_unlink(addr_un->sun_path);
 	}
@@ -1012,26 +970,53 @@ die:
  */
 static int stress_epoll(stress_args_t *args)
 {
-	pid_t pids[MAX_SERVERS], mypid = getpid();
+	stress_pid_t *s_pids, *s_pids_head = NULL;
+	pid_t mypid = getpid();
 	int i, rc = EXIT_SUCCESS;
 	int epoll_domain = AF_UNIX;
 	int epoll_port = DEFAULT_EPOLL_PORT;
 	int epoll_sockets = DEFAULT_EPOLL_SOCKETS;
 	int start_port, end_port, reserved_port;
+	int max_servers;
 
 	(void)stress_get_setting("epoll-domain", &epoll_domain);
 	(void)stress_get_setting("epoll-port", &epoll_port);
-	(void)stress_get_setting("epoll-sockets", &epoll_sockets);
+	if (!stress_get_setting("epoll-sockets", &epoll_sockets)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			epoll_sockets = MAX_EPOLL_SOCKETS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			epoll_sockets = MIN_EPOLL_SOCKETS;
+	}
 
 	if (stress_sighandler(args->name, SIGPIPE, SIG_IGN, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
+	s_pids = stress_sync_s_pids_mmap(MAX_SERVERS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, MAX_SERVERS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
+
+	switch (epoll_domain) {
+	case AF_INET:
+	case AF_INET6:
+		max_servers = 4;
+		break;
+	case AF_UNIX:
+	default:
+		max_servers = 1;
+	}
+
 	if (max_servers == 1) {
 		start_port = epoll_port + (int)args->instance;
+		if (start_port > MAX_PORT)
+			start_port -= (MAX_PORT - MIN_PORT + 1);
 		reserved_port = stress_net_reserve_ports(start_port, start_port);
 		if (reserved_port < 0) {
 			pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
 				args->name, start_port);
+			(void)stress_sync_s_pids_munmap(s_pids, MAX_SERVERS);
 			return EXIT_NO_RESOURCE;
 		}
 		/* adjust for reserved port range */
@@ -1045,11 +1030,16 @@ static int stress_epoll(stress_args_t *args)
 	} else {
 		start_port = epoll_port + (max_servers * (int)args->instance);
 		end_port = start_port + max_servers - 1;
+		if (end_port > MAX_PORT) {
+			start_port = MIN_PORT;
+			end_port = start_port + max_servers - 1;
+		}
 
 		reserved_port = stress_net_reserve_ports(start_port, end_port);
 		if (reserved_port < 0) {
 			pr_inf_skip("%s: cannot reserve ports %d..%d, skipping stressor\n",
 				args->name, start_port, end_port);
+			(void)stress_sync_s_pids_munmap(s_pids, MAX_SERVERS);
 			return EXIT_NO_RESOURCE;
 		}
 		/* adjust for reserved port range */
@@ -1060,8 +1050,6 @@ static int stress_epoll(stress_args_t *args)
 		pr_dbg("%s: process [%" PRIdMAX "] using socket ports %d..%d\n",
 			args->name, (intmax_t)args->pid, start_port, end_port);
 	}
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
 	 *  Spawn off servers to handle multi port connections.
@@ -1077,37 +1065,42 @@ static int stress_epoll(stress_args_t *args)
 	 *  Typically, we are limited to ~500 connections per second
 	 *  on a default Linux configuration.
 	 */
-	(void)shim_memset(pids, 0, sizeof(pids));
 	for (i = 0; i < max_servers; i++) {
-		pids[i] = epoll_spawn(args, epoll_server, i, mypid, epoll_port, epoll_domain, epoll_sockets);
-		if (pids[i] < 0) {
+		stress_sync_start_init(&s_pids[i]);
+		if (epoll_spawn(args, epoll_server, &s_pids_head, &s_pids[i], i, mypid, epoll_port, epoll_domain, epoll_sockets, max_servers) < 0) {
 			pr_fail("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto reap;
 		}
 	}
 
-	rc = epoll_client(args, mypid, epoll_port, epoll_domain);
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
+	rc = epoll_client(args, mypid, epoll_port, epoll_domain, max_servers);
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	stress_net_release_ports(start_port, end_port);
 
-	stress_kill_and_wait_many(args, pids, max_servers, SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, max_servers, SIGALRM, true);
+	(void)stress_sync_s_pids_munmap(s_pids, MAX_SERVERS);
 
 	return rc;
 }
-stressor_info_t stress_epoll_info = {
+const stressor_info_t stress_epoll_info = {
 	.stressor = stress_epoll,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_epoll_info = {
+const stressor_info_t stress_epoll_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/epoll.h or librt or timer support"

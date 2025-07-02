@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,7 @@
 #include "core-arch.h"
 #include "core-asm-x86.h"
 #include "core-asm-ppc64.h"
+#include "core-builtin.h"
 #include "core-cpu.h"
 
 #if defined(HAVE_SYS_CAPABILITY_H)
@@ -37,24 +38,9 @@ static const stress_help_t help[] = {
 #define STRESS_SANE_LOOPS_QUICK	16
 #define STRESS_SANE_LOOPS	65536
 
-static int stress_set_rdrand_seed(const char *opt)
-{
-	(void)opt;
-
-#if defined(STRESS_ARCH_X86) &&		\
-    defined(HAVE_ASM_X86_RDRAND) &&	\
-    defined(HAVE_ASM_X86_RDSEED)
-	if (stress_cpu_x86_has_rdseed()) {
-		return stress_set_setting_true("rdrand-seed", opt);
-	}
-#endif
-	pr_inf("rdrand-seed ignored, cpu does not support feature, defaulting to rdrand\n");
-	return 0;
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_rdrand_seed,	stress_set_rdrand_seed },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_rdrand_seed, "rdrand-seed", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(STRESS_ARCH_X86) &&	\
@@ -123,19 +109,27 @@ static int stress_rdrand_supported(const char *name)
 		rdrand_supported = true;
 		return 0;
 	}
-	pr_inf_skip("%s stressor will be skipped, CPU "
-		"does not support the instruction 'darn'\n", name);
-	return -1;
-#else
-	pr_inf_skip("%s stressor will be skipped, cannot"
-		"determine if CPU is a power9 the instruction 'darn'\n", name);
-	return -1;
 #endif
+#if defined(HAVE_BUILTIN_CPU_IS_POWER10)
+	if (__builtin_cpu_is("power10")) {
+		rdrand_supported = true;
+		return 0;
+	}
+#endif
+#if defined(HAVE_BUILTIN_CPU_IS_POWER11)
+	if (__builtin_cpu_is("power11")) {
+		rdrand_supported = true;
+		return 0;
+	}
+#endif
+	pr_inf_skip("%s stressor will be skipped, cannot detect if the CPU "
+		"supports the instruction 'darn'\n", name);
+	return -1;
 }
 
 static inline uint64_t rand64(void)
 {
-	return stress_asm_ppc64_darn();
+	return (uint64_t)(stress_asm_ppc64_darn() << 32) | (uint64_t)stress_asm_ppc64_darn();
 }
 #endif
 
@@ -272,18 +266,31 @@ static int stress_rdrand(stress_args_t *args)
 {
 	double average;
 	uint64_t lo, hi;
-	int out_of_range;
+	bool out_of_range;
 	int rc = EXIT_SUCCESS;
 	size_t j;
 #if defined(HAVE_SEED_CAPABILITY)
 	bool rdrand_seed = false;
-
-	(void)stress_get_setting("rdrand-seed", &rdrand_seed);
 #endif
 	static uint64_t ALIGN64 counters[16];
 
-	(void)memset(counters, 0, sizeof(counters));
+	(void)shim_memset(counters, 0, sizeof(counters));
+#if defined(HAVE_SEED_CAPABILITY)
+	(void)stress_get_setting("rdrand-seed", &rdrand_seed);
+#endif
 
+#if defined(STRESS_ARCH_X86) &&		\
+    defined(HAVE_ASM_X86_RDRAND) &&	\
+    defined(HAVE_ASM_X86_RDSEED) &&	\
+    defined(HAVE_SEED_CAPABILITY)
+	if (rdrand_seed && !stress_cpu_x86_has_rdseed()) {
+		pr_inf("rdrand-seed ignored, cpu does not support feature, defaulting to rdrand\n");
+		rdrand_seed = false;
+	}
+#endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (rdrand_supported) {
@@ -350,9 +357,9 @@ static int stress_rdrand(stress_args_t *args)
 		million_bits = ((double)c * 64.0 * 257.0) * ONE_MILLIONTH;
 		rate = (duration > 0.0) ? million_bits / duration : 0.0;
 		stress_metrics_set(args, 0, "million random bits read",
-			million_bits, STRESS_GEOMETRIC_MEAN);
+			million_bits, STRESS_METRIC_GEOMETRIC_MEAN);
 		stress_metrics_set(args, 1, "million random bits per sec",
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -365,28 +372,42 @@ static int stress_rdrand(stress_args_t *args)
 	 */
 	average /= (double)SIZEOF_ARRAY(counters);
 	if (average > 10000.0) {
+		double total = 0.0;
+
 		lo = (uint64_t)average - (average * 0.05);
 		hi = (uint64_t)average + (average * 0.05);
-		out_of_range = 0;
+		out_of_range = false;
 
 		for (j = 0; j < SIZEOF_ARRAY(counters); j++) {
+			total += counters[j];
 			if ((counters[j] < lo) || (counters[j] > hi)) {
-				out_of_range++;
+				out_of_range = true;
 				rc = EXIT_FAILURE;
 			}
 		}
-		if (out_of_range)
+		if (out_of_range) {
 			pr_fail("%s: poor distribution of random values\n", args->name);
+			if (stress_instance_zero(args)) {
+				uint64_t i;
+				const uint64_t shift = 1ULL << 60;
+
+				pr_inf("Frequency distribution:\n");
+				for (i = 0; i < (uint64_t)SIZEOF_ARRAY(counters); i++) {
+					pr_inf("0x%16.16" PRIx64 "..0x%16.16" PRIx64 " %5.2f%% %10" PRIu64 "\n",
+						i  * shift, ((i + 1) * shift) - 1, counters[i] * 100.0 / total, counters[i]);
+				}
+			}
+		}
 	}
 
 	return rc;
 }
 
-stressor_info_t stress_rdrand_info = {
+const stressor_info_t stress_rdrand_info = {
 	.stressor = stress_rdrand,
 	.supported = stress_rdrand_supported,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_CPU,
+	.opts = opts,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -399,11 +420,11 @@ static int stress_rdrand_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_rdrand_info = {
+const stressor_info_t stress_rdrand_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_rdrand_supported,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_CPU,
+	.opts = opts,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "x86 CPU only, built without rdrand or rdseed opcode support"

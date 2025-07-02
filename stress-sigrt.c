@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -51,22 +51,23 @@ static int stress_sigrt(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (stress_sigrt_metrics == MAP_FAILED) {
-		pr_inf("%s: failed to mmap %zu bytes, skipping stressor\n",
-			args->name, stress_sigrt_metrics_size);
+		pr_inf("%s: failed to mmap %zu bytes%s, errno=%d (%s), "
+			"skipping stressor\n",
+			args->name, stress_sigrt_metrics_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
-	pids = calloc((size_t)MAX_RTPIDS, sizeof(*pids));
+	stress_set_vma_anon_name(stress_sigrt_metrics, stress_sigrt_metrics_size, "metrics");
+	pids = (pid_t *)calloc((size_t)MAX_RTPIDS, sizeof(*pids));
 	if (!pids) {
-		pr_inf_skip("%s: cannot allocate array of %zd pids, skipping stressor\n",
-			args->name, (size_t)MAX_RTPIDS);
+		pr_inf_skip("%s: failed to allocate array of %zu pids%s, skipping stressor\n",
+			args->name, (size_t)MAX_RTPIDS, stress_get_memfree_str());
 		(void)munmap((void *)stress_sigrt_metrics, stress_sigrt_metrics_size);
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_zero_metrics(stress_sigrt_metrics, MAX_RTPIDS);
 	for (i = 0; i < MAX_RTPIDS; i++) {
-		stress_sigrt_metrics[i].duration = 0.0;
-		stress_sigrt_metrics[i].count = 0.0;
-
 		if (stress_sighandler(args->name, i + SIGRTMIN, stress_sighandler_nop, NULL) < 0) {
 			free(pids);
 			(void)munmap((void *)stress_sigrt_metrics, stress_sigrt_metrics_size);
@@ -74,6 +75,8 @@ static int stress_sigrt(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	for (i = 0; i < MAX_RTPIDS; i++) {
@@ -82,7 +85,7 @@ again:
 		if (pids[i] < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
 			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -90,7 +93,7 @@ again:
 		} else if (pids[i] == 0) {
 			sigset_t mask;
 			siginfo_t info ALIGN64;
-			int index;
+			int idx;
 
 			stress_parent_died_alarm();
 			(void)sched_settings_apply(true);
@@ -102,19 +105,18 @@ again:
 			(void)shim_memset(&info, 0, sizeof info);
 
 			while (stress_continue_flag()) {
-
 				if (UNLIKELY(sigwaitinfo(&mask, &info) < 0)) {
 					if (errno == EINTR)
 						continue;
 					break;
 				}
 
-				index = info.si_signo - SIGRTMIN;
-				if ((index >= 0) && (index < SIGRTMIN)) {
-					const double delta = stress_time_now() - stress_sigrt_metrics[index].t_start;
+				idx = info.si_signo - SIGRTMIN;
+				if ((idx >= 0) && (idx < SIGRTMIN)) {
+					const double delta = stress_time_now() - stress_sigrt_metrics[idx].t_start;
 					if (delta > 0.0) {
-						stress_sigrt_metrics[index].duration += delta;
-						stress_sigrt_metrics[index].count += 1.0;
+						stress_sigrt_metrics[idx].duration += delta;
+						stress_sigrt_metrics[idx].count += 1.0;
 					}
 				}
 				if (UNLIKELY(info.si_value.sival_int == 0))
@@ -184,7 +186,7 @@ reap:
 	}
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs between sigqueue and sigwaitinfo completion",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	free(pids);
 	(void)munmap((void *)stress_sigrt_metrics, stress_sigrt_metrics_size);
@@ -192,16 +194,16 @@ reap:
 	return rc;
 }
 
-stressor_info_t stress_sigrt_info = {
+const stressor_info_t stress_sigrt_info = {
 	.stressor = stress_sigrt,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sigrt_info = {
+const stressor_info_t stress_sigrt_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sigqueue() or sigwaitinfo() or defined SIGRTMIN or SIGRTMAX"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,6 +33,11 @@ static const stress_help_t help[] = {
 static int stress_uprobe_supported(const char *name)
 {
 #if defined(__linux__)
+#if defined(BUILD_STATIC)
+	pr_inf_skip("%s: stressor will be skipped, cannot determine "
+		"libc start for tracing with static builds of stress-ng\n", name);
+	return -1;
+#else
 	if (!stress_check_capability(SHIM_CAP_SYS_ADMIN)) {
 		pr_inf_skip("%s stressor will be skipped, "
 			"need to be running with CAP_SYS_ADMIN "
@@ -40,6 +45,7 @@ static int stress_uprobe_supported(const char *name)
 		return -1;
 	}
 	return 0;
+#endif
 #else
 	pr_inf_skip("%s: stressor will be skipped, uprobe not available\n", name);
 	return -1;
@@ -59,7 +65,7 @@ static int stress_uprobe_write(const char *path, const int flags, const char *st
 	int fd, rc = 0;
 
 	fd = open(path, flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
-	if (fd < 0)
+	if (UNLIKELY(fd < 0))
 		return -errno;
 	errno = 0;
 	if (write(fd, str, strlen(str)) < 0)
@@ -76,14 +82,14 @@ static int stress_uprobe_write(const char *path, const int flags, const char *st
  */
 static void *stress_uprobe_libc_start(const pid_t pid, char *libc_path)
 {
-	char path[PATH_MAX], perm[5], buf[1024];
+	char path[PATH_MAX], perm[5], buf[PATH_MAX];
 	FILE *fp;
 	uint64_t start, end, offset, dev_major, dev_minor, inode;
 	void *addr = NULL;
 
 	(void)snprintf(path, sizeof(path), "/proc/%" PRIdMAX "/maps", (intmax_t)pid);
 	fp = fopen(path, "r");
-	if (!fp)
+	if (UNLIKELY(!fp))
 		return addr;
 
 	while (fgets(buf, sizeof(buf), fp)) {
@@ -117,7 +123,7 @@ static void *stress_uprobe_libc_start(const pid_t pid, char *libc_path)
  */
 static int stress_uprobe(stress_args_t *args)
 {
-	char buf[PATH_MAX + 256], libc_path[PATH_MAX];
+	char buf[PATH_MAX + 256], libc_path[PATH_MAX + 1];
 	int ret;
 	char event[128];
 	ptrdiff_t offset;
@@ -129,7 +135,7 @@ static int stress_uprobe(stress_args_t *args)
 
 	libc_addr = stress_uprobe_libc_start(pid, libc_path);
 	if (!libc_addr) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: cannot find start of libc text section, skipping stressor\n",
 				args->name);
 		return EXIT_NO_RESOURCE;
@@ -140,6 +146,8 @@ static int stress_uprobe(stress_args_t *args)
 	(void)snprintf(event, sizeof(event), "stressngprobe%d%" PRIu32,
 		getpid(), args->instance);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t_start = stress_time_now();
@@ -150,17 +158,17 @@ static int stress_uprobe(stress_args_t *args)
 		struct timeval tv;
 #endif
 		fd = open("/sys/kernel/debug/tracing/trace_pipe", O_RDONLY);
-		if (fd < 0) {
+		if (UNLIKELY(fd < 0)) {
 			if (errno == EBUSY) {
-				if (stress_continue(args)) {
-					shim_usleep((stress_mwc8() + 10) * 1000);
+				if (LIKELY(stress_continue(args))) {
+					(void)shim_usleep((stress_mwc8() + 10) * 1000);
 					continue;
 				} else {
 					rc = EXIT_SUCCESS;
 					goto terminate;
 				}
 			}
-			pr_inf_skip("%s: cannot open trace file: errno=%d (%s), skipping stressor\n",
+			pr_inf_skip("%s: cannot open trace file, errno=%d (%s), skipping stressor\n",
 				args->name, errno, strerror(errno));
 			stress_continue_set_flag(false);
 			rc = EXIT_NO_RESOURCE;
@@ -172,8 +180,8 @@ static int stress_uprobe(stress_args_t *args)
 		(void)snprintf(buf, sizeof(buf), "p:%s %s:%p\n", event, libc_path, (void *)offset);
 		ret = stress_uprobe_write("/sys/kernel/debug/tracing/uprobe_events",
 			O_WRONLY | O_CREAT | O_APPEND, buf);
-		if (ret < 0) {
-			pr_inf_skip("%s: cannot set uprobe_event: errno=%d (%s), skipping stressor\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_inf_skip("%s: cannot set uprobe_event, errno=%d (%s), skipping stressor\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_NO_RESOURCE;
 			goto terminate;
@@ -182,8 +190,8 @@ static int stress_uprobe(stress_args_t *args)
 		/* Enable tracing */
 		(void)snprintf(buf, sizeof(buf), "/sys/kernel/debug/tracing/events/uprobes/%s/enable", event);
 		ret = stress_uprobe_write(buf, O_WRONLY | O_CREAT | O_TRUNC, "1\n");
-		if (ret < 0) {
-			pr_inf_skip("%s: cannot enable uprobe_event: errno=%d (%s), skipping stressor\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_inf_skip("%s: cannot enable uprobe_event, errno=%d (%s), skipping stressor\n",
 				args->name, errno, strerror(errno));
 			stress_continue_set_flag(false);
 			rc = EXIT_NO_RESOURCE;
@@ -192,7 +200,7 @@ static int stress_uprobe(stress_args_t *args)
 
 		ret = stress_uprobe_write("/sys/kernel/debug/tracing/trace",
 			O_WRONLY | O_CREAT | O_TRUNC, "\n");
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_inf_skip("%s: cannot clear trace file, errno=%d (%s), skipping stressor\n",
 				args->name, errno, strerror(errno));
 			stress_continue_set_flag(false);
@@ -212,7 +220,7 @@ static int stress_uprobe(stress_args_t *args)
 		while (stress_continue(args)) {
 			char data[4096];
 			ssize_t n;
-			char *ptr;
+			const char *ptr;
 
 			FD_ZERO(&rfds);
 			FD_SET(fd, &rfds);
@@ -222,13 +230,16 @@ static int stress_uprobe(stress_args_t *args)
 			tv.tv_usec = 1000;
 			ret = select(fd + 1, &rfds, NULL, NULL, &tv);
 
-			if (ret <= 0)
+			if (UNLIKELY(ret <= 0))
 				break;
 #endif
 
 			n = read(fd, data, sizeof(data));
-			if (n <= 0)
+			if (UNLIKELY(n <= 0))
 				break;
+			if (n >= (ssize_t)sizeof(data))
+				n = (ssize_t)sizeof(data) - 1;
+			data[n] = '\0';
 			bytes += (double)n;
 
 			/*
@@ -245,19 +256,19 @@ static int stress_uprobe(stress_args_t *args)
 					break;
 				ptr++;
 				stress_bogo_inc(args);
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					goto terminate;
 			} while (ptr < data + sizeof(data));
 		}
 
 terminate:
-		if (fd != -1)
+		if (LIKELY(fd != -1))
 			(void)close(fd);
-		shim_sched_yield();
+		(void)shim_sched_yield();
 		/* Stop events */
 		VOID_RET(int, stress_uprobe_write("/sys/kernel/debug/tracing/events/uprobes/enable",
 			O_WRONLY, "0\n"));
-		shim_sched_yield();
+		(void)shim_sched_yield();
 
 		/* Remove uprobe */
 		(void)snprintf(buf, sizeof(buf), "-:%s\n", event);
@@ -268,23 +279,23 @@ terminate:
 	duration = stress_time_now() - t_start;
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB trace data per second",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return rc;
 }
 
-stressor_info_t stress_uprobe_info = {
+const stressor_info_t stress_uprobe_info = {
 	.stressor = stress_uprobe,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.supported = stress_uprobe_supported,
 	.help = help
 };
 #else
-stressor_info_t stress_uprobe_info = {
+const stressor_info_t stress_uprobe_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.supported = stress_uprobe_supported,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

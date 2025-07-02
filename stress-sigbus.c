@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,6 +28,11 @@ static volatile int signo;
 static volatile int code;
 #endif
 
+/*
+ *  currently disabled
+#define SET_AC_EFLAGS
+ */
+
 static const stress_help_t help[] = {
 	{ NULL,	"sigbus N",	"start N workers generating bus faults" },
 	{ NULL,	"sigbus-ops N",	"stop after N bogo bus faults" },
@@ -47,10 +52,18 @@ static void NORETURN MLOCKED_TEXT stress_bushandler(
 	(void)num;
 	(void)ucontext;
 
-	fault_addr = info->si_addr;
-	signo = info->si_signo;
-	code = info->si_code;
-
+#if defined(STRESS_ARCH_X86_64) &&	\
+    defined(SET_AC_EFLAGS)
+	/* Clear AC bit in EFLAGS */
+	__asm__ __volatile__("pushf;\n"
+			     "andl $0xfffbffff, (%rsp);\n"
+			     "popf;\n");
+#endif
+	if (info) {
+		fault_addr = info->si_addr;
+		signo = info->si_signo;
+		code = info->si_code;
+	}
 	siglongjmp(jmp_env, 1);		/* Ugly, bounce back */
 }
 #else
@@ -58,6 +71,13 @@ static void NORETURN MLOCKED_TEXT stress_bushandler(int signum)
 {
 	(void)signum;
 
+#if defined(STRESS_ARCH_X86_64) &&	\
+    defined(SET_AC_EFLAGS)
+	/* Clear AC bit in EFLAGS */
+	__asm__ __volatile__("pushf;\n"
+			     "andl $0xfffbffff, (%rsp);\n"
+			     "popf;\n");
+#endif
 	siglongjmp(jmp_env, 1);		/* Ugly, bounce back */
 }
 #endif
@@ -78,6 +98,7 @@ static int stress_sigbus(stress_args_t *args)
 #if defined(SA_SIGINFO)
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 #endif
+	NOCLOBBER double time_start;
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -93,10 +114,10 @@ static int stress_sigbus(stress_args_t *args)
 	(void)shim_unlink(filename);
 
 	ret = shim_posix_fallocate(fd, 0, page_size * 2);
-	if (ret < 0) {
-		if (errno != EINTR) {
+	if (ret != 0) {
+		if (ret != EINTR) {
 			pr_inf_skip("%s: posix_fallocate failed, no free space, errno=%d (%s)%s, skipping stressor\n",
-				args->name, errno, strerror(errno), fs_type);
+				args->name, ret, strerror(ret), fs_type);
 		}
 		rc = EXIT_NO_RESOURCE;
 		goto tidy_close;
@@ -107,9 +128,10 @@ static int stress_sigbus(stress_args_t *args)
 		PROT_READ | PROT_WRITE,
 		MAP_SHARED, fd, 0);
 	if (ptr == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of read only page failed: "
+		pr_inf_skip("%s: failed to mmap %zu byte read only pages%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size * 2,
+			stress_get_memfree_str(), errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto tidy_close;
 	}
@@ -122,7 +144,11 @@ static int stress_sigbus(stress_args_t *args)
 		goto tidy_mmap;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
+	time_start = stress_time_now();
 
 	for (;;) {
 		struct sigaction action;
@@ -139,25 +165,29 @@ static int stress_sigbus(stress_args_t *args)
 #endif
 		ret = sigaction(SIGBUS, &action, NULL);
 		if (ret < 0) {
-			pr_fail("%s: sigaction SIGBUS: errno=%d (%s)\n",
+			pr_fail("%s: sigaction SIGBUS failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy_mmap;
 		}
 		/* Some systems generate SIGSEGV rather than SIGBUS.. */
 		ret = sigaction(SIGSEGV, &action, NULL);
-		if (ret < 0) {
-			pr_fail("%s: sigaction SIGSEGV: errno=%d (%s)\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_fail("%s: sigaction SIGSEGV failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy_mmap;
 		}
 
 		ret = sigsetjmp(jmp_env, 1);
+
+		/* Timed out? */
+		if (UNLIKELY((stress_time_now() - time_start) > (double)g_opt_timeout))
+			goto tidy_exit;
 		/*
 		 * We return here if we get a SIGBUS, so
 		 * first check if we need to terminate
 		 */
-		if (!stress_continue(args))
-			break;
+		if (UNLIKELY(!stress_continue(args)))
+			goto tidy_exit;
 
 		if (ret) {
 			/* Signal was tripped */
@@ -167,10 +197,10 @@ static int stress_sigbus(stress_args_t *args)
 					args->name, (volatile void *)expected_addr, fault_addr);
 			}
 			/* We may also have SIGSEGV on some system as well as SIGBUS */
-			if (verify &&
-			    (signo != -1) &&
-			    (signo != SIGBUS) &&
-			    (signo != SIGSEGV)) {
+			if (UNLIKELY(verify &&
+				     (signo != -1) &&
+				     (signo != SIGBUS) &&
+				     (signo != SIGSEGV))) {
 				pr_fail("%s: expecting SIGBUS, got %s instead\n",
 					args->name, strsignal(signo));
 			}
@@ -213,19 +243,39 @@ static int stress_sigbus(stress_args_t *args)
 			if (stress_mwc1()) {
 				static uint64_t data[2];
 				uint8_t *ptr8 = (uint8_t *)data;
-				uint64_t *ptr64 = (uint64_t *)(ptr8 + 1);
-				uint32_t *ptr32 = (uint32_t *)(ptr8 + 1);
-				uint16_t *ptr16 = (uint16_t *)(ptr8 + 1);
+				volatile uint64_t *ptr64 = (volatile uint64_t *)(ptr8 + 1);
+				volatile uint32_t *ptr32 = (volatile uint32_t *)(ptr8 + 1);
+				volatile uint16_t *ptr16 = (volatile uint16_t *)(ptr8 + 1);
 
+#if defined(STRESS_ARCH_X86_64) &&	\
+    defined(SET_AC_EFLAGS)
+				/*
+				 *  On x86 enabling AC bit in EFLAGS will
+				 *  allow SIGBUS to be generated on misaligned
+				 *  access
+				 */
+				__asm__ __volatile__("pushf;\n"
+						     "orl $0x00040000, (%rsp);\n"
+						     "popf;\n");
+
+#endif
 				(*ptr64)++;
 				(*ptr32)++;
 				(*ptr16)++;
+#if defined(STRESS_ARCH_X86_64) &&	\
+    defined(SET_AC_EFLAGS)
+				/* Clear AC bit in EFLAGS */
+				__asm__ __volatile__("pushf;\n"
+						     "andl $0xfffbffff, (%rsp);\n"
+						     "popf;\n");
+#endif
 			}
 
 			/* Access un-backed file mmapping */
 			(*(ptr + page_size))++;
 		}
 	}
+tidy_exit:
 	rc = EXIT_SUCCESS;
 tidy_mmap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -239,9 +289,9 @@ tidy_dir:
 	return rc;
 }
 
-stressor_info_t stress_sigbus_info = {
+const stressor_info_t stress_sigbus_info = {
 	.stressor = stress_sigbus,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 #if defined(SA_SIGINFO)
 	.verify = VERIFY_OPTIONAL,
 #endif

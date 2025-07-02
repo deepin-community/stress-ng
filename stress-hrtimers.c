@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,7 @@
 #include "core-out-of-memory.h"
 
 #include <sched.h>
+#include <time.h>
 
 static const stress_help_t help[] = {
 	{ NULL,	"hrtimers N",	  "start N workers that exercise high resolution timers" },
@@ -31,25 +32,19 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_hrtimers_adjust(const char *opt)
-{
-        return stress_set_setting_true("hrtimers-adjust", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_hrtimers_adjust,	stress_set_hrtimers_adjust },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_hrtimers_adjust, "hrtimers-adjust", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_RT) &&		\
     defined(HAVE_TIMER_CREATE) &&	\
     defined(HAVE_TIMER_DELETE) &&	\
     defined(HAVE_TIMER_SETTIME)
-static uint64_t timer_counter;
-static uint64_t max_ops;
+stress_args_t *s_args;
 static timer_t timerid;
 static double time_end;
-static long ns_delay;
+static long int ns_delay;
 static int overrun;
 void *lock;
 
@@ -68,16 +63,6 @@ static void stress_hrtimers_set(struct itimerspec *timer)
 }
 
 /*
- *  stress_hrtimers_stress_continue(args)
- *      returns true if we can keep on running a stressor
- */
-static bool HOT OPTIMIZE3 stress_hrtimers_stress_continue(void)
-{
-	return (LIKELY(stress_continue_flag()) &&
-		LIKELY(!max_ops || ((timer_counter) < max_ops)));
-}
-
-/*
  *  stress_hrtimers_handler()
  *	catch timer signal and cancel if no more runs flagged
  */
@@ -85,16 +70,21 @@ static void MLOCKED_TEXT OPTIMIZE3 stress_hrtimers_handler(int sig)
 {
 	struct itimerspec timer;
 	sigset_t mask;
+	register uint64_t bogo_counter;
+	static uint64_t counter;
 
 	(void)sig;
 
-	timer_counter++;
-	if (UNLIKELY(!stress_hrtimers_stress_continue()))
-		goto cancel;
-
-	if (UNLIKELY((timer_counter & 4095) == 0)) {
+	counter++;
+	if (UNLIKELY(counter >= PROCS_MAX)) {
+		VOID_RET(bool, stress_bogo_inc_lock(s_args, lock, 1));
+		if (UNLIKELY(!stress_continue(s_args)))
+			goto cancel;
+	}
+	bogo_counter = stress_bogo_get(s_args);
+	if (UNLIKELY((bogo_counter & 4095) == 0)) {
 		if (ns_delay >= 0) {
-			const long ns_adjust = ns_delay >> 2;
+			const long int ns_adjust = ns_delay >> 2;
 
 			if (timer_getoverrun(timerid)) {
 				ns_delay += ns_adjust;
@@ -106,7 +96,7 @@ static void MLOCKED_TEXT OPTIMIZE3 stress_hrtimers_handler(int sig)
 		(void)timer_settime(timerid, 0, &timer, NULL);
 
 		/* check periodically for timeout */
-		if ((timer_counter & 65535) == 0) {
+		if ((bogo_counter & 65535) == 0) {
 			if ((sigpending(&mask) == 0) && (sigismember(&mask, SIGINT)))
 				goto cancel;
 			if (stress_time_now() > time_end)
@@ -134,14 +124,17 @@ static int stress_hrtimer_process(stress_args_t *args)
 	struct sigevent sev;
 	struct itimerspec timer;
 	sigset_t mask;
+	int sched;
 
 	time_end = args->time_end;
 
 	(void)sigemptyset(&mask);
 	(void)sigaddset(&mask, SIGINT);
 	(void)sigprocmask(SIG_SETMASK, &mask, NULL);
-
-	VOID_RET(int, stress_set_sched(getpid(), SCHED_RR, UNDEFINED, true));
+	/* If sched is not set, use SCHED_RR as default */
+	if (!stress_get_setting("sched", &sched)) {
+		VOID_RET(int, stress_set_sched(getpid(), SCHED_RR, UNDEFINED, true));
+	}
 
 	(void)shim_memset(&action, 0, sizeof action);
 	action.sa_handler = stress_hrtimers_handler;
@@ -155,8 +148,8 @@ static int stress_hrtimer_process(stress_args_t *args)
 	sev.sigev_signo = SIGRTMIN;
 	sev.sigev_value.sival_ptr = &timerid;
 	if (timer_create(CLOCK_REALTIME, &sev, &timerid) < 0) {
-		if ((errno == EAGAIN) || (errno == ENOMEM)) {
-			pr_inf_skip("%s: timer_create, errno=%d (%s), skipping stessor\n",
+		if ((errno == EAGAIN) || (errno == ENOMEM) || (errno == ENOTSUP)) {
+			pr_inf_skip("%s: timer_create, errno=%d (%s), skipping stressor\n",
 				args->name, errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
@@ -173,10 +166,8 @@ static int stress_hrtimer_process(stress_args_t *args)
 	}
 
 	do {
-		shim_usleep(100000);
-	} while (stress_hrtimers_stress_continue());
-
-	stress_bogo_add_lock(args, lock, timer_counter);
+		(void)shim_usleep(100000);
+	} while (stress_continue(args));
 
 	if (timer_delete(timerid) < 0) {
 		pr_fail("%s: timer_delete failed, errno=%d (%s)\n",
@@ -188,57 +179,76 @@ static int stress_hrtimer_process(stress_args_t *args)
 
 static int stress_hrtimers(stress_args_t *args)
 {
-	pid_t pids[PROCS_MAX];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	size_t i;
-        bool hrtimers_adjust = false;
+	bool hrtimers_adjust = false;
 	double start_time = -1.0, end_time;
 	sigset_t mask;
+	int rc = EXIT_SUCCESS;
+
+	s_args = args;
 
 	if (stress_sigchld_set_handler(args) < 0)
 		return EXIT_NO_RESOURCE;
 
-	lock = stress_lock_create();
+	s_pids = stress_sync_s_pids_mmap(PROCS_MAX);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, PROCS_MAX, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
+
+	lock = stress_lock_create("counter");
 	if (!lock) {
 		pr_inf("%s: cannot create lock, skipping stressor\n", args->name);
-		return EXIT_NO_RESOURCE;
+		rc = EXIT_NO_RESOURCE;
+		goto tidy_s_pids;
 	}
 
         (void)stress_get_setting("hrtimers-adjust", &hrtimers_adjust);
 	overrun = 0;
 	ns_delay = hrtimers_adjust ? 10000 : -1;
-	max_ops = args->max_ops / PROCS_MAX;
-
-	(void)shim_memset(pids, 0, sizeof(pids));
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	for (i = 0; i < PROCS_MAX; i++) {
-		if (!stress_continue(args))
+		stress_sync_start_init(&s_pids[i]);
+
+		if (UNLIKELY(!stress_continue(args)))
 			goto reap;
 
-		pids[i] = fork();
-		if (pids[i] == 0) {
+		s_pids[i].pid = fork();
+		if (s_pids[i].pid == 0) {
 			/* Child */
+			s_pids[i].pid = getpid();
+			stress_sync_start_wait_s_pid(&s_pids[i]);
+
 			stress_parent_died_alarm();
 			stress_set_oom_adjustment(args, true);
 			(void)sched_settings_apply(true);
 			stress_hrtimer_process(args);
 			_exit(EXIT_SUCCESS);
+		} else if (s_pids[i].pid > 0) {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	(void)sigemptyset(&mask);
-        (void)sigaddset(&mask, SIGRTMIN);
+	(void)sigaddset(&mask, SIGRTMIN);
 	(void)sigprocmask(SIG_BLOCK, &mask, NULL);
 
 	start_time = stress_time_now();
 	do {
-		shim_usleep(100000);
+		(void)shim_usleep(100000);
 	} while (stress_continue(args));
 
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	stress_kill_and_wait_many(args, pids, PROCS_MAX, SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, PROCS_MAX, SIGALRM, true);
 	end_time = stress_time_now();
 
 	if (start_time >= 0.0) {
@@ -249,26 +259,28 @@ reap:
 
 			pr_dbg("%s: hrtimer signals at %.3f MHz\n", args->name, rate / 1000000.0);
 			stress_metrics_set(args, 0, "hrtimer signals per sec",
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 		}
 	}
 	stress_lock_destroy(lock);
+tidy_s_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, PROCS_MAX);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_hrtimers_info = {
+const stressor_info_t stress_hrtimers_info = {
 	.stressor = stress_hrtimers,
-	.class = CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_hrtimers_info = {
+const stressor_info_t stress_hrtimers_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without librt or hrtimer support"

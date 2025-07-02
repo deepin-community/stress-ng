@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -48,39 +48,16 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_shm_mlock(const char *opt)
-{
-	return stress_set_setting_true("shm-mlock", opt);
-}
-
-static int stress_set_shm_posix_bytes(const char *opt)
-{
-	size_t shm_posix_bytes;
-
-	shm_posix_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("shm-bytes", shm_posix_bytes,
-		MIN_SHM_POSIX_BYTES, MAX_MEM_LIMIT);
-	return stress_set_setting("shm-bytes", TYPE_ID_SIZE_T, &shm_posix_bytes);
-}
-
-static int stress_set_shm_posix_objects(const char *opt)
-{
-	size_t shm_posix_objects;
-
-	shm_posix_objects = (size_t)stress_get_uint64(opt);
-	stress_check_range("shm-objs", shm_posix_objects,
-		MIN_SHM_POSIX_OBJECTS, MAX_48);
-	return stress_set_setting("shm-objs", TYPE_ID_SIZE_T, &shm_posix_objects);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_shm_bytes,	stress_set_shm_posix_bytes },
-	{ OPT_shm_mlock,	stress_set_shm_mlock },
-	{ OPT_shm_objects,	stress_set_shm_posix_objects },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_shm_bytes, "shm-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_SHM_POSIX_BYTES, MAX_MEM_LIMIT, NULL },
+	{ OPT_shm_mlock, "shm-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_shm_objs,  "shm-objs",  TYPE_ID_SIZE_T, MIN_SHM_POSIX_OBJECTS, MAX_48, NULL },
+	END_OPT,
 };
 
-#if defined(HAVE_LIB_RT)
+#if defined(HAVE_LIB_RT) &&	\
+    defined(HAVE_SHM_OPEN) &&	\
+    defined(HAVE_SHM_UNLINK)
 
 /*
  *  stress_shm_posix_check()
@@ -101,9 +78,8 @@ static int stress_shm_posix_check(
 	}
 
 	for (val = 0, ptr = buf; ptr < end; ptr += page_size, val++) {
-		if (*ptr != val)
+		if (UNLIKELY(*ptr != val))
 			return -1;
-
 	}
 	return 0;
 }
@@ -135,12 +111,12 @@ static int stress_shm_posix_child(
 	const size_t page_size = args->page_size;
 	struct sigaction sa;
 
-	addrs = calloc(shm_posix_objects, sizeof(*addrs));
+	addrs = (void **)calloc(shm_posix_objects, sizeof(*addrs));
 	if (!addrs) {
 		pr_fail("%s: calloc on addrs failed, out of memory\n", args->name);
 		return EXIT_NO_RESOURCE;
 	}
-	shm_names = calloc(shm_posix_objects, SHM_NAME_LEN);
+	shm_names = (char *)calloc(shm_posix_objects, SHM_NAME_LEN);
 	if (!shm_names) {
 		free(addrs);
 		pr_fail("%s: calloc on shm_names, out of memory\n", args->name);
@@ -174,7 +150,7 @@ static int stress_shm_posix_child(
 
 			shm_name[0] = '\0';
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto reap;
 
 			(void)snprintf(shm_name, SHM_NAME_LEN,
@@ -197,7 +173,7 @@ static int stress_shm_posix_child(
 			shm_name[SHM_NAME_LEN - 1] = '\0';
 			(void)shim_strscpy(msg.shm_name, shm_name, SHM_NAME_LEN);
 			if (UNLIKELY(write(fd, &msg, sizeof(msg)) < 0)) {
-				pr_err("%s: write failed: errno=%d: (%s)\n",
+				pr_err("%s: write failed, errno=%d: (%s)\n",
 					args->name, errno, strerror(errno));
 				rc = EXIT_FAILURE;
 				(void)close(shm_fd);
@@ -206,10 +182,16 @@ static int stress_shm_posix_child(
 
 			addr = mmap(NULL, sz, PROT_READ | PROT_WRITE,
 				MAP_PRIVATE | MAP_ANONYMOUS, shm_fd, 0);
+			if ((addr == MAP_FAILED) && (errno == EINVAL)) {
+				/* shm mmap may fail on Solaris, re-try with anon mapping */
+				addr = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+					MAP_PRIVATE, shm_fd, 0);
+			}
 			if (UNLIKELY(addr == MAP_FAILED)) {
 				ok = false;
-				pr_fail("%s: mmap failed, errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_fail("%s: failed to mmap %zu bytes%s, errno=%d (%s)\n",
+					args->name, sz, stress_get_memfree_str(),
+					errno, strerror(errno));
 				rc = EXIT_FAILURE;
 				(void)close(shm_fd);
 				goto reap;
@@ -279,9 +261,9 @@ static int stress_shm_posix_child(
 			if (UNLIKELY(ret < 0)) {
 				pr_fail("%s: fstat failed on shared memory\n", args->name);
 			} else {
-				if (statbuf.st_size != (off_t)sz) {
+				if (UNLIKELY(statbuf.st_size != (off_t)sz)) {
 					pr_fail("%s: fstat reports different size of shared memory, "
-						"got %jd bytes, expected %zd bytes\n", args->name,
+						"got %" PRIdMAX " bytes, expected %zd bytes\n", args->name,
 						(intmax_t)statbuf.st_size, sz);
 				}
 			}
@@ -326,7 +308,7 @@ reap:
 				(void)munmap(addrs[i], sz);
 			}
 			if (*shm_name) {
-				if (shm_unlink(shm_name) < 0) {
+				if (UNLIKELY(shm_unlink(shm_name) < 0)) {
 					pr_fail("%s: shm_unlink failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 				}
@@ -337,7 +319,7 @@ reap:
 			msg.shm_name[SHM_NAME_LEN - 1] = '\0';
 			(void)shim_strscpy(msg.shm_name, shm_name, SHM_NAME_LEN - 1);
 			if (UNLIKELY(write(fd, &msg, sizeof(msg)) < 0)) {
-				pr_dbg("%s: write failed: errno=%d: (%s)\n",
+				pr_dbg("%s: write failed, errno=%d: (%s)\n",
 					args->name, errno, strerror(errno));
 				ok = false;
 			}
@@ -349,8 +331,8 @@ reap:
 	/* Inform parent of end of run */
 	msg.index = -1;
 	(void)shim_strscpy(msg.shm_name, "", SHM_NAME_LEN);
-	if (write(fd, &msg, sizeof(msg)) < 0) {
-		pr_err("%s: write failed: errno=%d: (%s)\n",
+	if (UNLIKELY(write(fd, &msg, sizeof(msg)) < 0)) {
+		pr_err("%s: write failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		rc = EXIT_FAILURE;
 	}
@@ -375,22 +357,27 @@ static int stress_shm(stress_args_t *args)
 	bool retry = true;
 	bool shm_mlock = false;
 	uint32_t restarts = 0;
-	size_t shm_posix_bytes = DEFAULT_SHM_POSIX_BYTES;
+	size_t shm_posix_bytes, shm_posix_bytes_total = DEFAULT_SHM_POSIX_BYTES;
 	size_t shm_posix_objects = DEFAULT_SHM_POSIX_OBJECTS;
 
-	(void)stress_get_setting("shm-mlock", &shm_mlock);
-
-	if (!stress_get_setting("shm-bytes", &shm_posix_bytes)) {
-		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			shm_posix_bytes = MAX_SHM_POSIX_BYTES;
-		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			shm_posix_bytes = MIN_SHM_POSIX_BYTES;
+	if (!stress_get_setting("shm-mlock", &shm_mlock)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			shm_mlock = true;
 	}
-	shm_posix_bytes /= args->num_instances;
+
+	if (!stress_get_setting("shm-bytes", &shm_posix_bytes_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			shm_posix_bytes_total = MAX_SHM_POSIX_BYTES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			shm_posix_bytes_total = MIN_SHM_POSIX_BYTES;
+	}
+	shm_posix_bytes = shm_posix_bytes_total / args->instances;
 	if (shm_posix_bytes < MIN_SHM_POSIX_BYTES)
 		shm_posix_bytes = MIN_SHM_POSIX_BYTES;
 	if (shm_posix_bytes < page_size)
 		shm_posix_bytes = page_size;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, shm_posix_bytes, shm_posix_bytes * args->instances);
 
 	if (!stress_get_setting("shm-objs", &shm_posix_objects)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
@@ -411,6 +398,8 @@ static int stress_shm(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 #endif
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue_flag() && retry) {
@@ -424,11 +413,13 @@ again:
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args)) {
+			if (UNLIKELY(!stress_continue(args))) {
+				(void)close(pipefds[0]);
+				(void)close(pipefds[1]);
 				rc = EXIT_SUCCESS;
 				goto finish;
 			}
-			pr_err("%s: fork failed: errno=%d: (%s)\n",
+			pr_err("%s: fork failed, errno=%d: (%s)\n",
 				args->name, errno, strerror(errno));
 			(void)close(pipefds[0]);
 			(void)close(pipefds[1]);
@@ -440,9 +431,13 @@ again:
 			int status;
 			char *shm_names;
 
-			shm_names = calloc(shm_posix_objects, SHM_NAME_LEN);
+			shm_names = (char *)calloc(shm_posix_objects, SHM_NAME_LEN);
 			if (!shm_names) {
-				pr_fail("%s: calloc failed, out of memory\n", args->name);
+				pr_fail("%s: failed to allocate %zu bytes%s, out of memory\n",
+					args->name, shm_posix_objects * SHM_NAME_LEN,
+					stress_get_memfree_str());
+				(void)close(pipefds[0]);
+				(void)close(pipefds[1]);
 				rc = EXIT_NO_RESOURCE;
 				goto err;
 			}
@@ -472,8 +467,8 @@ again:
 					pr_fail("%s: zero bytes read\n", args->name);
 					break;
 				}
-				if ((msg.index < 0) ||
-				    (msg.index >= (ssize_t)shm_posix_objects)) {
+				if (UNLIKELY((msg.index < 0) ||
+					     (msg.index >= (ssize_t)shm_posix_objects))) {
 					retry = false;
 					break;
 				}
@@ -492,7 +487,7 @@ again:
 					restarts++;
 				}
 			}
-			(void)close(pipefds[1]);
+			(void)close(pipefds[0]);
 
 			/*
 			 *  The child may have been killed by the OOM killer or
@@ -531,18 +526,18 @@ err:
 	return rc;
 }
 
-stressor_info_t stress_shm_info = {
+const stressor_info_t stress_shm_info = {
 	.stressor = stress_shm,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_shm_info = {
+const stressor_info_t stress_shm_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without librt"

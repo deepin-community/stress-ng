@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,20 +43,10 @@ static const stress_help_t symlink_help[] = {
 
 #define MOUNTS_MAX	(128)
 
-static int stress_set_link_sync(const char *opt)
-{
-	return stress_set_setting_true("link-sync", opt);
-}
-
-static int stress_set_symlink_sync(const char *opt)
-{
-	return stress_set_setting_true("symlink-sync", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_link_sync,	stress_set_link_sync },
-	{ OPT_symlink_sync,	stress_set_symlink_sync },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_link_sync,    "link-sync",    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_symlink_sync, "symlink-sync", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT
 };
 
 /*
@@ -80,7 +70,7 @@ static void stress_link_unlink(
 		 *  so add a yield to try and help a little
 		 */
 		if ((i & 255) == 0)
-			shim_sched_yield();
+			(void)shim_sched_yield();
 	}
 }
 
@@ -104,6 +94,8 @@ static int stress_link_generic(
 	size_t oldpathlen;
 	bool symlink_func = (linkfunc == symlink);
 	char *mnts[MOUNTS_MAX];
+	double t_start, duration, rate, link_count = 0.0;
+	char dir_path[PATH_MAX];
 
 	(void)shim_memset(tmp_newpath, 0, sizeof(tmp_newpath));
 	(void)snprintf(tmp_newpath, sizeof(tmp_newpath),
@@ -113,14 +105,13 @@ static int stress_link_generic(
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
 		return stress_exit_status(-ret);
-#if defined(O_DIRECTORY)
-	if (do_sync) {
-		char dir_path[PATH_MAX];
 
-		stress_temp_dir(dir_path, sizeof(dir_path), args->name, args->pid, args->instance);
+	stress_temp_dir(dir_path, sizeof(dir_path), args->name, args->pid, args->instance);
+#if defined(O_DIRECTORY)
+	if (do_sync)
 		temp_dir_fd = open(dir_path, O_RDONLY | O_DIRECTORY);
-	}
 #else
+	(void)dir_path;
 	(void)do_sync;
 #endif
 
@@ -143,15 +134,18 @@ static int stress_link_generic(
 	mounts_max = stress_mount_get(mnts, MOUNTS_MAX);
 	oldpathlen = strlen(oldpath);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = EXIT_SUCCESS;
+	t_start = stress_time_now();
 	do {
 		uint64_t i, n = DEFAULT_LINKS;
 		char testpath[PATH_MAX];
 		ssize_t rret;
 
-		for (i = 0; stress_continue(args) && (i < n); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
 			char newpath[PATH_MAX];
 			struct stat stbuf;
 
@@ -179,6 +173,8 @@ static int stress_link_generic(
 					stress_get_fs_type(oldpath));
 				n = i;
 				break;
+			} else {
+				link_count++;
 			}
 
 			if (symlink_func) {
@@ -187,7 +183,8 @@ static int stress_link_generic(
     defined(HAVE_READLINKAT)
 				{
 					char tmpfilename[PATH_MAX], *filename;
-					char tmpdir[PATH_MAX], *dir;
+					char tmpdir[PATH_MAX];
+					const char *dir;
 					int dir_fd;
 
 					(void)shim_strscpy(tmpfilename, newpath, sizeof(tmpfilename));
@@ -205,6 +202,7 @@ static int stress_link_generic(
 							pr_fail("%s: readlinkat failed, errno=%d (%s)%s\n",
 							args->name, errno, strerror(errno),
 							stress_get_fs_type(filename));
+							rc = EXIT_FAILURE;
 						}
 						(void)close(dir_fd);
 					}
@@ -219,18 +217,20 @@ static int stress_link_generic(
 						stress_get_fs_type(newpath));
 				} else {
 					buf[rret] = '\0';
-					if ((size_t)rret != oldpathlen)
+					if ((size_t)rret != oldpathlen) {
 						pr_fail("%s: readlink length error, got %zd, expected: %zd\n",
 							args->name, (size_t)rret, oldpathlen);
-					else
+						rc = EXIT_FAILURE;
+					} else {
 						if (strncmp(oldpath, buf, (size_t)rret))
 							pr_fail("%s: readlink path error, got %s, expected %s\n",
 								args->name, buf, oldpath);
+					}
 				}
 			} else {
 				/* Hard link, exercise illegal cross device link, EXDEV error */
 				if (mounts_max > 0) {
-					/* Try hard link on differet random mount point */
+					/* Try hard link on different random mount point */
 					const size_t idx = random_mount(mounts_max);
 
 					ret = linkfunc(mnts[idx], tmp_newpath);
@@ -249,6 +249,21 @@ static int stress_link_generic(
 				(void)fsync(temp_dir_fd);
 #endif
 		}
+
+#if defined(HAVE_PATHCONF)
+#if defined(_PC_LINK_MAX)
+		/* exercise pathconf maximum file link count */
+		VOID_RET(long int, pathconf(oldpath, _PC_LINK_MAX));
+#endif
+#if defined(_PC_SYMLINK_MAX)
+		/* exercise pathconf maximum file symlink count */
+		VOID_RET(long int, pathconf(oldpath, _PC_SYMLINK_MAX));
+#endif
+#if defined(_PC_2_SYMLINKS)
+		/* exercise pathconf maximum file symlink count */
+		VOID_RET(long int, pathconf(dir_path, _PC_2_SYMLINKS));
+#endif
+#endif
 
 		/* exercise invalid newpath size, EINVAL */
 		VOID_RET(ssize_t, readlink(oldpath, testpath, 0));
@@ -273,7 +288,7 @@ static int stress_link_generic(
 
 err_unlink:
 		/* time to finish, indicate so while the slow unlink occurs */
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 #if defined(O_DIRECTORY)
 		if (temp_dir_fd > 0)
@@ -286,6 +301,10 @@ err_unlink:
 #endif
 		stress_bogo_inc(args);
 	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
+
+	duration = stress_time_now() - t_start;
+	rate = (duration > 0.0) ? link_count / duration : 0.0;
+	stress_metrics_set(args, 0, "links created/removed per sec", rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -328,28 +347,28 @@ static int stress_symlink(stress_args_t *args)
 }
 
 #if !defined(__HAIKU__)
-stressor_info_t stress_link_info = {
+const stressor_info_t stress_link_info = {
 	.stressor = stress_link,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = hardlink_help
 };
 #else
-stressor_info_t stress_link_info = {
+const stressor_info_t stress_link_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = hardlink_help,
 	.unimplemented_reason = "unsupported on Haiku"
 };
 #endif
 
-stressor_info_t stress_symlink_info = {
+const stressor_info_t stress_symlink_info = {
 	.stressor = stress_symlink,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = symlink_help,
 };

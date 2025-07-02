@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -60,6 +60,8 @@ static int stress_sigxcpu(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -70,7 +72,7 @@ static int stress_sigxcpu(stress_args_t *args)
 			rc = EXIT_FAILURE;
 			break;
 		}
-		shim_sched_yield();
+		(void)shim_sched_yield();
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -80,16 +82,16 @@ static int stress_sigxcpu(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_sigxcpu_info = {
+const stressor_info_t stress_sigxcpu_info = {
 	.stressor = stress_sigxcpu,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sigxcpu_info = {
+const stressor_info_t stress_sigxcpu_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without SIGXCPU or RLIMIT_FSIZE"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -102,7 +102,7 @@ static int stress_oom_pipe_child(stress_args_t *args, void *ctxt)
 	for (i = 0; i < max_pipes * 2; i++)
 		fds[i] = -1;
 
-	for (i = 0; stress_continue(args) && (i < max_pipes); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < max_pipes)); i++) {
 		int *pfd = fds + (2 * i);
 
 		if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size))
@@ -135,7 +135,7 @@ static int stress_oom_pipe_child(stress_args_t *args, void *ctxt)
 
 	do {
 		/* Set to maximum size */
-		for (i = 0, fd = fds; stress_continue(args) && (i < max_pipes); i++, fd += 2) {
+		for (i = 0, fd = fds; LIKELY(stress_continue(args) && (i < max_pipes)); i++, fd += 2) {
 			size_t max_size = context->max_pipe_size;
 
 			if ((fd[0] < 0) || (fd[1] < 0))
@@ -151,7 +151,7 @@ static int stress_oom_pipe_child(stress_args_t *args, void *ctxt)
 				pipe_empty(fd[0], max_size, page_size, rd_buffer);
 		}
 		/* Set to invalid size */
-		for (i = 0, fd = fds; stress_continue(args) && (i < max_pipes); i++, fd += 2) {
+		for (i = 0, fd = fds; LIKELY(stress_continue(args) && (i < max_pipes)); i++, fd += 2) {
 			if ((fd[0] < 0) || (fd[1] < 0))
 				continue;
 			(void)fcntl(fd[0], F_SETPIPE_SZ, -1);
@@ -159,7 +159,7 @@ static int stress_oom_pipe_child(stress_args_t *args, void *ctxt)
 		}
 
 		/* Set to minimum size */
-		for (i = 0, fd = fds; stress_continue(args) && (i < max_pipes); i++, fd += 2) {
+		for (i = 0, fd = fds; LIKELY(stress_continue(args) && (i < max_pipes)); i++, fd += 2) {
 			if ((fd[0] < 0) || (fd[1] < 0))
 				continue;
 			(void)fcntl(fd[0], F_SETPIPE_SZ, page_size);
@@ -195,27 +195,39 @@ static int stress_oom_pipe(stress_args_t *args)
 	buffer = stress_mmap_populate(NULL, buffer_size, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffer == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate pipe write buffer, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to mmap %zu byte pipe write buffer%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, buffer_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffer, buffer_size, "rw-pipe-buffer");
 	context.wr_buffer = (uint32_t *)buffer;
 	context.rd_buffer = (uint32_t *)((uintptr_t)buffer + page_size);
 
 	context.max_fd = stress_get_file_limit();
 	context.max_pipe_size = stress_probe_max_pipe_size();
 
-	context.fds = calloc(context.max_fd, sizeof(*context.fds));
+	context.fds = (int *)calloc(context.max_fd, sizeof(*context.fds));
 	if (!context.fds) {
-		pr_inf_skip("%s: cannot allocate %zd file descriptors, skipping stressor\n",
-			args->name, context.max_fd);
-		(void)munmap(buffer, buffer_size);
-		return EXIT_NO_RESOURCE;
+		/* Shrink down */
+		context.max_fd = 1024 * 1024;
+		context.fds = (int *)calloc(context.max_fd, sizeof(*context.fds));
+		if (!context.fds) {
+			pr_inf_skip("%s: cannot allocate %zu file descriptors%s, skipping stressor\n",
+				args->name, context.max_fd,
+				stress_get_memfree_str());
+			(void)munmap(buffer, buffer_size);
+			return EXIT_NO_RESOURCE;
+		}
 	}
 
 	if (context.max_pipe_size < page_size)
 		context.max_pipe_size = page_size;
 	context.max_pipe_size &= ~(page_size - 1);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = stress_oomable_child(args, &context, stress_oom_pipe_child, STRESS_OOMABLE_DROP_CAP);
@@ -228,16 +240,16 @@ static int stress_oom_pipe(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_oom_pipe_info = {
+const stressor_info_t stress_oom_pipe_info = {
 	.stressor = stress_oom_pipe,
-	.class = CLASS_MEMORY | CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_MEMORY | CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_oom_pipe_info = {
+const stressor_info_t stress_oom_pipe_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_MEMORY | CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_MEMORY | CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without F_SETFL, F_SETPIPE_SZ or O_NONBLOCK fcntl() commands"

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -81,9 +81,11 @@ static int stress_cgroup_mounted_state(const char *path)
 		return STRESS_CGROUP_UNKNOWN;
 
 	while (fgets(buf, sizeof(buf), fp)) {
-		char *mnt, *type, *ptr;
+		const char *mnt, *type;
+		char *ptr;
+
 		ptr = buf;
-		while (*ptr && *ptr != ' ')
+		while (*ptr && (*ptr != ' '))
 			ptr++;
 		if (*ptr == '\0')
 			break;
@@ -91,14 +93,14 @@ static int stress_cgroup_mounted_state(const char *path)
 		ptr++;
 		mnt = ptr;
 
-		while (*ptr && *ptr != ' ')
+		while (*ptr && (*ptr != ' '))
 			ptr++;
 		if (*ptr == '\0')
 			break;
 		*ptr = '\0';
 		ptr++;
 		type = ptr;
-		while (*ptr && *ptr != ' ')
+		while (*ptr && (*ptr != ' '))
 			ptr++;
 		if (*ptr == '\0')
 			break;
@@ -114,15 +116,25 @@ static int stress_cgroup_mounted_state(const char *path)
 	return ret;
 }
 
+static void stress_group_sleep(uint64_t *counter)
+{
+	const uint64_t ns = stress_mwc64modn(100000000) + 50000000;
+
+	(void)shim_nanosleep_uint64(ns);
+	(*counter)++;
+}
+
 /*
  *  stress_cgroup_umount()
  *	umount a path with retries.
  */
-static void stress_cgroup_umount(stress_args_t *args, const char *path)
+static void stress_cgroup_umount(
+	stress_args_t *args,
+	const char *path,
+	uint64_t *umount_retry)
 {
 	int i;
 	int ret;
-	static const uint64_t ns = 100000000;	/* 1/10th second */
 
 	/*
 	 *  umount is attempted at least twice, the first successful mount
@@ -130,7 +142,7 @@ static void stress_cgroup_umount(stress_args_t *args, const char *path)
 	 *  on a umount of a path that has already been umounted, so we
 	 *  know that umount been successful and can then return.
 	 */
-	for (i = 0; i < 100; i++) {
+	for (i = 0; i < 128; i++) {
 		if (stress_cgroup_mounted_state(path) == STRESS_CGROUP_UNMOUNTED)
 			return;
 
@@ -146,7 +158,7 @@ static void stress_cgroup_umount(stress_args_t *args, const char *path)
 #endif
 		if (ret == 0) {
 			if (i > 1)
-				shim_nanosleep_uint64(ns);
+				stress_group_sleep(umount_retry);
 			continue;
 		}
 
@@ -155,7 +167,7 @@ static void stress_cgroup_umount(stress_args_t *args, const char *path)
 		case EBUSY:
 		case ENOMEM:
 			/* Wait and then re-try */
-			shim_nanosleep_uint64(ns);
+			stress_group_sleep(umount_retry);
 			break;
 		case EINVAL:
 			/*
@@ -166,7 +178,7 @@ static void stress_cgroup_umount(stress_args_t *args, const char *path)
 			return;
 		default:
 			/* Unexpected, so report it */
-			pr_inf("%s: umount failed %s: %d %s\n", args->name,
+			pr_inf("%s: umount failed %s, errno=%d %s\n", args->name,
 				path, errno, strerror(errno));
 			break;
 		}
@@ -177,8 +189,7 @@ static void stress_cgroup_read(const char *path)
 {
 	int fd, i;
 	char buf[1024];
-	ssize_t ret;
-	off_t len = 0, offset;
+	off_t len = 0;
 	struct stat statbuf;
 
 	fd = open(path, O_RDONLY);
@@ -188,6 +199,8 @@ static void stress_cgroup_read(const char *path)
 	VOID_RET(int, shim_fstat(fd, &statbuf));
 
 	for (;;) {
+		ssize_t ret;
+
 		ret = read(fd, buf, sizeof(buf));
 		if (ret > 0)
 			len += (off_t)ret;
@@ -196,7 +209,8 @@ static void stress_cgroup_read(const char *path)
 	}
 	/* Add in a couple of random seek/reads for good measure */
 	for (i = 0; (i < 2) && (i < len); i++) {
-		offset = (off_t)stress_mwc32modn((uint32_t)len);
+		const off_t offset = (off_t)stress_mwc32modn((uint32_t)len);
+
 		if (lseek(fd, offset, SEEK_SET) >= 0)
 			VOID_RET(int, read(fd, buf, sizeof(buf)));
 	}
@@ -208,7 +222,8 @@ static void stress_cgroup_controllers(const char *realpathname)
 {
 	char path[PATH_MAX + 32];
 	char controllers[512];
-	char *ptr, *token;
+	const char *token;
+	char *ptr;
 	ssize_t ret;
 
 	(void)snprintf(path, sizeof(path), "%s/%s", realpathname, "cgroup.subtree_control");
@@ -230,7 +245,7 @@ static void stress_cgroup_controllers(const char *realpathname)
 
 static void stress_cgroup_read_files(const char *realpathname)
 {
-	static const char *filenames[] = {
+	static const char * const filenames[] = {
 		"cgroup.type",
 		"cgroup.procs",
 		"cgroup.threads",
@@ -261,8 +276,8 @@ static void stress_cgroup_add_pid(const char *realpathname, const pid_t pid)
 	char filename[PATH_MAX + 64], cmd[64];
 	ssize_t len;
 
-	len = (ssize_t)snprintf(cmd, sizeof(cmd), "%jd\n", (intmax_t)pid);
-	(void)snprintf(filename, sizeof(filename), "%s/stress-ng-%jd/cgroup.procs", realpathname, (intmax_t)pid);
+	len = (ssize_t)snprintf(cmd, sizeof(cmd), "%" PRIdMAX "\n", (intmax_t)pid);
+	(void)snprintf(filename, sizeof(filename), "%s/stress-ng-%" PRIdMAX "/cgroup.procs", realpathname, (intmax_t)pid);
 	stress_system_write(filename, cmd, len);
 }
 
@@ -271,81 +286,14 @@ static void stress_cgroup_del_pid(const char *realpathname, const pid_t pid)
 	char filename[PATH_MAX + 64], cmd[64];
 	ssize_t len;
 
-	len = (ssize_t)snprintf(cmd, sizeof(cmd), "%jd\n", (intmax_t)pid);
+	len = (ssize_t)snprintf(cmd, sizeof(cmd), "%" PRIdMAX "\n", (intmax_t)pid);
 	(void)snprintf(filename, sizeof(filename), "%s/cgroup.procs", realpathname);
 	stress_system_write(filename, cmd, len);
 }
 
 static void stress_cgroup_new_group(const char *realpathname)
 {
-	char path[PATH_MAX + 64], filename[PATH_MAX + 64];
-	size_t i;
 	pid_t pid;
-
-	stress_cgroup_values_t values[] = {
-		{ "cpu.stat",			NULL },
-		{ "cpu.weight",			"90" },
-		{ "cpu.weight.nice",		"-4" },
-		{ "cpu.max",			NULL },
-		{ "cpu.max.burst",		"50" },
-		{ "cpu.pressure",		NULL },
-		{ "cpu.uclamp.min",		"10.0" },
-		{ "cpu.uclamp.max",		"95.0" },
-		{ "memory.current",		NULL },
-		{ "memory.min",			"1M" },
-		{ "memory.low",			"2M" },
-		{ "memory.high",		"32M" },
-		{ "memory.max",			"128M" },
-		{ "memory.reclaim",		"2M" },
-		{ "memory.peak",		NULL },
-		{ "memory.oom.group",		NULL },
-		{ "memory.events",		NULL },
-		{ "memory.events.local",	NULL },
-		{ "memory.stat",		NULL },
-		{ "memory.numa_stat",		NULL },
-		{ "memory.swap.current",	NULL },
-		{ "memory.swap.peak",		NULL },
-		{ "memory.swap.max",		NULL },
-		{ "memory.swap.events",		NULL },
-		{ "memory.zswap.current",	NULL },
-		{ "memory.zswap.max",		NULL },
-		{ "memory.pressure",		NULL },
-		{ "io.stat",			NULL },
-		{ "io.cost.qos",		NULL },
-		{ "io.cost.model",		NULL },
-		{ "io.weight",			"default 90" },
-		{ "io.max",			NULL },
-		{ "io.pressure",		NULL },
-		{ "io.latency",			NULL },
-		{ "io.stat",			NULL },
-		{ "pids.max",			"10000" },
-		{ "pids.current",		NULL },
-		{ "cpuset.cpus",		"0" },	/* force child to cpu 0 */
-		{ "cpuset.cpus.effective",	NULL },
-		{ "cpuset.mems",		"0" },	/* force child to mem 0 */
-		{ "cpuset.mems.effective",	NULL },
-		{ "cpuset.cpus.partition",	NULL },
-		{ "rdma.max",			NULL },
-		{ "rdma.current",		NULL },
-		{ "hugetlb.1GB.current",	NULL },
-		{ "hugetlb.1GB.events",		NULL },
-		{ "hugetlb.1GB.events.local",	NULL },
-		{ "hugetlb.1GB.max",		NULL },
-		{ "hugetlb.1GB.numa_stat",	NULL },
-		{ "hugetlb.1GB.rsvd.current",	NULL },
-		{ "hugetlb.1GB.rsvd.max",	NULL },
-		{ "hugetlb.2GB.current",	NULL },
-		{ "hugetlb.2GB.events",		NULL },
-		{ "hugetlb.2GB.events.local",	NULL },
-		{ "hugetlb.2GB.max",		NULL },
-		{ "hugetlb.2GB.numa_stat",	NULL },
-		{ "hugetlb.2GB.rsvd.current",	NULL },
-		{ "hugetlb.2GB.rsvd.max",	NULL },
-		{ "misc.capacity",		NULL },
-		{ "misc.current",		NULL },
-		{ "misc.max",			NULL },
-		{ "misc.events",		NULL },
-	};
 
 	pid = fork();
 	if (pid == 0) {
@@ -356,16 +304,111 @@ static void stress_cgroup_new_group(const char *realpathname)
 
 			ptr = mmap(NULL, sz, PROT_READ | PROT_WRITE,
 					MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-			shim_sched_yield();
+			(void)shim_sched_yield();
 			if (ptr != MAP_FAILED)
 				(void)munmap(ptr, sz);
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		} while (stress_continue_flag());
 		_exit(0);
 	} else {
+		int status;
+		size_t i;
+		char path[PATH_MAX + 64];
+
+		static const stress_cgroup_values_t values[] = {
+			{ "cpu.stat",			NULL },
+			{ "cpu.weight",			"90" },
+			{ "cpu.weight.nice",		"-4" },
+			{ "cpu.max",			NULL },
+			{ "cpu.max.burst",		"50" },
+			{ "cpu.pressure",		NULL },
+			{ "cpu.uclamp.min",		"10.0" },
+			{ "cpu.uclamp.max",		"95.0" },
+			{ "cpu.idle",			"1" },
+			{ "cpu.idle",			"0" },
+			{ "memory.current",		NULL },
+			{ "memory.min",			"1M" },
+			{ "memory.low",			"2M" },
+			{ "memory.high",		"32M" },
+			{ "memory.max",			"128M" },
+			{ "memory.reclaim",		"2M" },
+			{ "memory.peak",		NULL },
+			{ "memory.oom.group",		NULL },
+			{ "memory.events",		NULL },
+			{ "memory.events.local",	NULL },
+			{ "memory.stat",		NULL },
+			{ "memory.numa_stat",		NULL },
+			{ "memory.swap.current",	NULL },
+			{ "memory.swap.high",		NULL },
+			{ "memory.swap.peak",		NULL },
+			{ "memory.swap.max",		NULL },
+			{ "memory.swap.events",		NULL },
+			{ "memory.zswap.current",	NULL },
+			{ "memory.zswap.max",		NULL },
+			{ "memory.zswap.writeback",	"0" },
+			{ "memory.zswap.writeback",	"1" },
+			{ "memory.pressure",		NULL },
+			{ "io.stat",			NULL },
+			{ "io.cost.qos",		NULL },
+			{ "io.cost.model",		NULL },
+			{ "io.weight",			"default 90" },
+			{ "io.max",			NULL },
+			{ "io.pressure",		NULL },
+			{ "io.latency",			NULL },
+			{ "io.stat",			NULL },
+			{ "pids.max",			"10000" },
+			{ "pids.current",		NULL },
+			{ "pids.peak",			NULL },
+			{ "pids.events",		NULL },
+			{ "pids.events.local",		NULL },
+			{ "cpuset.cpus",		"0" },	/* force child to cpu 0 */
+			{ "cpuset.cpus.effective",	NULL },
+			{ "cpuset.mems",		"0" },	/* force child to mem 0 */
+			{ "cpuset.mems.effective",	NULL },
+			{ "cpuset.cpus.exclusive",	NULL },
+			{ "cpuset.cpus.exclusive.effective",	NULL },
+			{ "cpuset.cpus.isolated",	NULL },
+			{ "cpuset.cpus.partition",	NULL },
+			{ "rdma.max",			NULL },
+			{ "rdma.current",		NULL },
+			{ "hugetlb.1GB.current",	NULL },
+			{ "hugetlb.1GB.events",		NULL },
+			{ "hugetlb.1GB.events.local",	NULL },
+			{ "hugetlb.1GB.max",		NULL },
+			{ "hugetlb.1GB.numa_stat",	NULL },
+			{ "hugetlb.1GB.rsvd.current",	NULL },
+			{ "hugetlb.1GB.rsvd.max",	NULL },
+			{ "hugetlb.2GB.current",	NULL },
+			{ "hugetlb.2GB.events",		NULL },
+			{ "hugetlb.2GB.events.local",	NULL },
+			{ "hugetlb.2GB.max",		NULL },
+			{ "hugetlb.2GB.numa_stat",	NULL },
+			{ "hugetlb.2GB.rsvd.current",	NULL },
+			{ "hugetlb.2GB.rsvd.max",	NULL },
+			{ "misc.capacity",		NULL },
+			{ "misc.current",		NULL },
+			{ "misc.peak",			NULL },
+			{ "misc.max",			NULL },
+			{ "misc.events",		NULL },
+			{ "misc.events.local",		NULL },
+			{ "cgroup.type",		NULL },
+			{ "cgroup.procs",		NULL },
+			{ "cgroup.threads",		NULL },
+			{ "cgroup.controllers",		NULL },
+			{ "cgroup.subtree_control",	NULL },
+			{ "cgroup.events",		NULL },
+			{ "cgroup.max.descendants",	NULL },
+			{ "cgroup.max.depth",		NULL },
+			{ "cgroup.stat",		NULL },
+			{ "cgroup.pressure",		NULL },
+			{ "cgroup.freeze",		"0" },	/* freeze child */
+			{ "cgroup.freeze",		"1" },	/* unfreeze child */
+		};
+
 		/* Parent, exercise child in the cgroup */
-		(void)snprintf(path, sizeof(path), "%s/stress-ng-%jd", realpathname, (intmax_t)pid);
+		(void)snprintf(path, sizeof(path), "%s/stress-ng-%" PRIdMAX, realpathname, (intmax_t)pid);
 		if (mkdir(path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0) {
+			stress_kill_pid_wait(pid, &status);
 			(void)rmdir(path);	/* just in case */
 			return;
 		}
@@ -374,17 +417,19 @@ static void stress_cgroup_new_group(const char *realpathname)
 		 *  Keep moving pid to/from cgroup while read and adjusting cgroup values
 		 */
 		for (i = 0; i < SIZEOF_ARRAY(values); i++) {
+			char filename[PATH_MAX + 64];
+
 			stress_cgroup_add_pid(realpathname, pid);
-			(void)snprintf(filename, sizeof(filename), "%s/stress-ng-%jd/%s", realpathname, (intmax_t)pid, values[i].name);
+			(void)snprintf(filename, sizeof(filename), "%s/stress-ng-%" PRIdMAX "/%s", realpathname, (intmax_t)pid, values[i].name);
 			stress_cgroup_read(filename);
 
 			if (values[i].value) {
-				stress_system_write(filename, values[i].value, strlen(values[i].value));
+				(void)stress_system_write(filename, values[i].value, strlen(values[i].value));
 				stress_cgroup_read(filename);
 			}
 			stress_cgroup_del_pid(realpathname, pid);
 		}
-		stress_kill_pid(pid);
+		stress_kill_pid_wait(pid, &status);
 		(void)rmdir(path);
 	}
 }
@@ -398,6 +443,7 @@ static int stress_cgroup_child(stress_args_t *args)
 {
 	char pathname[PATH_MAX], realpathname[PATH_MAX];
 	int rc = EXIT_SUCCESS;
+	uint64_t mount_retry = 0, umount_retry = 0;
 
 	stress_parent_died_alarm();
 	(void)sched_settings_apply(true);
@@ -420,11 +466,22 @@ static int stress_cgroup_child(stress_args_t *args)
 
 		ret = mount("none", realpathname, "cgroup2", 0, NULL);
 		if (ret < 0) {
-			if ((errno != ENOSPC) &&
-			    (errno != ENOMEM) &&
-			    (errno != ENODEV))
+			if (errno == EBUSY) {
+				/* Wait and retry */
+				stress_group_sleep(&mount_retry);
+				continue;
+			} else if (errno == EPERM) {
+				pr_inf_skip("%s: mount failed, no permission, skipping stressor\n",
+					args->name);
+				rc = EXIT_NO_RESOURCE;
+				goto cleanup;
+			} else if ((errno != ENOSPC) &&
+				   (errno != ENOMEM) &&
+				   (errno != ENODEV)) {
 				pr_fail("%s: mount failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+			}
 			/* Just in case, force umount */
 			goto cleanup;
 		}
@@ -432,15 +489,19 @@ static int stress_cgroup_child(stress_args_t *args)
 		stress_cgroup_controllers(realpathname);
 		stress_cgroup_read_files(realpathname);
 		stress_cgroup_new_group(realpathname);
-		stress_cgroup_umount(args, realpathname);
+		stress_cgroup_umount(args, realpathname, &umount_retry);
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 cleanup:
-	stress_cgroup_umount(args, realpathname);
+	stress_cgroup_umount(args, realpathname, &umount_retry);
 	if (stress_cgroup_mounted_state(realpathname) == STRESS_CGROUP_MOUNTED)
 		pr_dbg("%s: could not unmount of %s\n", args->name, realpathname);
 	(void)stress_temp_dir_rm_args(args);
+	if ((mount_retry + umount_retry) > 0) {
+		pr_dbg("%s: %" PRIu64 " mount retries, %" PRIu64 " umount retries\n",
+			args->name, mount_retry, umount_retry);
+	}
 
 	return rc;
 }
@@ -451,32 +512,35 @@ cleanup:
  */
 static int stress_cgroup_mount(stress_args_t *args)
 {
-	int pid;
+	int pid, rc = EXIT_SUCCESS;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 again:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		pid = fork();
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
-			pr_err("%s: fork failed: errno=%d (%s)\n",
+			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		} else if (pid > 0) {
-			int status, waitret;
+			int status;
+			pid_t waitret;
 
 			/* Parent, wait for child */
 			waitret = shim_waitpid(pid, &status, 0);
 			if (waitret < 0) {
 				if (errno != EINTR) {
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 					(void)stress_kill_pid(pid);
 				}
 				(void)shim_waitpid(pid, &status, 0);
@@ -494,7 +558,11 @@ again:
 				}
 			} else if (WEXITSTATUS(status) == EXIT_FAILURE) {
 				pr_fail("%s: child mount/umount failed\n", args->name);
-				return EXIT_FAILURE;
+				rc = EXIT_FAILURE;
+				break;
+			} else if (WEXITSTATUS(status) == EXIT_NO_RESOURCE) {
+				rc = EXIT_NO_RESOURCE;
+				break;
 			}
 		} else {
 			_exit(stress_cgroup_child(args));
@@ -504,20 +572,20 @@ again:
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_cgroup_info = {
+const stressor_info_t stress_cgroup_info = {
 	.stressor = stress_cgroup_mount,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_cgroup_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_cgroup_info = {
+const stressor_info_t stress_cgroup_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_cgroup_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,12 +34,14 @@ static void stress_mincore_touch_pages_slow(
 	volatile char *buffer;
 
 	if (interruptible) {
-		for (buffer = buf, i = 0; stress_continue_flag() &&
-		     (i < n_pages); i++, buffer += page_size) {
+		for (buffer = buf, i = 0;
+		     LIKELY(stress_continue_flag() && (i < n_pages));
+		     i++, buffer += page_size) {
 			(*buffer)++;
 		}
-		for (buffer = buf, i = 0; stress_continue_flag() &&
-		     (i < n_pages); i++, buffer += page_size) {
+		for (buffer = buf, i = 0;
+		     LIKELY(stress_continue_flag() && (i < n_pages));
+		     i++, buffer += page_size) {
 			(*buffer)--;
 		}
 	} else {
@@ -83,7 +85,7 @@ static int stress_mincore_touch_pages_generic(
 	if (n_pages < 1)
 		return -1;
 
-	vec = calloc(n_pages, 1);
+	vec = (unsigned char *)calloc(n_pages, 1);
 	if (!vec) {
 		stress_mincore_touch_pages_slow(buf, n_pages, page_size, interruptible);
 		return 0;
@@ -101,15 +103,17 @@ static int stress_mincore_touch_pages_generic(
 
 	if (interruptible) {
 		/* If page is not resident in memory, touch it */
-		for (buffer = buf, i = 0; stress_continue_flag() &&
-		     (i < n_pages); i++, buffer += page_size) {
+		for (buffer = buf, i = 0;
+		     LIKELY(stress_continue_flag() && (i < n_pages));
+		     i++, buffer += page_size) {
 			if (!(vec[i] & 1))
 				(*buffer)++;
 		}
 
 		/* And restore contents */
-		for (buffer = buf, i = 0; stress_continue_flag() &&
-		     (i < n_pages); i++, buffer += page_size) {
+		for (buffer = buf, i = 0;
+		     LIKELY(stress_continue_flag() && (i < n_pages));
+		     i++, buffer += page_size) {
 			if (!(vec[i] & 1))
 				(*buffer)--;
 		}
@@ -138,12 +142,13 @@ static int stress_mincore_touch_pages_generic(
 int stress_mincore_touch_pages(void *buf, const size_t buf_len)
 {
 #if defined(MADV_POPULATE_READ) &&	\
+    defined(MADV_POPULATE_WRITE) &&	\
     defined(HAVE_MADVISE)
 	int ret;
 
 	if (!(g_opt_flags & OPT_FLAGS_MMAP_MINCORE))
 		return 0;
-	ret = madvise(buf, buf_len, MADV_POPULATE_READ);
+	ret = madvise(buf, buf_len, MADV_POPULATE_READ | MADV_POPULATE_WRITE);
 	if (ret == 0)
 		return 0;
 #endif

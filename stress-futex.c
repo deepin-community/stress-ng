@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-affinity.h"
 #include "core-builtin.h"
 
+#include <time.h>
+
 #if defined(HAVE_LINUX_FUTEX_H)
 #include <linux/futex.h>
 #endif
@@ -40,7 +42,7 @@ static const stress_help_t help[] = {
  *  stress_futex_wait()
  *     exercise futex_wait and every 16th time futex_waitv
  */
-static int stress_futex_wait(uint32_t *futex, const int val, const long nsec)
+static int stress_futex_wait(uint32_t *futex, const int val, const long int nsec)
 {
 	struct timespec t;
 
@@ -80,7 +82,7 @@ static int stress_futex_wait(uint32_t *futex, const int val, const long nsec)
 	/* UNEXPECTED */
 #endif
 	t.tv_sec = 0;
-	t.tv_nsec = (long)nsec;
+	t.tv_nsec = (long int)nsec;
 
 	return shim_futex_wait(futex, val, &t);
 }
@@ -96,8 +98,10 @@ static int stress_futex(stress_args_t *args)
 	uint64_t *timeout = &g_shared->futex.timeout[args->instance];
 	uint32_t *futex = &g_shared->futex.futex[args->instance];
 	pid_t pid;
-	int parent_cpu;
+	int parent_cpu, rc = EXIT_SUCCESS;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -105,9 +109,9 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
-		pr_err("%s: fork failed: errno=%d: (%s)\n",
+		pr_err("%s: fork failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 	}
 	if (pid > 0) {
@@ -117,16 +121,17 @@ again:
 			int ret;
 
 			/*
-			 * Break early in case wake gets stuck
-			 * (which it shouldn't)
+			 *  Break early in case wake gets stuck
+			 *  (which it shouldn't)
 			 */
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			ret = shim_futex_wake(futex, 1);
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				if (ret < 0) {
 					pr_fail("%s: futex_wake failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 		} while (stress_continue(args));
@@ -149,7 +154,7 @@ again:
 			int ret;
 
 			/* Break early before potential long wait */
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			ret = stress_futex_wait(futex, 0, 5000);
@@ -170,28 +175,30 @@ again:
 					if (errno != EINTR) {
 						pr_fail("%s: futex_wait failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 				}
 				stress_bogo_inc(args);
 			}
 		} while (stress_continue(args));
+		_exit(rc);
 	}
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_futex_info = {
+const stressor_info_t stress_futex_info = {
 	.stressor = stress_futex,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_futex_info = {
+const stressor_info_t stress_futex_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS | CLASS_IPC,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without linux/futex.h or futex() system call"

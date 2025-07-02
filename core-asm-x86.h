@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,8 +19,16 @@
 #ifndef CORE_ASM_X86_H
 #define CORE_ASM_X86_H
 
-#include "stress-ng.h"
 #include "core-arch.h"
+#include "core-attribute.h"
+
+#if defined(__LP64) || defined(__LP64__)
+#define STRESS_ARCH_X86_LP64
+#endif
+
+#if defined(__LP32) || defined(__LP32__)
+#define STRESS_ARCH_X86_LP32
+#endif
 
 #if defined(STRESS_ARCH_X86)
 #define stress_asm_x86_lock_add(ptr, inc) 		\
@@ -31,6 +39,27 @@
 			: "ir" (inc));			\
 	} while (0)
 
+/*
+ *  Position independent code uses %ebx, so we need
+ *  to swap it with a temp register so as not to
+ *  clobber it with cpuid.
+ */
+#if (defined(__pie__) || defined(__PIE__)) &&		\
+    defined(STRESS_ARCH_X86_32) && 			\
+    !NEED_GNUC(5, 0, 0)
+#define stress_asm_x86_cpuid(a, b, c, d)		\
+	do {						\
+		__asm__ __volatile__ (			\
+			"xchg{l} {%%}ebx, %k1\n"	\
+			"cpuid\n"			\
+			"xchg{l} {%%}ebx, %k1\n"	\
+			: "=a"(a),			\
+			  "=&r"(b),			\
+			  "=c"(c),			\
+			  "=d"(d)			\
+			: "0"(a),"2"(c));		\
+        } while (0)
+#else
 #define stress_asm_x86_cpuid(a, b, c, d)		\
 	do {						\
 		__asm__ __volatile__ (			\
@@ -41,6 +70,7 @@
 			  "=d"(d)			\
 			: "0"(a),"2"(c));		\
 	} while (0)
+#endif
 
 #if defined(HAVE_ASM_X86_PAUSE)
 static inline void ALWAYS_INLINE stress_asm_x86_pause(void)
@@ -285,8 +315,23 @@ static inline void ALWAYS_INLINE stress_asm_x86_prefetchnta(void *p)
 }
 #endif
 
+#if defined(HAVE_ASM_X86_PREFETCHW)
+static inline void ALWAYS_INLINE stress_asm_x86_prefetchw(void *p)
+{
+	__asm__ __volatile__("prefetchw (%0)\n" : : "r"(p) : "memory");
+}
+#endif
+
+#if defined(HAVE_ASM_X86_PREFETCHWT1)
+static inline void ALWAYS_INLINE stress_asm_x86_prefetchwt1(void *p)
+{
+	__asm__ __volatile__("prefetchwt1 (%0)\n" : : "r"(p) : "memory");
+}
+#endif
+
 #if !defined(HAVE_COMPILER_PCC) && 	\
-    defined(HAVE_ARCH_X86_64)
+    defined(STRESS_ARCH_X86_64) && 	\
+    defined(STRESS_ARCH_X86_LP64)
 static inline int ALWAYS_INLINE stress_asm_x86_umwait__(int state, uint32_t hi, uint32_t lo)
 {
 	uint8_t cflags;
@@ -316,6 +361,14 @@ static inline void ALWAYS_INLINE stress_asm_x86_umonitor(void *addr)
 	__asm__ __volatile__("mov %0, %%rdi\t\n"
 		     ".byte 0xf3, 0x0f, 0xae, 0xf7\t\n"
 		     : : "r" (addr));
+}
+#endif
+
+#if defined(HAVE_ASM_X86_MOVDIRI)
+static inline void ALWAYS_INLINE stress_ds_store64(void *ptr, const uint64_t val)
+{
+        __asm__ __volatile__("movdiri %0, (%1)\n"
+                        : :  "r" (val), "r" (ptr));
 }
 #endif
 

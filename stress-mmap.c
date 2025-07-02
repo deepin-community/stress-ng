@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,11 +18,13 @@
  *
  */
 #include "stress-ng.h"
+
 #include "core-arch.h"
 #include "core-builtin.h"
 #include "core-madvise.h"
 #include "core-mincore.h"
 #include "core-mmap.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 
 #if defined(HAVE_SYS_PRCTL_H)
@@ -48,6 +50,7 @@ static const stress_help_t help[] = {
 	{ NULL,	"mmap-mlock",	     "attempt to mlock mmap'd pages" },
 	{ NULL,	"mmap-mmap2",	     "use mmap2 instead of mmap (when available)" },
 	{ NULL,	"mmap-mprotect",     "enable mmap mprotect stressing" },
+	{ NULL,	"mmap-numa",	     "bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL, "mmap-odirect",	     "enable O_DIRECT on file" },
 	{ NULL,	"mmap-ops N",	     "stop after N mmap bogo operations" },
 	{ NULL, "mmap-osync",	     "enable O_SYNC on file" },
@@ -69,6 +72,7 @@ typedef struct {
 	bool mmap_mergeable;
 	bool mmap_mlock;
 	bool mmap_mprotect;
+	bool mmap_numa;
 	bool mmap_slow_munmap;
 	bool mmap_write_check;
 	mmap_func_t mmap;
@@ -76,6 +80,10 @@ typedef struct {
 	int *mmap_prot_perms;
 	size_t mmap_flag_count;
 	int *mmap_flag_perms;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask;
+	stress_numa_mask_t *numa_nodes;
+#endif
 } stress_mmap_context_t;
 
 #define NO_MEM_RETRIES_MAX	(65536)
@@ -139,6 +147,10 @@ static const int mmap_flags[] = {
     defined(STRESS_ARCH_X86_64)
 	MAP_32BIT,
 #endif
+/* Linux 6.11 */
+#if defined(MAP_DROPPABLE)
+	MAP_DROPPABLE,
+#endif
 #if defined(MAP_NOCACHE)	/* Mac OS X */
 	MAP_NOCACHE,
 #endif
@@ -148,7 +160,8 @@ static const int mmap_flags[] = {
 #if defined(MAP_NORESERVE)
 	MAP_NORESERVE,
 #endif
-#if defined(MAP_STACK)
+#if defined(MAP_STACK) &&	\
+    !defined(__FreeBSD__)
 	MAP_STACK,
 #endif
 #if defined(MAP_EXECUTABLE)
@@ -233,11 +246,11 @@ static void *mmap2_try(void *addr, size_t length, int prot, int flags,
 	off_t pgoffset;
 
 	/* Non 4K-page aligned offsets need to use mmap() */
-	if (offset & 4095)
+	if (UNLIKELY(offset & 4095))
 		return mmap(addr, length, prot, flags, fd, offset);
 	pgoffset = offset >> 12;
 	ptr = (void *)syscall(__NR_mmap2, addr, length, prot, flags, fd, pgoffset);
-	if (ptr == MAP_FAILED) {
+	if (UNLIKELY(ptr == MAP_FAILED)) {
 		/* For specific failure cases retry with mmap() */
 		if ((errno == ENOSYS) || (errno == EINVAL))
 			ptr = mmap(addr, length, prot, flags, fd, offset);
@@ -245,82 +258,6 @@ static void *mmap2_try(void *addr, size_t length, int prot, int flags,
 	return ptr;
 }
 #endif
-
-static int stress_set_mmap_bytes(const char *opt)
-{
-	size_t mmap_bytes;
-
-	mmap_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("mmap-bytes", mmap_bytes,
-		MIN_MMAP_BYTES, MAX_MMAP_BYTES);
-	return stress_set_setting("mmap-bytes", TYPE_ID_SIZE_T, &mmap_bytes);
-}
-
-static int stress_set_mmap_mergeable(const char *opt)
-{
-	return stress_set_setting_true("mmap-mergeable", opt);
-}
-
-static int stress_set_mmap_mprotect(const char *opt)
-{
-	return stress_set_setting_true("mmap-mprotect", opt);
-}
-
-static int stress_set_mmap_file(const char *opt)
-{
-	return stress_set_setting_true("mmap-file", opt);
-}
-
-static int stress_set_mmap_async(const char *opt)
-{
-	return stress_set_setting_true("mmap-async", opt);
-}
-
-static int stress_set_mmap_osync(const char *opt)
-{
-	return stress_set_setting_true("mmap-osync", opt);
-}
-
-static int stress_set_mmap_odirect(const char *opt)
-{
-	return stress_set_setting_true("mmap-odirect", opt);
-}
-
-static int stress_set_mmap_madvise(const char *opt)
-{
-	return stress_set_setting_true("mmap-madvise", opt);
-}
-
-static int stress_set_mmap_mlock(const char *opt)
-{
-	return stress_set_setting_true("mmap-mlock", opt);
-}
-
-static int stress_set_mmap_mmap2(const char *opt)
-{
-	return stress_set_setting_true("mmap-mmap2", opt);
-}
-
-static int stress_set_mmap_slow_munmap(const char *opt)
-{
-	return stress_set_setting_true("mmap-slow-munmap", opt);
-}
-
-static int stress_set_mmap_stressful(const char *opt)
-{
-	return stress_set_setting_true("mmap-mergeable", opt) |
-	       stress_set_setting_true("mmap-mprotect", opt) |
-	       stress_set_setting_true("mmap-file", opt) |
-	       stress_set_setting_true("mmap-odirect", opt) |
-	       stress_set_setting_true("mmap-madvise", opt) |
-	       stress_set_setting_true("mmap-mlock", opt) |
-	       stress_set_setting_true("mmap-slow-munmap", opt);
-}
-
-static int stress_set_mmap_write_check(const char *opt)
-{
-	return stress_set_setting_true("mmap-write-check", opt);
-}
 
 /*
  *  stress_mmap_mprotect()
@@ -359,15 +296,15 @@ static void stress_mmap_mprotect(
 		VOID_RET(int, mprotect(last_page, page_size << 1, PROT_READ | PROT_WRITE));
 
 		/* Cycle through potection */
-		if (mprotect(addr, len, PROT_NONE) < 0)
+		if (UNLIKELY(mprotect(addr, len, PROT_NONE) < 0))
 			pr_fail("%s: mprotect set to PROT_NONE failed\n", name);
-		if (mprotect(addr, len, PROT_READ) < 0)
+		if (UNLIKELY(mprotect(addr, len, PROT_READ) < 0))
 			pr_fail("%s: mprotect set to PROT_READ failed\n", name);
-		if (mprotect(addr, len, PROT_WRITE) < 0)
+		if (UNLIKELY(mprotect(addr, len, PROT_WRITE) < 0))
 			pr_fail("%s: mprotect set to PROT_WRITE failed\n", name);
-		if (mprotect(addr, len, PROT_EXEC) < 0)
+		if (UNLIKELY(mprotect(addr, len, PROT_EXEC) < 0))
 			pr_fail("%s: mprotect set to PROT_EXEC failed\n", name);
-		if (mprotect(addr, len, PROT_READ | PROT_WRITE) < 0)
+		if (UNLIKELY(mprotect(addr, len, PROT_READ | PROT_WRITE) < 0))
 			pr_fail("%s: mprotect set to PROT_READ | PROT_WRITE failed\n", name);
 	}
 #else
@@ -395,7 +332,7 @@ static void stress_mmap_invalid(
 	void *ptr;
 
 	ptr = mmap(addr, length, prot, flags, fd, offset);
-	if (ptr != MAP_FAILED)
+	if (UNLIKELY(ptr != MAP_FAILED))
 		(void)stress_munmap_retry_enomem(ptr, length);
 
 #if defined(__NR_mmap) &&	\
@@ -405,12 +342,12 @@ static void stress_mmap_invalid(
 	 *  do direct syscall if possible
 	 */
 	ptr = (void *)(uintptr_t)syscall(__NR_mmap, addr, length, prot, flags, fd, offset + 1);
-	if (ptr != MAP_FAILED)
+	if (UNLIKELY(ptr != MAP_FAILED))
 		(void)stress_munmap_retry_enomem(ptr, length);
 #endif
 	/* Do the above via libc */
 	ptr = mmap(addr, length, prot, flags, fd, offset + 1);
-	if (ptr != MAP_FAILED)
+	if (UNLIKELY(ptr != MAP_FAILED))
 		(void)stress_munmap_retry_enomem(ptr, length);
 }
 
@@ -425,26 +362,26 @@ static void stress_mmap_invalid(
  *	Using stress_mwc*() is much faster and is good enough for this
  *	kind of random-ish fast and dirty shuffle operation.
  */
-static void OPTIMIZE3 stress_mmap_index_shuffle(size_t *index, const size_t n)
+static void OPTIMIZE3 stress_mmap_index_shuffle(size_t *idx, const size_t n)
 {
 	register size_t i;
 
 	if (LIKELY(n <= 0xffffffff)) {
 		/* small index < 4GB of items we can use 32bit mod */
 		for (i = 0; i < n; i++) {
-			register size_t tmp, j = (size_t)stress_mwc32() % n;
+			register const size_t tmp = idx[i];
+			register const size_t j = (size_t)stress_mwc32modn((uint32_t)n);
 
-			tmp = index[i];
-			index[i] = index[j];
-			index[j] = tmp;
+			idx[i] = idx[j];
+			idx[j] = tmp;
 		}
 	} else {
 		for (i = 0; i < n; i++) {
-			register size_t tmp, j = (size_t)stress_mwc64 % n;
+			register const size_t tmp = idx[i];
+			register const size_t j = (size_t)stress_mwc64modn((uint64_t)n);
 
-			tmp = index[i];
-			index[i] = index[j];
-			index[j] = tmp;
+			idx[i] = idx[j];
+			idx[j] = tmp;
 		}
 	}
 }
@@ -489,7 +426,7 @@ static void stress_mmap_fast_munmap(
 	}
 	if (munmap_start && (munmap_size > 0))
 		(void)stress_munmap_retry_enomem((void *)munmap_start, munmap_size);
-	(void)memset(mapped, 0, pages);
+	(void)shim_memset(mapped, 0, pages);
 }
 
 /*
@@ -508,7 +445,7 @@ static void stress_mmap_slow_munmap(
 		if (mapped[i] == PAGE_MAPPED)
 			(void)stress_munmap_retry_enomem((void *)mappings[i], page_size);
 	}
-	(void)memset(mapped, 0, pages);
+	(void)shim_memset(mapped, 0, pages);
 }
 
 static int stress_mmap_child(stress_args_t *args, void *ctxt)
@@ -523,11 +460,12 @@ static int stress_mmap_child(stress_args_t *args, void *ctxt)
 	const int bad_fd = stress_get_bad_fd();
 	const int ms_flags = context->mmap_async ? MS_ASYNC : MS_SYNC;
 	uint8_t *mapped, **mappings;
-	size_t *index;
+	size_t *idx;
 	void *hint;
 	int ret;
 	NOCLOBBER int mask = ~0;
 	static const char mmap_name[] = "stress-mmap";
+	NOCLOBBER int rc = EXIT_SUCCESS;
 
 	VOID_RET(int, stress_sighandler(args->name, SIGBUS, stress_mmap_sighandler, NULL));
 
@@ -535,7 +473,7 @@ static int stress_mmap_child(stress_args_t *args, void *ctxt)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (mapped == MAP_FAILED) {
-		pr_dbg("%s: cannot allocate mapped buffer: %d (%s)\n",
+		pr_dbg("%s: cannot allocate mapped buffer, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
@@ -545,25 +483,32 @@ static int stress_mmap_child(stress_args_t *args, void *ctxt)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (mappings == MAP_FAILED) {
-		pr_dbg("%s: cannot allocate mappings buffer: %d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_dbg("%s: cannot allocate %zu byte mappings buffer%s, errno=%d (%s)\n",
+			args->name, pages * sizeof(*mappings),
+			stress_get_memfree_str(),
+			errno, strerror(errno));
 		(void)munmap((void *)mapped, pages * sizeof(*mapped));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(mappings, pages * sizeof(*mappings), "page-pointers");
+
 	if (context->mmap_mlock)
 		(void)shim_mlock(mappings, pages * sizeof(*mappings));
-	index = (size_t *)mmap(NULL, pages * sizeof(*index),
+	idx = (size_t *)mmap(NULL, pages * sizeof(*idx),
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-	if (index == MAP_FAILED) {
-		pr_dbg("%s: cannot allocate index buffer: %d (%s)\n",
-			args->name, errno, strerror(errno));
+	if (idx == MAP_FAILED) {
+		pr_dbg("%s: cannot allocate %zu byte idx buffer%s, errno=%d (%s)\n",
+			args->name, pages * sizeof(*idx),
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)munmap((void *)mappings, pages * sizeof(*mappings));
 		(void)munmap((void *)mapped, pages * sizeof(*mapped));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(idx, pages * sizeof(*idx), "page-index");
+
 	if (context->mmap_mlock)
-		(void)shim_mlock(index, pages * sizeof(*index));
+		(void)shim_mlock(idx, pages * sizeof(*idx));
 
 	do {
 		size_t n;
@@ -573,16 +518,16 @@ static int stress_mmap_child(stress_args_t *args, void *ctxt)
 		uint64_t *buf64;
 #endif
 retry:
-		if (no_mem_retries >= NO_MEM_RETRIES_MAX) {
+		if (UNLIKELY(no_mem_retries >= NO_MEM_RETRIES_MAX)) {
 			pr_inf("%s: gave up trying to mmap, no available memory\n",
 				args->name);
 			break;
 		}
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
-		if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(sz))
+		if (UNLIKELY((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(sz)))
 			goto retry;
 
 		/*
@@ -657,6 +602,10 @@ retry:
 		}
 		if (context->mmap_madvise)
 			(void)stress_madvise_random(buf, sz);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		if (context->mmap_numa)
+			stress_numa_randomize_pages(args, context->numa_nodes, context->numa_mask, buf, sz, page_size);
+#endif
 		if (context->mmap_mergeable)
 			(void)stress_madvise_mergeable(buf, sz);
 		(void)stress_mincore_touch_pages(buf, sz);
@@ -670,9 +619,11 @@ retry:
 		if (context->mmap_write_check) {
 			stress_mmap_set_light(buf, sz, page_size);
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
-				if (stress_mmap_check_light(buf, sz, page_size) < 0)
+				if (UNLIKELY(stress_mmap_check_light(buf, sz, page_size) < 0)) {
 					pr_fail("%s: mmap'd region of %zu bytes does "
 						"not contain expected data\n", args->name, sz);
+					rc = EXIT_FAILURE;
+				}
 			}
 		}
 
@@ -698,11 +649,11 @@ retry:
 		 *  Step #1, set random ordered page advise and protection
 		 */
 		for (n = 0; n < pages; n++)
-			index[n] = n;
-		stress_mmap_index_shuffle(index, n);
+			idx[n] = n;
+		stress_mmap_index_shuffle(idx, n);
 
 		for (n = 0; n < pages; n++) {
-			register size_t page = index[n];
+			register const size_t page = idx[n];
 
 			if (mapped[page] == PAGE_MAPPED) {
 #if defined(HAVE_MQUERY) &&	\
@@ -718,7 +669,7 @@ retry:
 				stress_mmap_mprotect(args->name, mappings[page],
 					page_size, page_size, context->mmap_mprotect);
 			}
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto cleanup;
 		}
 		/*
@@ -735,13 +686,13 @@ retry:
 		/*
 		 *  Step #2, map them back in random order
 		 */
-		stress_mmap_index_shuffle(index, n);
+		stress_mmap_index_shuffle(idx, n);
 
 		for (n = 0; n < pages; n++) {
-			register size_t page = index[n];
+			register const size_t page = idx[n];
 
 			if (!mapped[page]) {
-				off_t offset = mmap_file ? (off_t)(page * page_size) : 0;
+				const off_t offset = mmap_file ? (off_t)(page * page_size) : 0;
 				int fixed_flags = MAP_FIXED;
 
 				/*
@@ -773,9 +724,11 @@ retry:
 					/* Ensure we can write to the mapped page */
 					if (context->mmap_write_check) {
 						stress_mmap_set_light(mappings[page], page_size, page_size);
-						if (stress_mmap_check_light(mappings[page], page_size, page_size) < 0)
+						if (stress_mmap_check_light(mappings[page], page_size, page_size) < 0) {
 							pr_fail("%s: mmap'd region of %zu bytes does "
 								"not contain expected data\n", args->name, page_size);
+							rc = EXIT_FAILURE;
+						}
 					}
 					if (mmap_file) {
 						(void)shim_memset(mappings[page], (int)n, page_size);
@@ -787,7 +740,7 @@ retry:
 #endif
 					}
 				}
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto cleanup;
 			}
 		}
@@ -890,7 +843,7 @@ cleanup:
 		buf64 = (uint64_t *)mmap(NULL, page_size, PROT_WRITE,
 					MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 		if (buf64 != MAP_FAILED) {
-			uint64_t val = stress_mwc64();
+			register const uint64_t val = stress_mwc64();
 
 			if (context->mmap_mlock)
 				(void)shim_mlock(buf64, page_size);
@@ -904,12 +857,14 @@ cleanup:
 				    (errno != EPERM)) {
 					pr_fail("%s: cannot set write-only page to read-only, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			} else {
 				if (*buf64 != val) {
 					pr_fail("%s: unexpected value in read-only page, "
 						"got %" PRIx64 ", expected %" PRIx64 "\n",
 						args->name, *buf64, val);
+					rc = EXIT_FAILURE;
 				}
 			}
 			(void)stress_munmap_retry_enomem((void *)buf64, page_size);
@@ -933,21 +888,22 @@ cleanup:
 				    (errno != EPERM)) {
 					pr_fail("%s: cannot set read-only page to write-only, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 			(void)stress_munmap_retry_enomem((void *)buf64, page_size);
 		}
 #endif
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	jmp_env_set = false;
 
-	(void)munmap((void *)index, pages * sizeof(*index));
+	(void)munmap((void *)idx, pages * sizeof(*idx));
 	(void)munmap((void *)mappings, pages * sizeof(*mappings));
 	(void)munmap((void *)mapped, pages * sizeof(*mapped));
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -963,7 +919,7 @@ static int stress_mmap(stress_args_t *args)
 	bool mmap_mmap2 = false;
 	int ret, all_flags;
 	stress_mmap_context_t context;
-	size_t i;
+	size_t i, mmap_total;
 
 	jmp_env_set = false;
 
@@ -976,9 +932,14 @@ static int stress_mmap(stress_args_t *args)
 	context.mmap_mergeable = false;
 	context.mmap_mlock = false;
 	context.mmap_mprotect = false;
+	context.mmap_numa = false;
 	context.flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #if defined(MAP_POPULATE)
 	context.flags |= MAP_POPULATE;
+#endif
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	context.numa_mask = NULL;
+	context.numa_nodes = NULL;
 #endif
 
 	(void)stress_get_setting("mmap-async", &context.mmap_async);
@@ -990,6 +951,7 @@ static int stress_mmap(stress_args_t *args)
 	(void)stress_get_setting("mmap-mlock", &context.mmap_mlock);
 	(void)stress_get_setting("mmap-mmap2", &mmap_mmap2);
 	(void)stress_get_setting("mmap-mprotect", &context.mmap_mprotect);
+	(void)stress_get_setting("mmap-numa", &context.mmap_numa);
 	(void)stress_get_setting("mmap-slow-munmap", &context.mmap_slow_munmap);
 	(void)stress_get_setting("mmap-write-check", &context.mmap_write_check);
 
@@ -1012,24 +974,31 @@ static int stress_mmap(stress_args_t *args)
     defined(__NR_mmap2)
 		context.mmap = (mmap_func_t)mmap2_try;
 #else
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: using mmap instead of mmap2 as it is not available\n",
 				args->name);
 #endif
 	}
 
-	if (!stress_get_setting("mmap-bytes", &context.mmap_bytes)) {
+	mmap_total = DEFAULT_MMAP_BYTES;
+	if (!stress_get_setting("mmap-bytes", &mmap_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			context.mmap_bytes = MAX_32;
+			mmap_total = MAX_32;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			context.mmap_bytes = MIN_MMAP_BYTES;
+			mmap_total = MIN_MMAP_BYTES;
 	}
-	context.mmap_bytes /= args->num_instances;
-	if (context.mmap_bytes < MIN_MMAP_BYTES)
+	context.mmap_bytes = mmap_total / args->instances;
+	if (context.mmap_bytes < MIN_MMAP_BYTES) {
 		context.mmap_bytes = MIN_MMAP_BYTES;
-	if (context.mmap_bytes < page_size)
+		mmap_total = context.mmap_bytes * args->instances;
+	}
+	if (context.mmap_bytes < page_size) {
 		context.mmap_bytes = page_size;
+		mmap_total = context.mmap_bytes * args->instances;
+	}
 	context.sz = context.mmap_bytes & ~(page_size - 1);
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, context.mmap_bytes, mmap_total);
 
 	if (context.mmap_file) {
 		int file_flags = O_CREAT | O_RDWR;
@@ -1102,6 +1071,21 @@ redo:
 		context.flags |= MAP_SHARED;
 	}
 
+	if (context.mmap_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &context.numa_nodes,
+						&context.numa_mask, "--mmap-numa",
+						&context.mmap_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --mmap-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		context.mmap_numa = false;
+#endif
+	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = stress_oomable_child(args, &context, stress_mmap_child, STRESS_OOMABLE_NORMAL);
@@ -1116,31 +1100,54 @@ redo:
 		free(context.mmap_prot_perms);
 	if (context.mmap_flag_perms)
 		free(context.mmap_flag_perms);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (context.mmap_numa) {
+		stress_numa_mask_free(context.numa_mask);
+		stress_numa_mask_free(context.numa_nodes);
+	}
+#endif
 
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mmap_async,	stress_set_mmap_async },
-	{ OPT_mmap_bytes,	stress_set_mmap_bytes },
-	{ OPT_mmap_file,	stress_set_mmap_file },
-	{ OPT_mmap_madvise,	stress_set_mmap_madvise },
-	{ OPT_mmap_mergeable,	stress_set_mmap_mergeable },
-	{ OPT_mmap_mlock,	stress_set_mmap_mlock },
-	{ OPT_mmap_mmap2,	stress_set_mmap_mmap2 },
-	{ OPT_mmap_mprotect,	stress_set_mmap_mprotect },
-	{ OPT_mmap_odirect,	stress_set_mmap_odirect },
-	{ OPT_mmap_osync,	stress_set_mmap_osync },
-	{ OPT_mmap_slow_munmap,	stress_set_mmap_slow_munmap },
-	{ OPT_mmap_stressful,	stress_set_mmap_stressful },
-	{ OPT_mmap_write_check,	stress_set_mmap_write_check },
-	{ 0,			NULL }
+static void stress_mmap_stressful(const char *opt_name, const char *opt_arg, stress_type_id_t *type_id, void *value)
+{
+	(void)opt_name;
+	*type_id = TYPE_ID_SIZE_T;
+	*(size_t *)value = 0;
+
+	(void)stress_set_setting_true("mmap", "mmap-mergeable", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-mprotect", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-file", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-odirect", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-madvise", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-mlock", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-numa", opt_arg);
+	(void)stress_set_setting_true("mmap", "mmap-slow-munmap", opt_arg);
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_mmap_async,       "mmap-async",       TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_bytes,       "mmap-bytes",       TYPE_ID_SIZE_T_BYTES_VM, MIN_MMAP_BYTES, MAX_MMAP_BYTES, NULL },
+	{ OPT_mmap_file,        "mmap-file",        TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_madvise,     "mmap-madvise",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_mergeable,   "mmap-mergeable",   TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_mlock,       "mmap-mlock",       TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_mmap2,       "mmap-mmap2",       TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_mprotect,    "mmap-mprotect",    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_numa,	"mmap-numa",	    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_odirect,     "mmap-odirect",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_osync,       "mmap-osync",       TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_slow_munmap,	"mmap-slow-munmap", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmap_stressful,   "mmap-stressful",   TYPE_ID_CALLBACK, 0, 0, stress_mmap_stressful },
+	{ OPT_mmap_write_check, "mmap-write-check", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_mmap_info = {
+const stressor_info_t stress_mmap_info = {
 	.stressor = stress_mmap,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

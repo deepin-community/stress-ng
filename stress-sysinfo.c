@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,28 +21,27 @@
 #include "core-builtin.h"
 #include "core-mounts.h"
 
+#include <sys/ioctl.h>
+#include <sys/times.h>
+
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
-#else
-UNEXPECTED
 #endif
 
 #if defined(HAVE_SYS_SYSMACROS_H)
 #include <sys/sysmacros.h>
-#else
-UNEXPECTED
+#endif
+
+#if defined(HAVE_SYS_MKDEV_H)
+#include <sys/mkdev.h>
 #endif
 
 #if defined(HAVE_SYS_STATFS_H)
 #include <sys/statfs.h>
-#else
-UNEXPECTED
 #endif
 
 #if defined(HAVE_SYS_STATVFS_H)
 #include <sys/statvfs.h>
-#else
-UNEXPECTED
 #endif
 
 static const stress_help_t help[] = {
@@ -57,7 +56,7 @@ static const stress_help_t help[] = {
  */
 static int stress_sysinfo(stress_args_t *args)
 {
-	int n_mounts;
+	int n_mounts, rc = EXIT_SUCCESS;
 	const int verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 	char *mnts[128];
 #if defined(HAVE_SYS_SYSINFO_H) &&	\
@@ -73,10 +72,12 @@ static int stress_sysinfo(stress_args_t *args)
 		pr_err("%s: failed to get mount points\n", args->name);
 		return EXIT_FAILURE;
 	}
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: found %d mount points\n",
 			args->name, n_mounts);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -91,13 +92,14 @@ static int stress_sysinfo(stress_args_t *args)
 			int i, ret;
 
 			ret = sysinfo(&sysinfo_buf);
-			if ((ret < 0) &&
-			    (verify) &&
-			    (errno != EPERM))
+			if (UNLIKELY((ret < 0) && (verify) && (errno != EPERM))) {
 			 	pr_fail("%s: sysinfo failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+				break;
+			}
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			/* Linux statfs variant */
@@ -123,9 +125,11 @@ static int stress_sysinfo(stress_args_t *args)
 					    (errno != EACCES) &&
 					    (errno != ENOTCONN) &&
 					    (errno != EPERM)) {
-						pr_fail("%s: statfs on %s failed: errno=%d (%s)\n",
+						pr_fail("%s: statfs on %s failed, errno=%d (%s)\n",
 							args->name, mnts[i], errno,
 							strerror(errno));
+						rc = EXIT_FAILURE;
+						break;
 					}
 				}
 
@@ -150,20 +154,26 @@ static int stress_sysinfo(stress_args_t *args)
 #endif
 
 				ret = fstatfs(fd, &statfs_buf);
-				(void)close(fd);
-				if (UNLIKELY((ret < 0) && (errno == ENOENT)))
+				if (UNLIKELY((ret < 0) && (errno == ENOENT))) {
+					(void)close(fd);
 					continue;
+				}
 				if (UNLIKELY((ret < 0) && (verify))) {
 					if ((errno != ENOSYS) &&
 					    (errno != EOVERFLOW) &&
 					    (errno != EACCES) &&
 					    (errno != ENOTCONN) &&
 					    (errno != EPERM)) {
-						pr_fail("%s: fstatfs on %s failed: errno=%d (%s)\n",
+						pr_fail("%s: fstatfs on %s failed, errno=%d (%s)\n",
 							args->name, mnts[i], errno,
 							strerror(errno));
+						rc = EXIT_FAILURE;
+						(void)close(fd);
+						break;
 					}
 				}
+				(void)close(fd);
+
 				/*
 				 *  Exercise invalid fd
 				 */
@@ -177,7 +187,7 @@ static int stress_sysinfo(stress_args_t *args)
 			struct stat sbuf;
 			struct shim_ustat ubuf;
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			for (i = 0; i < n_mounts; i++) {
@@ -195,9 +205,11 @@ static int stress_sysinfo(stress_args_t *args)
 					    (errno != ENOSYS) &&
 					    (errno != ENOTCONN) &&
 					    (errno != EPERM)) {
-						pr_fail("%s: ustat on %s failed: errno=%d (%s)\n",
+						pr_fail("%s: ustat on %s failed, errno=%d (%s)\n",
 							args->name, mnts[i], errno,
 							strerror(errno));
+						rc = EXIT_FAILURE;
+						break;
 					}
 				}
 			}
@@ -206,7 +218,11 @@ static int stress_sysinfo(stress_args_t *args)
 			 * Exercise invalid ustat, assuming that major ~0 is
 			 * invalid
 			 */
+#if defined(__QNXNTO__)
+			sbuf.st_dev = makedev(0, ~0, stress_mwc32());
+#else
 			sbuf.st_dev = makedev(~0, stress_mwc32());
+#endif
 			VOID_RET(int, shim_ustat(sbuf.st_dev, &ubuf));
 #endif
 		}
@@ -236,9 +252,11 @@ static int stress_sysinfo(stress_args_t *args)
 					    (errno != EACCES) &&
 					    (errno != ENOTCONN) &&
 					    (errno != EPERM)) {
-						pr_fail("%s: statvfs on %s failed: errno=%d (%s)\n",
+						pr_fail("%s: statvfs on %s failed, errno=%d (%s)\n",
 							args->name, mnts[i], errno,
 							strerror(errno));
+						rc = EXIT_FAILURE;
+						break;
 					}
 				}
 				/*
@@ -249,26 +267,26 @@ static int stress_sysinfo(stress_args_t *args)
 		}
 #endif
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		clk = times(&tms_buf);
-		if ((clk == (clock_t)-1) && (verify)) {
+		if (UNLIKELY((clk == (clock_t)-1) && (verify))) {
 			 pr_fail("%s: times failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		}
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	stress_mount_free(mnts, n_mounts);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_sysinfo_info = {
+const stressor_info_t stress_sysinfo_info = {
 	.stressor = stress_sysinfo,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

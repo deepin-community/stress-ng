@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -240,23 +240,9 @@ static const uint64_t unshare_flags[] = {
 };
 #endif
 
-/*
- *  stress_set_clone_max()
- *	set maximum number of clones allowed
- */
-static int stress_set_clone_max(const char *opt)
-{
-	uint32_t clone_max;
-
-	clone_max = stress_get_uint32(opt);
-	stress_check_range("clone-max", clone_max,
-		MIN_CLONES, MAX_CLONES);
-	return stress_set_setting("clone-max", TYPE_ID_UINT32, &clone_max);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_clone_max,	stress_set_clone_max },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_clone_max, "clone-max", TYPE_ID_UINT32, MIN_CLONES, MAX_CLONES, NULL },
+        END_OPT,
 };
 
 #if defined(HAVE_CLONE)
@@ -321,6 +307,7 @@ static stress_clone_t *stress_clone_new(void)
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 		if (new == MAP_FAILED)
 			return NULL;
+		stress_set_vma_anon_name(new, sizeof(*new), "clone-descriptor");
 	}
 
 	if (clones.head)
@@ -503,8 +490,10 @@ static int stress_clone_child(stress_args_t *args, void *context)
 	 * a candidate for a OOMable process
 	 */
 	ptr = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, mflags, -1, 0);
-	if (ptr != MAP_FAILED)
+	if (ptr != MAP_FAILED) {
+		stress_set_vma_anon_name(ptr, mmap_size, "oom-allocation");
 		(void)stress_mincore_touch_pages(ptr, mmap_size);
+	}
 
 	clone_stress_force_bind();
 
@@ -513,7 +502,7 @@ static int stress_clone_child(stress_args_t *args, void *context)
 					   stress_low_memory((size_t)(1 * MB)));
 
 		if (!low_mem_reap && (clones.length < clone_max)) {
-			static size_t index;
+			static size_t idx;
 			stress_clone_t *clone_info;
 			stress_clone_args_t clone_arg = { args, shared };
 			const uint32_t rnd = stress_mwc32();
@@ -527,10 +516,10 @@ static int stress_clone_child(stress_args_t *args, void *context)
 			if ((rnd & 0x80000000UL) || (flag_count == 0) || (!flag_perms)) {
 				flag = flags[rnd % SIZEOF_ARRAY(flags)];	/* cppcheck-suppress moduloofone */
 			} else {
-				flag = (unsigned int)flag_perms[index];
-				index++;
-				if (index >= flag_count)
-					index = 0;
+				flag = (unsigned int)flag_perms[idx];
+				idx++;
+				if (idx >= flag_count)
+					idx = 0;
 			}
 
 			if (use_clone3 && try_clone3) {
@@ -613,20 +602,22 @@ static int stress_clone(stress_args_t *args)
 	shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (shared == MAP_FAILED) {
-		pr_inf_skip("%s: failed to memory map %zd bytes, skipping stressor\n",
-			args->name, sizeof(*shared));
+		pr_inf_skip("%s: failed to memory map %zu bytes%s, skipping stressor\n",
+			args->name, sizeof(*shared), stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	shared->metrics.lock = stress_lock_create();
-	shared->metrics.duration = 0.0;
-	shared->metrics.count = 0.0;
-	shared->metrics.t_start = 0.0;
+	stress_set_vma_anon_name(shared, sizeof(*shared), "clone-state");
+	stress_zero_metrics(&shared->metrics, 1);
+	shared->metrics.lock = stress_lock_create("metrics");
 
 	flag_count = stress_flag_permutation((int)all_flags, &flag_perms);
 
 	stress_set_oom_adjustment(args, false);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	rc = stress_oomable_child(args, &shared->metrics, stress_clone_child, STRESS_OOMABLE_DROP_CAP);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -645,25 +636,25 @@ static int stress_clone(stress_args_t *args)
 
 	average = (shared->metrics.count > 0.0) ? shared->metrics.duration / shared->metrics.count : 0.0;
 	stress_metrics_set(args, 0, "microsecs per clone",
-		average * 1000000, STRESS_HARMONIC_MEAN);
+		average * 1000000, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)shared, sizeof(*shared));
 
 	return rc;
 }
 
-stressor_info_t stress_clone_info = {
+const stressor_info_t stress_clone_info = {
 	.stressor = stress_clone,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_clone_info = {
+const stressor_info_t stress_clone_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without clone() system call"

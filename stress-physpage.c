@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-arch.h"
 #include "core-capabilities.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_ASM_MTRR_H)
 #include <asm/mtrr.h>
 #endif
@@ -32,14 +34,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_physpage_mtrr(const char *opt)
-{
-	return stress_set_setting_true("physpage-mtrr", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_physpage_mtrr,	stress_set_physpage_mtrr },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_physpage_mtrr, "physpage-mtrr", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__)
@@ -98,7 +95,7 @@ static void stress_physpage_mtrr(
 		sentry.type = mtrr_types[i];
 
 		ret = ioctl(fd, MTRRIOC_ADD_ENTRY, &sentry);
-		if (ret != 0)
+		if (UNLIKELY(ret != 0))
 			goto err;
 		if (lseek(fd, 0, SEEK_SET) == 0) {
 			struct mtrr_gentry gentry;
@@ -112,7 +109,7 @@ static void stress_physpage_mtrr(
 				}
 				gentry.regnum++;
 			}
-			if (!found) {
+			if (UNLIKELY(!found)) {
 				pr_fail("%s: cannot find mtrr entry at %p, size %zd, type %d\n",
 					args->name, (void *)phys_addr, page_size, mtrr_types[i]);
 				*success = false;
@@ -143,17 +140,17 @@ static int stress_virt_to_phys(
 	ssize_t n;
 
 	offset = (off_t)((virt_addr / page_size) * sizeof(uint64_t));
-	if (lseek(fd_pm, offset, SEEK_SET) != offset) {
+	if (UNLIKELY(lseek(fd_pm, offset, SEEK_SET) != offset)) {
 		pr_err("%s: cannot seek on address %p in /proc/self/pagemap, errno=%d (%s)\n",
 			args->name, (void *)virt_addr, errno, strerror(errno));
 		goto err;
 	}
 	n = read(fd_pm, &pageinfo, sizeof(pageinfo));
-	if (n < 0) {
+	if (UNLIKELY(n < 0)) {
 		pr_err("%s: cannot read address %p in /proc/self/pagemap, errno=%d (%s)\n",
 			args->name, (void *)virt_addr, errno, strerror(errno));
 		goto err;
-	} else if (n != (ssize_t)sizeof(pageinfo)) {
+	} else if (UNLIKELY(n != (ssize_t)sizeof(pageinfo))) {
 		pr_fail("%s: read address %p in /proc/self/pagemap returned %zd bytes, expected %zd\n",
 			args->name, (void *)virt_addr, (size_t)n, sizeof(pageinfo));
 		goto err;
@@ -167,22 +164,22 @@ static int stress_virt_to_phys(
 		phys_addr |= (virt_addr & (page_size - 1));
 		offset = (off_t)(pfn * sizeof(uint64_t));
 
-		if (phys_addr == 0)
+		if (UNLIKELY(phys_addr == 0))
 			return 0;
-		if (fd_pc < 0)
+		if (UNLIKELY(fd_pc < 0))
 			return 0;
 
-		if (lseek(fd_pc, offset, SEEK_SET) != offset) {
+		if (UNLIKELY(lseek(fd_pc, offset, SEEK_SET) != offset)) {
 			pr_err("%s: cannot seek on address %p in /proc/kpagecount, errno=%d (%s)\n",
 				args->name, (void *)virt_addr, errno, strerror(errno));
 			goto err;
 		}
-		if (read(fd_pc, &page_count, sizeof(page_count)) != sizeof(page_count)) {
+		if (UNLIKELY(read(fd_pc, &page_count, sizeof(page_count)) != sizeof(page_count))) {
 			pr_err("%s: cannot read page count for address %p in /proc/kpagecount, errno=%d (%s)\n",
 				args->name, (void *)virt_addr, errno, strerror(errno));
 			goto err;
 		}
-		if (page_count < 1) {
+		if (UNLIKELY(page_count < 1)) {
 			pr_fail("%s: got zero page count for physical address 0x%" PRIx64 "\n",
 				args->name, phys_addr);
 			goto err;
@@ -207,16 +204,19 @@ static int stress_virt_to_phys(
 				VOID_RET(ssize_t, read(fd_mem, data, sizeof(data)));
 			}
 
-			ptr = mmap(NULL, page_size, PROT_READ,
+			ptr = (uint8_t *)mmap(NULL, page_size, PROT_READ,
 				MAP_SHARED, fd_mem, (off_t)phys_addr);
-			if (ptr != MAP_FAILED)
+			if (ptr != MAP_FAILED) {
+				stress_set_vma_anon_name(ptr, page_size, "ro-dev-mem");
 				(void)stress_munmap_retry_enomem((void *)ptr, page_size);
+			}
 			if (writable) {
-				ptr = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+				ptr = (uint8_t *)mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 					MAP_SHARED, fd_mem, (off_t)phys_addr);
 				if (ptr != MAP_FAILED) {
 					uint8_t val = *ptr;
 
+					stress_set_vma_anon_name(ptr, page_size, "rw-dev-mem");
 					*(volatile uint8_t *)ptr = val;
 					(void)stress_munmap_retry_enomem((void *)ptr, page_size);
 				}
@@ -272,7 +272,7 @@ static int stress_physpage(stress_args_t *args)
 	 */
 	fd_pc = open("/proc/kpagecount", O_RDONLY);
 	if (fd_pc < 0) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_dbg("%s: cannot open /proc/kpagecount, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		fd_pc = -1;
@@ -285,14 +285,17 @@ static int stress_physpage(stress_args_t *args)
 	if (fd_mem < 0)
 		fd_mem = open("/dev/mem", O_RDONLY);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		void *nptr;
 
-		nptr = mmap(ptr, page_size, PROT_READ | PROT_WRITE,
-			MAP_POPULATE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		nptr = stress_mmap_populate((void *)ptr, page_size, PROT_READ | PROT_WRITE,
+					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (nptr != MAP_FAILED) {
+			stress_set_vma_anon_name(nptr, page_size, "rw-page");
 			(void)stress_virt_to_phys(args, page_size, fd_pm, fd_pc, fd_mem,
 				(uintptr_t)nptr, physpage_mtrr, true, &success);
 			(void)stress_munmap_retry_enomem(nptr, page_size);
@@ -306,28 +309,28 @@ static int stress_physpage(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	if (fd_mem > 0)
+	if (fd_mem >= 0)
 		(void)close(fd_mem);
-	if (fd_pc > 0)
+	if (fd_pc >= 0)
 		(void)close(fd_pc);
 	(void)close(fd_pm);
 
 	return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-stressor_info_t stress_physpage_info = {
+const stressor_info_t stress_physpage_info = {
 	.stressor = stress_physpage,
 	.supported = stress_physpage_supported,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_VM,
+	.opts = opts,
+	.classifier = CLASS_VM,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_physpage_info = {
+const stressor_info_t stress_physpage_info = {
 	.stressor = stress_unimplemented,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_VM,
+	.opts = opts,
+	.classifier = CLASS_VM,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-builtin.h"
 #include "core-job.h"
 
+#include <ctype.h>
+
 #define MAX_ARGS	(64)
 #define RUN_SEQUENTIAL	(0x01)
 #define RUN_PARALLEL	(0x02)
@@ -28,10 +30,10 @@
 #define ISBLANK(ch)	isblank((int)(ch))
 
 /*
- *  stress_chop()
+ *  stress_str_chop()
  *	chop off end of line that matches char ch
  */
-static inline void stress_chop(char *str, const char ch)
+static inline void stress_str_chop(char *str, const char ch)
 {
 	char *ptr = strchr(str, ch);
 
@@ -112,6 +114,8 @@ int stress_parse_jobfile(
 	uint32_t flag;
 	static uint32_t lineno;
 
+	(void)shim_memset(txt, 0, sizeof(txt));
+
 	if (!jobfile) {
 		if (optind >= argc)
 			return 0;
@@ -145,11 +149,11 @@ int stress_parse_jobfile(
 		lineno++;
 
 		/* remove \n */
-		stress_chop(buf, '\n');
+		stress_str_chop(buf, '\n');
 		(void)shim_strscpy(txt, buf, sizeof(txt) - 1);
 
 		/* remove comments */
-		stress_chop(buf, '#');
+		stress_str_chop(buf, '#');
 		if (!*buf)
 			continue;
 
@@ -196,7 +200,7 @@ int stress_parse_jobfile(
 				continue;
 			}
 
-			tmp = malloc(len);
+			tmp = (char *)malloc(len);
 			if (!tmp) {
 				(void)fprintf(stderr, "Out of memory parsing '%s'\n", jobfile);
 				return -1;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,19 +31,23 @@
 	MACRO(affinity) 	\
 	MACRO(aio) 		\
 	MACRO(aiol) 		\
-	MACRO(apparmor) 	\
 	MACRO(alarm)		\
+	MACRO(apparmor) 	\
 	MACRO(atomic)		\
 	MACRO(bad_altstack) 	\
 	MACRO(bad_ioctl) 	\
+	MACRO(besselmath)	\
 	MACRO(bigheap)		\
-	MACRO(bind_mount)	\
 	MACRO(binderfs)		\
+	MACRO(bind_mount)	\
 	MACRO(bitonicsort)	\
+	MACRO(bitops)		\
 	MACRO(branch)		\
 	MACRO(brk)		\
 	MACRO(bsearch)		\
+	MACRO(bubblesort)	\
 	MACRO(cache)		\
+	MACRO(cachehammer)	\
 	MACRO(cacheline)	\
 	MACRO(cap)		\
 	MACRO(cgroup)		\
@@ -59,6 +63,7 @@
 	MACRO(copy_file)	\
 	MACRO(cpu)		\
 	MACRO(cpu_online)	\
+	MACRO(cpu_sched)	\
 	MACRO(crypt)		\
 	MACRO(cyclic)		\
 	MACRO(daemon)		\
@@ -67,31 +72,39 @@
 	MACRO(dentry)		\
 	MACRO(dev)		\
 	MACRO(dev_shm)		\
+	MACRO(dfp)		\
 	MACRO(dir)		\
 	MACRO(dirdeep)		\
 	MACRO(dirmany)		\
 	MACRO(dnotify)		\
 	MACRO(dup)		\
 	MACRO(dynlib)		\
-	MACRO(eigen)		\
+	MACRO(easy_opcode)	\
 	MACRO(efivar)		\
+	MACRO(eigen)		\
 	MACRO(enosys)		\
 	MACRO(env)		\
 	MACRO(epoll)		\
 	MACRO(eventfd) 		\
 	MACRO(exec)		\
 	MACRO(exit_group)	\
+	MACRO(expmath)		\
 	MACRO(factor)		\
 	MACRO(fallocate)	\
 	MACRO(fanotify)		\
 	MACRO(far_branch)	\
 	MACRO(fault)		\
 	MACRO(fcntl)		\
+	MACRO(fd_abuse)		\
 	MACRO(fd_fork)		\
+	MACRO(fd_race)		\
+	MACRO(fibsearch)	\
 	MACRO(fiemap)		\
 	MACRO(fifo)		\
 	MACRO(file_ioctl)	\
 	MACRO(filename)		\
+	MACRO(filerace)		\
+	MACRO(flipflop)		\
 	MACRO(flock)		\
 	MACRO(flushcache)	\
 	MACRO(fma)		\
@@ -100,6 +113,7 @@
 	MACRO(fp)		\
 	MACRO(fp_error)		\
 	MACRO(fpunch)		\
+	MACRO(fractal)		\
 	MACRO(fsize)		\
 	MACRO(fstat)		\
 	MACRO(full)		\
@@ -117,11 +131,14 @@
 	MACRO(heapsort)		\
 	MACRO(hrtimers)		\
 	MACRO(hsearch)		\
+	MACRO(hyperbolic)	\
 	MACRO(icache)		\
 	MACRO(icmp_flood)	\
 	MACRO(idle_page)	\
 	MACRO(inode_flags)	\
 	MACRO(inotify)		\
+	MACRO(insertionsort)	\
+	MACRO(intmath)		\
 	MACRO(io)		\
 	MACRO(iomix)		\
 	MACRO(ioport)		\
@@ -147,10 +164,13 @@
 	MACRO(locka)		\
 	MACRO(lockbus)		\
 	MACRO(lockf)		\
+	MACRO(lockmix)		\
 	MACRO(lockofd)		\
+	MACRO(logmath)		\
 	MACRO(longjmp)		\
 	MACRO(loop)		\
 	MACRO(lsearch)		\
+	MACRO(lsm)		\
 	MACRO(madvise)		\
 	MACRO(malloc)		\
 	MACRO(matrix)		\
@@ -165,26 +185,31 @@
 	MACRO(mergesort)	\
 	MACRO(metamix)		\
 	MACRO(mincore)		\
+	MACRO(min_nanosleep)	\
 	MACRO(misaligned)	\
 	MACRO(mknod)		\
 	MACRO(mlock)		\
 	MACRO(mlockmany)	\
 	MACRO(mmap)		\
 	MACRO(mmapaddr)		\
+	MACRO(mmapcow)		\
 	MACRO(mmapfiles)	\
 	MACRO(mmapfixed)	\
 	MACRO(mmapfork)		\
 	MACRO(mmaphuge)		\
 	MACRO(mmapmany)		\
+	MACRO(mmaptorture)	\
 	MACRO(module)		\
 	MACRO(monte_carlo)	\
-	MACRO(mprotect)		\
 	MACRO(mpfr)		\
+	MACRO(mprotect)		\
 	MACRO(mq)		\
 	MACRO(mremap)		\
+	MACRO(mseal)		\
 	MACRO(msg)		\
 	MACRO(msync)		\
 	MACRO(msyncmany)	\
+	MACRO(mtx)		\
 	MACRO(munmap)		\
 	MACRO(mutex)		\
 	MACRO(nanosleep)	\
@@ -204,6 +229,7 @@
 	MACRO(personality)	\
 	MACRO(peterson)		\
 	MACRO(physpage)		\
+	MACRO(physmmap)		\
 	MACRO(pidfd)		\
 	MACRO(ping_sock)	\
 	MACRO(pipe)		\
@@ -211,20 +237,24 @@
 	MACRO(pkey)		\
 	MACRO(plugin)		\
 	MACRO(poll)		\
+	MACRO(powmath)		\
 	MACRO(prctl)		\
 	MACRO(prefetch)		\
+	MACRO(prime)		\
 	MACRO(prio_inv)		\
 	MACRO(priv_instr)	\
 	MACRO(procfs)		\
+	MACRO(pseek)		\
 	MACRO(pthread)		\
 	MACRO(ptrace)		\
+	MACRO(ptr_chase)	\
 	MACRO(pty)		\
 	MACRO(qsort)		\
 	MACRO(quota)		\
 	MACRO(race_sched)	\
 	MACRO(radixsort)	\
-	MACRO(randlist)		\
 	MACRO(ramfs)		\
+	MACRO(randlist)		\
 	MACRO(rawdev)		\
 	MACRO(rawpkt)		\
 	MACRO(rawsock)		\
@@ -232,6 +262,7 @@
 	MACRO(rdrand)		\
 	MACRO(readahead)	\
 	MACRO(reboot)		\
+	MACRO(regex)		\
 	MACRO(regs)		\
 	MACRO(remap)		\
 	MACRO(rename)		\
@@ -264,7 +295,9 @@
 	MACRO(sigchld)		\
 	MACRO(sigfd)		\
 	MACRO(sigfpe)		\
+	MACRO(sighup)		\
 	MACRO(sigio)		\
+	MACRO(sigill)		\
 	MACRO(signal)		\
 	MACRO(signest)		\
 	MACRO(sigpending)	\
@@ -274,6 +307,8 @@
 	MACRO(sigsegv)		\
 	MACRO(sigsuspend)	\
 	MACRO(sigtrap)		\
+	MACRO(sigurg)		\
+	MACRO(sigvtalrm)	\
 	MACRO(sigxcpu)		\
 	MACRO(sigxfsz)		\
 	MACRO(skiplist)		\
@@ -283,14 +318,16 @@
 	MACRO(sockabuse)	\
 	MACRO(sockdiag)		\
 	MACRO(sockfd)		\
-	MACRO(sockpair)		\
 	MACRO(sockmany)		\
+	MACRO(sockpair)		\
 	MACRO(softlockup)	\
-	MACRO(spawn)		\
 	MACRO(sparsematrix)	\
+	MACRO(spawn)		\
+	MACRO(spinmem)		\
 	MACRO(splice)		\
 	MACRO(stack)		\
 	MACRO(stackmmap)	\
+	MACRO(statmount)	\
 	MACRO(str)		\
 	MACRO(stream)		\
 	MACRO(swap)		\
@@ -300,9 +337,9 @@
 	MACRO(syncload)		\
 	MACRO(sysbadaddr)	\
 	MACRO(syscall)		\
+	MACRO(sysfs)		\
 	MACRO(sysinfo)		\
 	MACRO(sysinval)		\
-	MACRO(sysfs)		\
 	MACRO(tee)		\
 	MACRO(timer)		\
 	MACRO(timerfd)		\
@@ -317,7 +354,9 @@
 	MACRO(tun)		\
 	MACRO(udp)		\
 	MACRO(udp_flood)	\
+	MACRO(umask)		\
 	MACRO(umount)		\
+	MACRO(unlink)		\
 	MACRO(unshare)		\
 	MACRO(uprobe)		\
 	MACRO(urandom)		\
@@ -325,6 +364,7 @@
 	MACRO(usersyscall)	\
 	MACRO(utime)		\
 	MACRO(vdso)		\
+	MACRO(veccmp)		\
 	MACRO(vecfp)		\
 	MACRO(vecmath)		\
 	MACRO(vecshuf)		\
@@ -333,11 +373,11 @@
 	MACRO(vfork)		\
 	MACRO(vforkmany)	\
 	MACRO(vm)		\
+	MACRO(vma)		\
 	MACRO(vm_addr)		\
 	MACRO(vm_rw)		\
 	MACRO(vm_segv)		\
 	MACRO(vm_splice)	\
-	MACRO(vma)		\
 	MACRO(vnni)		\
 	MACRO(wait)		\
 	MACRO(waitcpu)		\
@@ -358,14 +398,12 @@
 #define STRESSOR_ENUM(name)	\
 	STRESS_ ## name,
 
-
 /*
  *  Elements in stressor array
  */
 #define STRESSOR_ELEM(name)		\
 {					\
 	&stress_ ## name ## _info,	\
-	STRESS_ ## name,		\
 	OPT_ ## name,			\
 	OPT_ ## name  ## _ops,		\
 	# name				\
@@ -374,7 +412,6 @@
 /*
  *  Declaration of stress_*_info object
  */
-#define STRESSOR_INFO(name)     \
-	extern stressor_info_t stress_ ## name ## _info;
+#define STRESSOR_INFO(name)	extern stressor_info_t stress_ ## name ## _info;
 
 #endif

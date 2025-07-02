@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -155,7 +155,7 @@ static int stress_chroot_test1(chroot_shared_data_t *data)
 	 * We check for error, ENOENT can happen on termination
 	 * so ignore this error
 	 */
-	if ((ret1 < 0) && (errno != ENOENT)) {
+	if ((ret1 < 0) && (errno1 != ENOENT)) {
 		pr_fail("%s: chroot(\"%s\"), errno=%d (%s)\n",
 			data->args->name, temppath, errno1, strerror(errno1));
 		return EXIT_FAILURE;
@@ -209,7 +209,7 @@ static int stress_chroot_test3(chroot_shared_data_t *data)
 
 	do_chroot(data, longpath, NULL, &ret1, &ret2, &errno1, &errno2);
 #if defined(__HAIKU__)
-	if ((ret1 >= 0) || (errno1 != EINVAL)) {
+	if ((ret1 >= 0) || ((errno1 != EINVAL) && (errno1 != ENAMETOOLONG))) {
 #else
 	if ((ret1 >= 0) || (errno1 != ENAMETOOLONG)) {
 #endif
@@ -295,7 +295,7 @@ static int stress_chroot_test7(chroot_shared_data_t *data)
 	char *path;
 
 	/* Don't throw a failure of we can't allocate large path */
-	path = malloc(path_len);
+	path = (char *)malloc(path_len);
 	if (!path)
 		return EXIT_SUCCESS;
 
@@ -418,10 +418,12 @@ static int stress_chroot(stress_args_t *args)
 			sizeof(*data), PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap metrics shared data, skipping stressor\n",
-			args->name);
+		pr_inf_skip("%s: cannot mmap metrics shared data%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
 		return EXIT_FAILURE;
 	}
+	stress_set_vma_anon_name(data, sizeof(*data), "metrics");
+	stress_zero_metrics(&data->metrics, 1);
 	data->args = args;
 	data->rootpath_inode = chroot_inode("/");
 
@@ -442,6 +444,8 @@ static int stress_chroot(stress_args_t *args)
 	(void)close(fd);
 	data->cwd_fd = open(".", O_DIRECTORY | O_RDONLY);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -461,14 +465,15 @@ again:
 			_exit(ret);
 		} else {
 			/* Parent */
-			int status, waitret;
+			int status;
+			pid_t waitret;
 
 			waitret = shim_waitpid(pid, &status, 0);
 			if (waitret < 0) {
 				if (errno == EINTR)
 					break;
-				pr_fail("%s: waitpid waiting on chroot child failed, errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_fail("%s: waitpid waiting on chroot child PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 				goto tidy_all;
 			}
 			if (WEXITSTATUS(status) != EXIT_SUCCESS)
@@ -481,10 +486,11 @@ again:
 			i = 0;
 	} while (stress_continue(args));
 
-	stress_chroot_report_escapes(args, data);
+	if (stress_instance_zero(args))
+		stress_chroot_report_escapes(args, data);
 	rate = (data->metrics.duration > 0.0) ? data->metrics.count / data->metrics.duration : 0.0;
 	stress_metrics_set(args, 0, "chroot calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	ret = EXIT_SUCCESS;
 
@@ -503,10 +509,10 @@ tidy_ret:
 	return ret;
 }
 
-stressor_info_t stress_chroot_info = {
+const stressor_info_t stress_chroot_info = {
 	.stressor = stress_chroot,
 	.supported = stress_chroot_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -522,10 +528,10 @@ static int stress_chroot_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_chroot_info = {
+const stressor_info_t stress_chroot_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_chroot_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "built without chroot() support"
 };

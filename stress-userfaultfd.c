@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,7 @@
 #include "core-out-of-memory.h"
 
 #include <sched.h>
+#include <sys/ioctl.h>
 
 #if defined(__NR_userfaultfd)
 #define HAVE_USERFAULTFD
@@ -44,6 +45,7 @@ UNEXPECTED
 
 static const stress_help_t help[] = {
 	{ NULL,	"userfaultfd N",	"start N page faulting workers with userspace handling" },
+	{ NULL, "userfaultfd-bytes N",	"size of mmap'd region to fault on" },
 	{ NULL,	"userfaultfd-ops N",	"stop after N page faults have been handled" },
 	{ NULL,	NULL,			NULL }
 };
@@ -51,6 +53,7 @@ static const stress_help_t help[] = {
 #if defined(HAVE_USERFAULTFD) && 	 \
     defined(HAVE_LINUX_USERFAULTFD_H) && \
     defined(HAVE_POLL_H) &&		 \
+    defined(HAVE_POLL) &&		 \
     defined(HAVE_CLONE)
 
 #define STACK_SIZE	(64 * 1024)
@@ -67,24 +70,16 @@ typedef struct {
 
 #endif
 
-static int stress_set_userfaultfd_bytes(const char *opt)
-{
-	size_t userfaultfd_bytes;
-
-	userfaultfd_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("userfaultfd-bytes", userfaultfd_bytes,
-		MIN_USERFAULT_BYTES, MAX_USERFAULT_BYTES);
-	return stress_set_setting("userfaultfd-bytes", TYPE_ID_SIZE_T, &userfaultfd_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_userfaultfd_bytes,	stress_set_userfaultfd_bytes },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_userfaultfd_bytes, "userfaultfd-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_USERFAULT_BYTES, MAX_USERFAULT_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_USERFAULTFD) && 		\
     defined(HAVE_LINUX_USERFAULTFD_H) && 	\
     defined(HAVE_CLONE) &&			\
+    defined(HAVE_POLL_H) &&		 	\
+    defined(HAVE_POLL) &&		 	\
     defined(HAVE_POSIX_MEMALIGN)
 
 #define STRESS_USERFAULT_REPORT_ALWAYS		(0x01)
@@ -125,6 +120,7 @@ static int stress_userfaultfd_error(const char *name, const int err, const int m
 			} else {
 				pr_fail("%s: userfaultfd() failed, errno=%d (%s)\n",
 					name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 			}
 		}
 		break;
@@ -177,7 +173,7 @@ static int stress_userfaultfd_clone(void *arg)
 		register const uint8_t *end = c->data + c->sz;
 
 		/* hint we don't need these pages */
-		if (shim_madvise(c->data, c->sz, MADV_DONTNEED) < 0) {
+		if (UNLIKELY(shim_madvise(c->data, c->sz, MADV_DONTNEED) < 0)) {
 			pr_fail("%s: madvise failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -1;
@@ -203,7 +199,7 @@ static inline int handle_page_fault(
 	const uint8_t *data_end,
 	const size_t page_size)
 {
-	if ((addr < data_start) || (addr >= data_end)) {
+	if (UNLIKELY((addr < data_start) || (addr >= data_end))) {
 		pr_fail("%s: page fault address is out of range\n", args->name);
 		return -1;
 	}
@@ -213,11 +209,11 @@ static inline int handle_page_fault(
 
 		copy.copy = 0;
 		copy.mode = 0;
-		copy.dst = (unsigned long)addr;
-		copy.src = (unsigned long)zero_page;
+		copy.dst = (unsigned long int)addr;
+		copy.src = (unsigned long int)zero_page;
 		copy.len = page_size;
 
-		if (ioctl(fd, UFFDIO_COPY, &copy) < 0) {
+		if (UNLIKELY(ioctl(fd, UFFDIO_COPY, &copy) < 0)) {
 			pr_fail("%s: page fault ioctl UFFDIO_COPY failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -1;
@@ -225,10 +221,10 @@ static inline int handle_page_fault(
 	} else {
 		struct uffdio_zeropage zeropage;
 
-		zeropage.range.start = (unsigned long)addr;
+		zeropage.range.start = (unsigned long int)addr;
 		zeropage.range.len = page_size;
 		zeropage.mode = 0;
-		if (ioctl(fd, UFFDIO_ZEROPAGE, &zeropage) < 0) {
+		if (UNLIKELY(ioctl(fd, UFFDIO_ZEROPAGE, &zeropage) < 0)) {
 			pr_fail("%s: page fault ioctl UFFDIO_ZEROPAGE failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -1;
@@ -260,7 +256,7 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 	bool do_poll = true;
 	static uint8_t stack[STACK_SIZE]; /* Child clone stack */
 	uint8_t *stack_top = (uint8_t *)stress_get_stack_top((void *)stack, STACK_SIZE);
-	size_t userfaultfd_bytes = DEFAULT_USERFAULT_BYTES;
+	size_t userfaultfd_bytes, userfaultfd_bytes_total = DEFAULT_USERFAULT_BYTES;
 	double t, duration = 0.0, rate;
 
 	if (stress_sigchld_set_handler(args) < 0)
@@ -269,22 +265,25 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 	(void)context;
 	(void)shim_memset(stack, 0, sizeof(stack));
 
-	if (!stress_get_setting("userfaultfd-bytes", &userfaultfd_bytes)) {
+	if (!stress_get_setting("userfaultfd-bytes", &userfaultfd_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			userfaultfd_bytes = MAX_32;
+			userfaultfd_bytes_total = MAX_32;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			userfaultfd_bytes = MIN_USERFAULT_BYTES;
+			userfaultfd_bytes_total = MIN_USERFAULT_BYTES;
 	}
-	userfaultfd_bytes /= args->num_instances;
+	userfaultfd_bytes = userfaultfd_bytes_total / args->instances;
 	if (userfaultfd_bytes < MIN_USERFAULT_BYTES)
 		userfaultfd_bytes = MIN_USERFAULT_BYTES;
 	if (userfaultfd_bytes < args->page_size)
 		userfaultfd_bytes = args->page_size;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, userfaultfd_bytes, userfaultfd_bytes * args->instances);
 
 	sz = userfaultfd_bytes & ~(page_size - 1);
 
 	if (posix_memalign(&zero_page, page_size, page_size)) {
-		pr_err("%s: zero page allocation failed\n", args->name);
+		pr_err("%s: failed to alloce %zu byte zero page%s\n",
+			args->name, page_size, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -292,9 +291,12 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (data == MAP_FAILED) {
 		rc = EXIT_NO_RESOURCE;
-		pr_err("%s: mmap failed\n", args->name);
+		pr_err("%s: failed to mmap %zu byte buffer%s, errno=%d (%s)\n",
+			args->name, sz, stress_get_memfree_str(),
+			errno, strerror(errno));
 		goto free_zeropage;
 	}
+	stress_set_vma_anon_name(data, sz, "userfaultfd-data");
 
 	/* Exercise invalid flags */
 	fd = shim_userfaultfd(~0);
@@ -331,7 +333,7 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 
 	/* Register fault handling mode */
 	(void)shim_memset(&reg, 0, sizeof(reg));
-	reg.range.start = (unsigned long)data;
+	reg.range.start = (unsigned long int)data;
 	reg.range.len = sz;
 	reg.mode = UFFDIO_REGISTER_MODE_MISSING;
 	if (ioctl(fd, UFFDIO_REGISTER, &reg) < 0) {
@@ -363,6 +365,8 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 	c.page_size = page_size;
 	c.parent = self;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
@@ -385,7 +389,7 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 		double counter;
 
 		/* check we should break out before we block on the read */
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		t = stress_time_now();
@@ -410,7 +414,7 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 				if (errno != ENOMEM) {
 					pr_fail("%s: poll failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
-					if (!stress_continue_flag())
+					if (UNLIKELY(!stress_continue_flag()))
 						break;
 				}
 				/*
@@ -432,12 +436,12 @@ static int stress_userfaultfd_child(stress_args_t *args, void *context)
 
 do_read:
 		ret = read(fd, &msg, sizeof(msg));
-		if (ret < 0) {
-			if (errno == EINTR)
+		if (UNLIKELY(ret < 0)) {
+			if ((errno == EINTR) || (errno == EAGAIN))
 				continue;
 			pr_fail("%s: read failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			continue;
 		}
@@ -461,13 +465,12 @@ do_read:
 
 		rate = (counter > 0.0) ? duration / counter : 0.0;
 		stress_metrics_set(args, 0, "nanosecs per page fault",
-			rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+			rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 		(void)shim_memset(&wake, 0, sizeof(wake));
 		wake.start = (uintptr_t)data;
 		wake.len = page_size;
 		VOID_RET(int, ioctl(fd, UFFDIO_WAKE, &wake));
-
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -483,7 +486,7 @@ unreg:
 	}
 unmap_data:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	(void)munmap(data, sz);
+	(void)munmap((void *)data, sz);
 free_zeropage:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	free(zero_page);
@@ -502,19 +505,19 @@ static int stress_userfaultfd(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_userfaultfd_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_userfaultfd_info = {
+const stressor_info_t stress_userfaultfd_info = {
 	.stressor = stress_userfaultfd,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.supported = stress_userfaultfd_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_userfaultfd_info = {
+const stressor_info_t stress_userfaultfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/userfaultfd.h, clone(), posix_memalign() or userfaultfd()"

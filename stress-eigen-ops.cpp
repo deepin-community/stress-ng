@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,10 +20,12 @@ extern "C" {
 #include "config.h"
 #include "stress-eigen-ops.h"
 
-double stress_time_now(void);
+extern double stress_time_now(void);
 }
 
 #if defined(HAVE_EIGEN)
+
+#define THRESHOLD	(0.0001)
 
 #include <eigen3/Eigen/Dense>
 using namespace Eigen;
@@ -49,7 +51,7 @@ template <typename T> static int eigen_add(const size_t size, double *duration, 
 		*duration += stress_time_now() - t;
 		*count += 1.0;
 
-		r = ((result_check - result).norm() == 0);
+		r = ((result_check - result).norm() < THRESHOLD);
 		if (!r)
 			return EXIT_FAILURE;
 	} catch (...) {
@@ -79,7 +81,7 @@ template <typename T> static int eigen_multiply(const size_t size, double *durat
 		*duration += stress_time_now() - t;
 		*count += 1.0;
 
-		r = ((result_check - result).norm() == 0);
+		r = ((result_check - result).norm() < THRESHOLD);
 		if (!r)
 			return EXIT_FAILURE;
 	} catch (...) {
@@ -108,7 +110,7 @@ template <typename T> static int eigen_transpose(const size_t size, double *dura
 		*duration += stress_time_now() - t;
 		*count += 1.0;
 
-		r = ((result_check - result).norm() == 0);
+		r = ((result_check - result).norm() < THRESHOLD);
 		if (!r)
 			return EXIT_FAILURE;
 	} catch (...) {
@@ -137,7 +139,7 @@ template <typename T> static int eigen_inverse(const size_t size, double *durati
 		*duration += stress_time_now() - t;
 		*count += 1.0;
 
-		r = ((result_check - result).norm() == 0);
+		r = ((result_check - result).norm() < THRESHOLD);
 		if (!r)
 			return EXIT_FAILURE;
 	} catch (...) {

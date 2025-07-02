@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,7 +22,7 @@
 
 static const stress_help_t help[] = {
 	{ NULL,	"usersyscall N",	"start N workers exercising a userspace system call handler" },
-	{ NULL,	"usersyscall-ops N", 	"stop after N successful SIGSYS system callls" },
+	{ NULL,	"usersyscall-ops N", 	"stop after N successful SIGSYS system calls" },
 	{ NULL,	NULL,		 	NULL }
 };
 
@@ -103,9 +103,9 @@ static int stress_supported(const char *name)
  *  x86_64_syscall0()
  *      syscall 0 arg wrapper
  */
-static inline long x86_64_syscall0(const long number)
+static inline long int x86_64_syscall0(const long int number)
 {
-	register long ret;
+	register long int ret;
 
 	__asm__ __volatile__("syscall\n\t"
 			: "=a" (ret)
@@ -130,7 +130,7 @@ static int stress_sigsys_libc_mapping(uintptr_t *begin, uintptr_t *end)
 	uint64_t offset, dev_major, dev_minor, inode;
 
 	fp = fopen("/proc/self/maps", "r");
-	if (!fp)
+	if (UNLIKELY(!fp))
 		goto err;
 
 	*begin = ~(uintptr_t)0;
@@ -223,12 +223,14 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 
 	ret = sigaction(SIGSYS, &action, NULL);
 	if (ret < 0) {
-		pr_fail("%s: sigaction SIGSYS: errno=%d (%s)\n",
+		pr_fail("%s: sigaction SIGSYS failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 	(void)shim_memset(&siginfo, 0, sizeof(siginfo));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -246,7 +248,7 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 		}
 		/*  Expect ENOSYS for the system call return */
 		errno = 0;
-		VOID_RET(long, syscall(USR_SYSCALL));
+		VOID_RET(long int, syscall(USR_SYSCALL));
 		if (UNLIKELY(errno != ENOSYS)) {
 			pr_fail("%s: didn't get ENOSYS on user syscall, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -256,7 +258,7 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 		 *  Test case 2: call user syscall with
 		 *  dispatcher enabled
 		 */
-		if (metrics_count++ < 1000) {
+		if (LIKELY(metrics_count++ < 1000)) {
 			dispatcher_on();
 			ret = (int)syscall(USR_SYSCALL);
 			dispatcher_off();
@@ -301,7 +303,8 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 
 #if defined(STRESS_EXERCISE_X86_SYSCALL)
 		if (libc_ok) {
-			int saved_errno, ret_libc, ret_not_libc;
+			int saved_errno, ret_not_libc;
+			const int ret_libc = (int)syscall(__NR_getpid);
 
 			/*
 			 *  Test case 3: call syscall with libc syscall bounds.
@@ -315,14 +318,6 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 				pr_inf("%s: user dispatch failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 			}
-
-			/*
-			 *  getpid via the libc syscall, normal system call
-			 */
-			errno = 0;
-			dispatcher_on();
-			ret_libc = (int)syscall(__NR_getpid);
-			dispatcher_off();
 
 			/*
 			 *  getpid via non-libc syscall, will be handled by SIGSYS
@@ -357,16 +352,16 @@ static int OPTIMIZE3 stress_usersyscall(stress_args_t *args)
 	rc = EXIT_SUCCESS;
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per syscall",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 err:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return rc;
 }
 
-stressor_info_t stress_usersyscall_info = {
+const stressor_info_t stress_usersyscall_info = {
 	.stressor = stress_usersyscall,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
@@ -374,9 +369,9 @@ stressor_info_t stress_usersyscall_info = {
 
 #else
 
-stressor_info_t stress_usersyscall_info = {
+const stressor_info_t stress_usersyscall_info = {
         .stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
         .help = help,
 	.unimplemented_reason = "only supported on Linux",

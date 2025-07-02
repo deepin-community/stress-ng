@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -88,6 +88,8 @@ static int stress_sigchld(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -98,9 +100,9 @@ again:
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
-			pr_err("%s: fork failed: %d (%s)\n",
+			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
 		} else if (pid == 0) {
@@ -118,11 +120,10 @@ again:
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	pr_dbg("%s: exit: %" PRIu64 ", kill: %" PRIu64
-		", stop: %" PRIu64 ", continue: %" PRIu64 "\n",
-		args->name,
-		cld_exited, cld_killed,
-		cld_stopped, cld_continued);
+	stress_metrics_set(args, 0, "child exited", (double)cld_exited, STRESS_METRIC_TOTAL);
+	stress_metrics_set(args, 1, "child killed", (double)cld_killed, STRESS_METRIC_TOTAL);
+	stress_metrics_set(args, 2, "child stopped", (double)cld_stopped, STRESS_METRIC_TOTAL);
+	stress_metrics_set(args, 3, "child continued", (double)cld_continued, STRESS_METRIC_TOTAL);
 
 #if !defined(__OpenBSD__)
 	/*
@@ -140,9 +141,9 @@ finish:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_sigchld_info = {
+const stressor_info_t stress_sigchld_info = {
 	.stressor = stress_sigchld,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

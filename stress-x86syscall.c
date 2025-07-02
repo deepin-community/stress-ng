@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-arch.h"
 #include "core-cpu.h"
 
+#include <time.h>
+
 static const stress_help_t help[] = {
 	{ NULL,	"x86syscall N",		"start N workers exercising functions using syscall" },
 	{ NULL,	"x86syscall-func F",	"use just syscall function F" },
@@ -28,33 +30,23 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_x86syscall_func()
- *      set the default x86syscall function
- */
-static int stress_set_x86syscall_func(const char *name)
-{
-	return stress_set_setting("x86syscall-func", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_x86syscall_func,	stress_set_x86syscall_func },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_x86syscall_func, "x86syscall-func", TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__) &&		\
     !defined(HAVE_COMPILER_PCC) &&	\
     defined(STRESS_ARCH_X86_64)
 
-typedef long (*stress_wfunc_t)(void);
+typedef long int (*stress_wrapper_func_t)(void);
 
 /*
  *  syscall symbol mapping name to address and wrapper function
  */
 typedef struct stress_x86syscall {
-	const stress_wfunc_t func;	/* Wrapper function */
-	const char *name;		/* Function name */
-	bool exercise;			/* True = exercise the syscall */
+	const stress_wrapper_func_t func;	/* Wrapper function */
+	const char *name;			/* Function name */
 } stress_x86syscall_t;
 
 /*
@@ -94,9 +86,9 @@ static int stress_x86syscall_supported(const char *name)
  *  x86_64_syscall0()
  *	syscall 0 arg wrapper
  */
-static inline long OPTIMIZE3 x86_64_syscall0(long number)
+static inline long int OPTIMIZE3 x86_64_syscall0(long int number)
 {
-	long ret;
+	long int ret;
 
 	__asm__ __volatile__("syscall\n\t"
 			: "=a" (ret)
@@ -113,11 +105,11 @@ static inline long OPTIMIZE3 x86_64_syscall0(long number)
  *  x86_64_syscall1()
  *	syscall 1 arg wrapper
  */
-static inline long OPTIMIZE3 x86_64_syscall1(long number, long arg1)
+static inline long int OPTIMIZE3 x86_64_syscall1(long int number, long int arg1)
 {
-	long ret;
-	long tmp_arg1 = arg1;
-	register long asm_arg1 __asm__("rdi") = tmp_arg1;
+	long int ret;
+	long int tmp_arg1 = arg1;
+	register long int asm_arg1 __asm__("rdi") = tmp_arg1;
 
 	__asm__ __volatile__("syscall\n\t"
 			: "=a" (ret)
@@ -134,13 +126,13 @@ static inline long OPTIMIZE3 x86_64_syscall1(long number, long arg1)
  *  x86_64_syscall2()
  *	syscall 2 arg wrapper
  */
-static inline long OPTIMIZE3 x86_64_syscall2(long number, long arg1, long arg2)
+static inline long int OPTIMIZE3 x86_64_syscall2(long int number, int long arg1, int long arg2)
 {
-	long ret;
-	long tmp_arg1 = arg1;
-	long tmp_arg2 = arg2;
-	register long asm_arg1 __asm__("rdi") = tmp_arg1;
-	register long asm_arg2 __asm__("rsi") = tmp_arg2;
+	long int ret;
+	long int tmp_arg1 = arg1;
+	long int tmp_arg2 = arg2;
+	register long int asm_arg1 __asm__("rdi") = tmp_arg1;
+	register long int asm_arg2 __asm__("rsi") = tmp_arg2;
 
 	__asm__ __volatile__("syscall\n\t"
 			: "=a" (ret)
@@ -157,15 +149,15 @@ static inline long OPTIMIZE3 x86_64_syscall2(long number, long arg1, long arg2)
  *  x86_64_syscall3()
  *	syscall 3 arg wrapper
  */
-static inline long OPTIMIZE3 x86_64_syscall3(long number, long arg1, long arg2, long arg3)
+static inline long int OPTIMIZE3 x86_64_syscall3(long int number, long int arg1, long int arg2, long int arg3)
 {
-	long ret;
-	long tmp_arg1 = arg1;
-	long tmp_arg2 = arg2;
-	long tmp_arg3 = arg3;
-	register long asm_arg1 __asm__("rdi") = tmp_arg1;
-	register long asm_arg2 __asm__("rsi") = tmp_arg2;
-	register long asm_arg3 __asm__("rdx") = tmp_arg3;
+	long int ret;
+	long int tmp_arg1 = arg1;
+	long int tmp_arg2 = arg2;
+	long int tmp_arg3 = arg3;
+	register long int asm_arg1 __asm__("rdi") = tmp_arg1;
+	register long int asm_arg2 __asm__("rsi") = tmp_arg2;
+	register long int asm_arg3 __asm__("rdx") = tmp_arg3;
 
 	__asm__ __volatile__("syscall\n\t"
 			: "=a" (ret)
@@ -183,7 +175,7 @@ static inline long OPTIMIZE3 x86_64_syscall3(long number, long arg1, long arg2, 
  *  wrap_getuid()
  *	invoke getuid()
  */
-static long wrap_getuid(void)
+static long int OPTIMIZE3 wrap_getuid(void)
 {
 	return x86_64_syscall0(__NR_getuid);
 }
@@ -194,7 +186,7 @@ static long wrap_getuid(void)
  *  wrap_geteuid()
  *	invoke geteuid()
  */
-static long wrap_geteuid(void)
+static long int OPTIMIZE3 wrap_geteuid(void)
 {
 	return x86_64_syscall0(__NR_geteuid);
 }
@@ -205,7 +197,7 @@ static long wrap_geteuid(void)
  *  wrap_getgid()
  *	invoke getgid()
  */
-static long wrap_getgid(void)
+static long int OPTIMIZE3 wrap_getgid(void)
 {
 	return x86_64_syscall0(__NR_getgid);
 }
@@ -216,7 +208,7 @@ static long wrap_getgid(void)
  *  wrap_getpid()
  *	invoke getpid()
  */
-static long wrap_getpid(void)
+static long int OPTIMIZE3 wrap_getpid(void)
 {
 	return x86_64_syscall0(__NR_getpid);
 }
@@ -227,11 +219,11 @@ static long wrap_getpid(void)
  *  wrap_getcpu()
  *	invoke getcpu()
  */
-static long wrap_getcpu(void)
+static long int wrap_getcpu(void)
 {
-	unsigned cpu, node;
+	unsigned int cpu, node;
 
-	return x86_64_syscall3(__NR_getcpu, (long)&cpu, (long)&node, (long)NULL);
+	return x86_64_syscall3(__NR_getcpu, (long int)&cpu, (long int)&node, (long int)NULL);
 }
 #endif
 
@@ -240,11 +232,11 @@ static long wrap_getcpu(void)
  *  wrap_gettimeofday()
  *	invoke gettimeofday()
  */
-static long wrap_gettimeofday(void)
+static long int wrap_gettimeofday(void)
 {
 	struct timeval tv;
 
-	return x86_64_syscall2(__NR_gettimeofday, (long)&tv, (long)NULL);
+	return x86_64_syscall2(__NR_gettimeofday, (long int)&tv, (long int)NULL);
 }
 #endif
 
@@ -253,11 +245,11 @@ static long wrap_gettimeofday(void)
  *  wrap_time()
  *	invoke time()
  */
-static long wrap_time(void)
+static long int wrap_time(void)
 {
 	time_t t;
 
-	return x86_64_syscall1(__NR_time, (long)&t);
+	return x86_64_syscall1(__NR_time, (long int)&t);
 }
 #endif
 
@@ -265,46 +257,39 @@ static long wrap_time(void)
  *  wrap_dummy()
  *	dummy empty function for baseline
  */
-static long wrap_dummy(void)
+static long int wrap_dummy(void)
 {
-	return (long)-1;
+	return (long int)-1;
 }
 
 /*
  *  mapping of wrappers to function symbol name
  */
-static stress_x86syscall_t x86syscalls[] = {
+static const stress_x86syscall_t x86syscalls[] = {
 #if defined(__NR_getcpu)
-	{ wrap_getcpu,		"getcpu",		true },
+	{ wrap_getcpu,		"getcpu" },
 #endif
 #if defined(__NR_geteuid)
-	{ wrap_geteuid,		"geteuid",		true },
+	{ wrap_geteuid,		"geteuid" },
 #endif
 #if defined(__NR_getgid)
-	{ wrap_getgid,		"getgid",		true },
+	{ wrap_getgid,		"getgid" },
 #endif
 #if defined(__NR_getpid)
-	{ wrap_getpid,		"getpid",		true },
+	{ wrap_getpid,		"getpid" },
 #endif
 #if defined(__NR_gettimeofday)
-	{ wrap_gettimeofday,	"gettimeofday",		true },
+	{ wrap_gettimeofday,	"gettimeofday" },
 #endif
 #if defined(__NR_getuid)
-	{ wrap_getuid,		"getuid",		true },
+	{ wrap_getuid,		"getuid" },
 #endif
 #if defined(__NR_time)
-	{ wrap_time,		"time",			true },
+	{ wrap_time,		"time" },
 #endif
 };
 
-/*
- *  mapping of wrappers for instrumentation measurement,
- *  MUST NOT be static to avoid optimizer from removing the
- *  indirect calls
- */
-stress_x86syscall_t dummy_x86syscalls[] = {
-	{ wrap_dummy,		"dummy",		true },
-};
+static bool x86syscalls_exercise[SIZEOF_ARRAY(x86syscalls)];
 
 /*
  *  x86syscall_list_str()
@@ -316,7 +301,7 @@ static char *x86syscall_list_str(void)
 	size_t i, len = 0;
 
 	for (i = 0; i < SIZEOF_ARRAY(x86syscalls); i++) {
-		if (x86syscalls[i].exercise) {
+		if (x86syscalls_exercise[i]) {
 			char *tmp;
 
 			len += (strlen(x86syscalls[i].name) + 2);
@@ -355,7 +340,7 @@ static int x86syscall_check_x86syscall_func(void)
 		const bool match = !strcmp(x86syscalls[i].name, name);
 
 		exercise |= match;
-		x86syscalls[i].exercise = match;
+		x86syscalls_exercise[i] = match;
 	}
 
 	if (!exercise) {
@@ -376,14 +361,17 @@ static int stress_x86syscall(stress_args_t *args)
 {
 	double t1, t2, t3, t4, dt, overhead_ns;
 	uint64_t counter;
-	stress_wfunc_t x86syscall_funcs[SIZEOF_ARRAY(x86syscalls)] ALIGN64;
+	stress_wrapper_func_t x86syscall_funcs[SIZEOF_ARRAY(x86syscalls)] ALIGN64;
 	register size_t i, n;
 	int rc = EXIT_SUCCESS;
+
+	for (i = 0; i < SIZEOF_ARRAY(x86syscalls); i++)
+		x86syscalls_exercise[i] = true;
 
 	if (x86syscall_check_x86syscall_func() < 0)
 		return EXIT_FAILURE;
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		char *str = x86syscall_list_str();
 
 		if (str) {
@@ -394,10 +382,12 @@ static int stress_x86syscall(stress_args_t *args)
 	}
 
 	for (i = 0, n = 0; i < SIZEOF_ARRAY(x86syscalls); i++) {
-		if (x86syscalls[i].exercise)
+		if (x86syscalls_exercise[i])
 			x86syscall_funcs[n++] = x86syscalls[i].func;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t1 = stress_time_now();
@@ -437,9 +427,9 @@ static int stress_x86syscall(stress_args_t *args)
 		const double ns = ((dt * (double)STRESS_NANOSECOND) / (double)c) - overhead_ns;
 
 		stress_metrics_set(args, 0, "nanosecs per call (excluding test overhead",
-			ns, STRESS_HARMONIC_MEAN);
+			ns, STRESS_METRIC_HARMONIC_MEAN);
 		stress_metrics_set(args, 1, "nanosecs for test overhead",
-			overhead_ns, STRESS_HARMONIC_MEAN);
+			overhead_ns, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
 	/*
@@ -451,8 +441,8 @@ static int stress_x86syscall(stress_args_t *args)
 		const pid_t pid2 = (pid_t)x86_64_syscall0(__NR_getpid);
 
 		if (pid1 != pid2) {
-			pr_fail("%s: getpid syscall returned PID %jd, "
-				"expected PID %jd\n",
+			pr_fail("%s: getpid syscall returned PID %" PRIdMAX ", "
+				"expected PID %" PRIdMAX "\n",
 				args->name, (intmax_t)pid2, (intmax_t)pid1);
 			rc = EXIT_FAILURE;
 		}
@@ -464,8 +454,8 @@ static int stress_x86syscall(stress_args_t *args)
 		const pid_t gid2 = (gid_t)x86_64_syscall0(__NR_getgid);
 
 		if (gid1 != gid2) {
-			pr_fail("%s: getgid syscall returned GID %jd, "
-				"expected GID %jd\n",
+			pr_fail("%s: getgid syscall returned GID %" PRIdMAX ", "
+				"expected GID %" PRIdMAX "\n",
 				args->name, (intmax_t)gid2, (intmax_t)gid1);
 			rc = EXIT_FAILURE;
 		}
@@ -477,8 +467,8 @@ static int stress_x86syscall(stress_args_t *args)
 		const uid_t uid2 = (uid_t)x86_64_syscall0(__NR_getuid);
 
 		if (uid1 != uid2) {
-			pr_fail("%s: getuid syscall returned UID %jd, "
-				"expected UID %jd\n",
+			pr_fail("%s: getuid syscall returned UID %" PRIdMAX ", "
+				"expected UID %" PRIdMAX "\n",
 				args->name, (intmax_t)uid2, (intmax_t)uid1);
 			rc = EXIT_FAILURE;
 		}
@@ -490,8 +480,8 @@ static int stress_x86syscall(stress_args_t *args)
 		const uid_t uid2 = (uid_t)x86_64_syscall0(__NR_geteuid);
 
 		if (uid1 != uid2) {
-			pr_fail("%s: geteuid syscall returned UID %jd, "
-				"expected UID %jd\n",
+			pr_fail("%s: geteuid syscall returned UID %" PRIdMAX ", "
+				"expected UID %" PRIdMAX "\n",
 				args->name, (intmax_t)uid2, (intmax_t)uid1);
 			rc = EXIT_FAILURE;
 		}
@@ -499,10 +489,10 @@ static int stress_x86syscall(stress_args_t *args)
 #endif
 #if defined(__NR_time)
 	{
-		time_t time1, time2;
+		time_t time1 = 0, time2 = 0;
 
 		if ((time(&time1) != (time_t)-1) &&
-		    ((time_t)x86_64_syscall1(__NR_time, (long)&time2) != (time_t)-1)) {
+		    ((time_t)x86_64_syscall1(__NR_time, (long int)&time2) != (time_t)-1)) {
 			if (time2 < time1) {
 				pr_fail("%s: time syscall returned %" PRIdMAX
 					" which was less than expected value %" PRIdMAX "\n",
@@ -535,19 +525,19 @@ static int stress_x86syscall(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_x86syscall_info = {
+const stressor_info_t stress_x86syscall_info = {
 	.stressor = stress_x86syscall,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_x86syscall_supported,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_x86syscall_info = {
+const stressor_info_t stress_x86syscall_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.verify = VERIFY_ALWAYS,
 	.unimplemented_reason = "only supported on Linux x86-64 and non-PCC compilers"

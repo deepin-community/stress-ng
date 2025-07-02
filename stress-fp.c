@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,7 @@
 #include "stress-ng.h"
 #include "core-arch.h"
 #include "core-attribute.h"
+#include "core-builtin.h"
 #include "core-madvise.h"
 #include "core-put.h"
 #include "core-target-clones.h"
@@ -42,7 +43,9 @@
 #define STRESS_FP_TYPE_FLOAT64		(6)
 #define STRESS_FP_TYPE_FLOAT80		(7)
 #define STRESS_FP_TYPE_FLOAT128		(8)
-#define STRESS_FP_TYPE_ALL		(9)
+#define STRESS_FP_TYPE_IBM128		(9)
+#define STRESS_FP_TYPE_BF16		(10)
+#define STRESS_FP_TYPE_ALL		(11)
 
 static const stress_help_t help[] = {
 	{ NULL,	"fp N",	 	"start N workers performing floating point math ops" },
@@ -76,6 +79,16 @@ typedef struct {
 		float mul;		/* value to multiply */
 		float mul_rev;		/* value to multiply to revert back */
 	} f;
+#if defined(HAVE__bf16)
+	struct {
+		__bf16 r_init;		/* initialization value for r */
+		__bf16 r[2];		/* result of computation */
+		__bf16 add;		/* value to add */
+		__bf16 add_rev;		/* value to add to revert back */
+		__bf16 mul;		/* value to multiply */
+		__bf16 mul_rev;		/* value to multiply to revert back */
+	} bf16;
+#endif
 #if defined(HAVE_Float16)
 	struct {
 		_Float16 r_init;	/* initialization value for r */
@@ -134,52 +147,61 @@ typedef struct {
 		_Float128 mul;		/* value to multiply */
 		_Float128 mul_rev;	/* value to multiply to revert back */
 	} f128;
-
+#endif
+#if defined(HAVE__ibm128)
+	struct {
+		__ibm128 r_init;	/* initialization value for r */
+		__ibm128 r[2];	/* result of computation */
+		__ibm128 add;		/* value to add */
+		__ibm128 add_rev;	/* value to add to revert back */
+		__ibm128 mul;		/* value to multiply */
+		__ibm128 mul_rev;	/* value to multiply to revert back */
+	} ibm128;
 #endif
 } fp_data_t;
 
 typedef double (*stress_fp_func_t)(
 	stress_args_t *args,
 	fp_data_t *fp_data,
-	const int index);
+	const int idx);
 
 static double stress_fp_all(
 	stress_args_t *args,
 	fp_data_t *fp_data,
-	const int index);
+	const int idx);
 
 #define STRESS_FP_ADD(field, name, do_bogo_ops)				\
 static double TARGET_CLONES OPTIMIZE3 name(				\
-	stress_args_t *args,					\
+	stress_args_t *args,						\
 	fp_data_t *fp_data,						\
-	const int index)						\
+	const int idx)							\
 {									\
 	register int i;							\
 	const int loops = LOOPS_PER_CALL >> 1;				\
 	double t1, t2;							\
 									\
 	for (i = 0; i < FP_ELEMENTS; i++) {				\
-		fp_data[i].field.r[index] = fp_data[i].field.r_init;	\
+		fp_data[i].field.r[idx] = fp_data[i].field.r_init;	\
 	}								\
 									\
 	t1 = stress_time_now();						\
 	for (i = 0; i < loops ; i++) {					\
-		fp_data[0].field.r[index] += fp_data[0].field.add;	\
-		fp_data[0].field.r[index] += fp_data[0].field.add_rev;	\
-		fp_data[1].field.r[index] += fp_data[1].field.add;	\
-		fp_data[1].field.r[index] += fp_data[1].field.add_rev;	\
-		fp_data[2].field.r[index] += fp_data[2].field.add;	\
-		fp_data[2].field.r[index] += fp_data[2].field.add_rev;	\
-		fp_data[3].field.r[index] += fp_data[3].field.add;	\
-		fp_data[3].field.r[index] += fp_data[3].field.add_rev;	\
-		fp_data[4].field.r[index] += fp_data[4].field.add;	\
-		fp_data[4].field.r[index] += fp_data[4].field.add_rev;	\
-		fp_data[5].field.r[index] += fp_data[5].field.add;	\
-		fp_data[5].field.r[index] += fp_data[5].field.add_rev;	\
-		fp_data[6].field.r[index] += fp_data[6].field.add;	\
-		fp_data[6].field.r[index] += fp_data[6].field.add_rev;	\
-		fp_data[7].field.r[index] += fp_data[7].field.add;	\
-		fp_data[7].field.r[index] += fp_data[7].field.add_rev;	\
+		fp_data[0].field.r[idx] += fp_data[0].field.add;	\
+		fp_data[0].field.r[idx] += fp_data[0].field.add_rev;	\
+		fp_data[1].field.r[idx] += fp_data[1].field.add;	\
+		fp_data[1].field.r[idx] += fp_data[1].field.add_rev;	\
+		fp_data[2].field.r[idx] += fp_data[2].field.add;	\
+		fp_data[2].field.r[idx] += fp_data[2].field.add_rev;	\
+		fp_data[3].field.r[idx] += fp_data[3].field.add;	\
+		fp_data[3].field.r[idx] += fp_data[3].field.add_rev;	\
+		fp_data[4].field.r[idx] += fp_data[4].field.add;	\
+		fp_data[4].field.r[idx] += fp_data[4].field.add_rev;	\
+		fp_data[5].field.r[idx] += fp_data[5].field.add;	\
+		fp_data[5].field.r[idx] += fp_data[5].field.add_rev;	\
+		fp_data[6].field.r[idx] += fp_data[6].field.add;	\
+		fp_data[6].field.r[idx] += fp_data[6].field.add_rev;	\
+		fp_data[7].field.r[idx] += fp_data[7].field.add;	\
+		fp_data[7].field.r[idx] += fp_data[7].field.add_rev;	\
 	}								\
 	t2 = stress_time_now();						\
 									\
@@ -190,36 +212,36 @@ static double TARGET_CLONES OPTIMIZE3 name(				\
 
 #define STRESS_FP_MUL(field, name, do_bogo_ops)				\
 static double TARGET_CLONES OPTIMIZE3 name(				\
-	stress_args_t *args,					\
+	stress_args_t *args,						\
 	fp_data_t *fp_data,						\
-	const int index)						\
+	const int idx)							\
 {									\
 	register int i;							\
 	const int loops = LOOPS_PER_CALL >> 1;				\
 	double t1, t2;							\
 									\
 	for (i = 0; i < FP_ELEMENTS; i++) {				\
-		fp_data[i].field.r[index] = fp_data[i].field.r_init;	\
+		fp_data[i].field.r[idx] = fp_data[i].field.r_init;	\
 	}								\
 									\
 	t1 = stress_time_now();						\
 	for (i = 0; i < loops ; i++) {					\
-		fp_data[0].field.r[index] *= fp_data[0].field.mul;	\
-		fp_data[0].field.r[index] *= fp_data[0].field.mul_rev;	\
-		fp_data[1].field.r[index] *= fp_data[1].field.mul;	\
-		fp_data[1].field.r[index] *= fp_data[1].field.mul_rev;	\
-		fp_data[2].field.r[index] *= fp_data[2].field.mul;	\
-		fp_data[2].field.r[index] *= fp_data[2].field.mul_rev;	\
-		fp_data[3].field.r[index] *= fp_data[3].field.mul;	\
-		fp_data[3].field.r[index] *= fp_data[3].field.mul_rev;	\
-		fp_data[4].field.r[index] *= fp_data[4].field.mul;	\
-		fp_data[4].field.r[index] *= fp_data[4].field.mul_rev;	\
-		fp_data[5].field.r[index] *= fp_data[5].field.mul;	\
-		fp_data[5].field.r[index] *= fp_data[5].field.mul_rev;	\
-		fp_data[6].field.r[index] *= fp_data[6].field.mul;	\
-		fp_data[6].field.r[index] *= fp_data[6].field.mul_rev;	\
-		fp_data[7].field.r[index] *= fp_data[7].field.mul;	\
-		fp_data[7].field.r[index] *= fp_data[7].field.mul_rev;	\
+		fp_data[0].field.r[idx] *= fp_data[0].field.mul;	\
+		fp_data[0].field.r[idx] *= fp_data[0].field.mul_rev;	\
+		fp_data[1].field.r[idx] *= fp_data[1].field.mul;	\
+		fp_data[1].field.r[idx] *= fp_data[1].field.mul_rev;	\
+		fp_data[2].field.r[idx] *= fp_data[2].field.mul;	\
+		fp_data[2].field.r[idx] *= fp_data[2].field.mul_rev;	\
+		fp_data[3].field.r[idx] *= fp_data[3].field.mul;	\
+		fp_data[3].field.r[idx] *= fp_data[3].field.mul_rev;	\
+		fp_data[4].field.r[idx] *= fp_data[4].field.mul;	\
+		fp_data[4].field.r[idx] *= fp_data[4].field.mul_rev;	\
+		fp_data[5].field.r[idx] *= fp_data[5].field.mul;	\
+		fp_data[5].field.r[idx] *= fp_data[5].field.mul_rev;	\
+		fp_data[6].field.r[idx] *= fp_data[6].field.mul;	\
+		fp_data[6].field.r[idx] *= fp_data[6].field.mul_rev;	\
+		fp_data[7].field.r[idx] *= fp_data[7].field.mul;	\
+		fp_data[7].field.r[idx] *= fp_data[7].field.mul_rev;	\
 	}								\
 	t2 = stress_time_now();						\
 									\
@@ -230,36 +252,36 @@ static double TARGET_CLONES OPTIMIZE3 name(				\
 
 #define STRESS_FP_DIV(field, name, do_bogo_ops)				\
 static double TARGET_CLONES OPTIMIZE3 name(				\
-	stress_args_t *args,					\
+	stress_args_t *args,						\
 	fp_data_t *fp_data,						\
-	const int index)						\
+	const int idx)							\
 {									\
 	register int i;							\
 	const int loops = LOOPS_PER_CALL >> 1;				\
 	double t1, t2;							\
 									\
 	for (i = 0; i < FP_ELEMENTS; i++) {				\
-		fp_data[i].field.r[index] = fp_data[i].field.r_init;	\
+		fp_data[i].field.r[idx] = fp_data[i].field.r_init;	\
 	}								\
 									\
 	t1 = stress_time_now();						\
-	for (i = 0; stress_continue_flag() && (i < loops); i++) {	\
-		fp_data[0].field.r[index] /= fp_data[0].field.mul;	\
-		fp_data[0].field.r[index] /= fp_data[0].field.mul_rev;	\
-		fp_data[1].field.r[index] /= fp_data[1].field.mul;	\
-		fp_data[1].field.r[index] /= fp_data[1].field.mul_rev;	\
-		fp_data[2].field.r[index] /= fp_data[2].field.mul;	\
-		fp_data[2].field.r[index] /= fp_data[2].field.mul_rev;	\
-		fp_data[3].field.r[index] /= fp_data[3].field.mul;	\
-		fp_data[3].field.r[index] /= fp_data[3].field.mul_rev;	\
-		fp_data[4].field.r[index] /= fp_data[4].field.mul;	\
-		fp_data[4].field.r[index] /= fp_data[4].field.mul_rev;	\
-		fp_data[5].field.r[index] /= fp_data[5].field.mul;	\
-		fp_data[5].field.r[index] /= fp_data[5].field.mul_rev;	\
-		fp_data[6].field.r[index] /= fp_data[6].field.mul;	\
-		fp_data[6].field.r[index] /= fp_data[6].field.mul_rev;	\
-		fp_data[7].field.r[index] /= fp_data[7].field.mul;	\
-		fp_data[7].field.r[index] /= fp_data[7].field.mul_rev;	\
+	for (i = 0; LIKELY(stress_continue_flag() && (i < loops)); i++) {\
+		fp_data[0].field.r[idx] /= fp_data[0].field.mul;	\
+		fp_data[0].field.r[idx] /= fp_data[0].field.mul_rev;	\
+		fp_data[1].field.r[idx] /= fp_data[1].field.mul;	\
+		fp_data[1].field.r[idx] /= fp_data[1].field.mul_rev;	\
+		fp_data[2].field.r[idx] /= fp_data[2].field.mul;	\
+		fp_data[2].field.r[idx] /= fp_data[2].field.mul_rev;	\
+		fp_data[3].field.r[idx] /= fp_data[3].field.mul;	\
+		fp_data[3].field.r[idx] /= fp_data[3].field.mul_rev;	\
+		fp_data[4].field.r[idx] /= fp_data[4].field.mul;	\
+		fp_data[4].field.r[idx] /= fp_data[4].field.mul_rev;	\
+		fp_data[5].field.r[idx] /= fp_data[5].field.mul;	\
+		fp_data[5].field.r[idx] /= fp_data[5].field.mul_rev;	\
+		fp_data[6].field.r[idx] /= fp_data[6].field.mul;	\
+		fp_data[6].field.r[idx] /= fp_data[6].field.mul_rev;	\
+		fp_data[7].field.r[idx] /= fp_data[7].field.mul;	\
+		fp_data[7].field.r[idx] /= fp_data[7].field.mul_rev;	\
 	}								\
 	t2 = stress_time_now();						\
 									\
@@ -279,6 +301,12 @@ STRESS_FP_DIV(d, stress_fp_double_div, true)
 STRESS_FP_ADD(f, stress_fp_float_add, true)
 STRESS_FP_MUL(f, stress_fp_float_mul, true)
 STRESS_FP_DIV(f, stress_fp_float_div, true)
+
+#if defined(HAVE__bf16)
+STRESS_FP_ADD(bf16, stress_fp_bf16_add, false)
+STRESS_FP_MUL(bf16, stress_fp_bf16_mul, false)
+STRESS_FP_DIV(bf16, stress_fp_bf16_div, false)
+#endif
 
 #if defined(HAVE_Float16)
 STRESS_FP_ADD(f16, stress_fp_float16_add, false)
@@ -311,78 +339,104 @@ STRESS_FP_MUL(f128, stress_fp_float128_mul, false)
 STRESS_FP_DIV(f128, stress_fp_float128_div, false)
 #endif
 
+#if defined(HAVE__ibm128)
+STRESS_FP_ADD(ibm128, stress_fp_ibm128_add, false)
+STRESS_FP_MUL(ibm128, stress_fp_ibm128_mul, false)
+STRESS_FP_DIV(ibm128, stress_fp_ibm128_div, false)
+#endif
+
 typedef struct {
 	const char *name;
 	const char *description;
 	const stress_fp_func_t	fp_func;
 	const int fp_type;
-	double duration;
-	double ops;
 } stress_fp_funcs_t;
 
-static stress_fp_funcs_t stress_fp_funcs[] = {
-	{ "all",		"all fp methods",	stress_fp_all,		STRESS_FP_TYPE_ALL,		0.0, 0.0 },
+static const stress_fp_funcs_t stress_fp_funcs[] = {
+	{ "all",		"all fp methods",	stress_fp_all,		STRESS_FP_TYPE_ALL },
 
 #if defined(HAVE__float128) ||	\
     defined(HAVE_Float128)
-	{ "float128add",	"float128 add",		stress_fp_float128_add,	STRESS_FP_TYPE_FLOAT128,	0.0, 0.0 },
+	{ "float128add",	"float128 add",		stress_fp_float128_add,	STRESS_FP_TYPE_FLOAT128 },
+#endif
+#if defined(HAVE__ibm128)
+	{ "ibm128add",		"ibm128 add",		stress_fp_ibm128_add,	STRESS_FP_TYPE_IBM128 },
 #endif
 #if defined(HAVE__float80)
-	{ "float80add",		"float80 add",		stress_fp_float80_add,	STRESS_FP_TYPE_FLOAT80,		0.0, 0.0 },
+	{ "float80add",		"float80 add",		stress_fp_float80_add,	STRESS_FP_TYPE_FLOAT80 },
 #endif
 #if defined(HAVE_Float64)
-	{ "float64add",		"float64 add",		stress_fp_float64_add,	STRESS_FP_TYPE_FLOAT64,		0.0, 0.0 },
+	{ "float64add",		"float64 add",		stress_fp_float64_add,	STRESS_FP_TYPE_FLOAT64 },
 #endif
 #if defined(HAVE_Float32)
-	{ "float32add",		"float32 add",		stress_fp_float32_add,	STRESS_FP_TYPE_FLOAT32,		0.0, 0.0 },
+	{ "float32add",		"float32 add",		stress_fp_float32_add,	STRESS_FP_TYPE_FLOAT32 },
+#endif
+#if defined(HAVE__bf16)
+	{ "bf16add",		"bf16 add",		stress_fp_bf16_add,	STRESS_FP_TYPE_BF16 },
 #endif
 #if defined(HAVE_Float16)
-	{ "float16add",		"float16 add",		stress_fp_float16_add,	STRESS_FP_TYPE_FLOAT16,		0.0, 0.0 },
+	{ "float16add",		"float16 add",		stress_fp_float16_add,	STRESS_FP_TYPE_FLOAT16 },
 #endif
-	{ "floatadd",		"float add",		stress_fp_float_add,	STRESS_FP_TYPE_FLOAT,		0.0, 0.0 },
-	{ "doubleadd",		"double add",		stress_fp_double_add,	STRESS_FP_TYPE_DOUBLE,		0.0, 0.0 },
-	{ "ldoubleadd",		"long double add",	stress_fp_ldouble_add,	STRESS_FP_TYPE_LONG_DOUBLE,	0.0, 0.0 },
+	{ "floatadd",		"float add",		stress_fp_float_add,	STRESS_FP_TYPE_FLOAT },
+	{ "doubleadd",		"double add",		stress_fp_double_add,	STRESS_FP_TYPE_DOUBLE },
+	{ "ldoubleadd",		"long double add",	stress_fp_ldouble_add,	STRESS_FP_TYPE_LONG_DOUBLE },
 
 #if defined(HAVE__float128) ||	\
     defined(HAVE_Float128)
-	{ "float128mul",	"float128 multiply",	stress_fp_float128_mul,	STRESS_FP_TYPE_FLOAT128,	0.0, 0.0 },
+	{ "float128mul",	"float128 multiply",	stress_fp_float128_mul,	STRESS_FP_TYPE_FLOAT128 },
+#endif
+#if defined(HAVE__ibm128)
+	{ "ibm128mul",		"ibm128 multiply",	stress_fp_ibm128_mul,	STRESS_FP_TYPE_IBM128 },
 #endif
 #if defined(HAVE__float80)
-	{ "float80mul",		"float80 multiply",	stress_fp_float80_mul,	STRESS_FP_TYPE_FLOAT80,		0.0, 0.0 },
+	{ "float80mul",		"float80 multiply",	stress_fp_float80_mul,	STRESS_FP_TYPE_FLOAT80 },
 #endif
 #if defined(HAVE_Float64)
-	{ "float64mul",		"float64 multiply",	stress_fp_float64_mul,	STRESS_FP_TYPE_FLOAT64,		0.0, 0.0 },
+	{ "float64mul",		"float64 multiply",	stress_fp_float64_mul,	STRESS_FP_TYPE_FLOAT64 },
 #endif
 #if defined(HAVE_Float32)
-	{ "float32mul",		"float32 multiply",	stress_fp_float32_mul,	STRESS_FP_TYPE_FLOAT32,		0.0, 0.0 },
+	{ "float32mul",		"float32 multiply",	stress_fp_float32_mul,	STRESS_FP_TYPE_FLOAT32 },
+#endif
+#if defined(HAVE__bf16)
+	{ "bf16mul",		"bf16 multiply",	stress_fp_bf16_mul,	STRESS_FP_TYPE_BF16 },
 #endif
 #if defined(HAVE_Float16)
-	{ "float16mul",		"float16 multiply",	stress_fp_float16_mul,	STRESS_FP_TYPE_FLOAT16,		0.0, 0.0 },
+	{ "float16mul",		"float16 multiply",	stress_fp_float16_mul,	STRESS_FP_TYPE_FLOAT16 },
 #endif
-	{ "floatmul",		"float multiply",	stress_fp_float_mul,	STRESS_FP_TYPE_FLOAT,		0.0, 0.0 },
-	{ "doublemul",		"double multiply",	stress_fp_double_mul,	STRESS_FP_TYPE_DOUBLE,		0.0, 0.0 },
-	{ "ldoublemul",		"long double multiply",	stress_fp_ldouble_mul,	STRESS_FP_TYPE_LONG_DOUBLE,	0.0, 0.0 },
+	{ "floatmul",		"float multiply",	stress_fp_float_mul,	STRESS_FP_TYPE_FLOAT },
+	{ "doublemul",		"double multiply",	stress_fp_double_mul,	STRESS_FP_TYPE_DOUBLE },
+	{ "ldoublemul",		"long double multiply",	stress_fp_ldouble_mul,	STRESS_FP_TYPE_LONG_DOUBLE },
 
 #if defined(HAVE__float128) || 	\
     defined(HAVE_Float128)
-	{ "float128div",	"float128 divide",	stress_fp_float128_div,	STRESS_FP_TYPE_FLOAT128,	0.0, 0.0 },
+	{ "float128div",	"float128 divide",	stress_fp_float128_div,	STRESS_FP_TYPE_FLOAT128 },
+#endif
+#if defined(HAVE__ibm128)
+	{ "ibm128div",		"ibm128 divide",	stress_fp_ibm128_div,	STRESS_FP_TYPE_IBM128 },
 #endif
 #if defined(HAVE__float80)
-	{ "float80div",		"float80 divide",	stress_fp_float80_div,	STRESS_FP_TYPE_FLOAT80,		0.0, 0.0 },
+	{ "float80div",		"float80 divide",	stress_fp_float80_div,	STRESS_FP_TYPE_FLOAT80 },
 #endif
 #if defined(HAVE_Float64)
-	{ "float64div",		"float64 divide",	stress_fp_float64_div,	STRESS_FP_TYPE_FLOAT64,		0.0, 0.0 },
+	{ "float64div",		"float64 divide",	stress_fp_float64_div,	STRESS_FP_TYPE_FLOAT64 },
 #endif
 #if defined(HAVE_Float32)
-	{ "float32div",		"float32 divide",	stress_fp_float32_div,	STRESS_FP_TYPE_FLOAT32,		0.0, 0.0 },
+	{ "float32div",		"float32 divide",	stress_fp_float32_div,	STRESS_FP_TYPE_FLOAT32 },
+#endif
+#if defined(HAVE__bf16)
+	{ "bf16div",		"bf16 divide",		stress_fp_bf16_div,	STRESS_FP_TYPE_BF16 },
 #endif
 #if defined(HAVE_Float16)
-	{ "float16div",		"float16 divide",	stress_fp_float16_div,	STRESS_FP_TYPE_FLOAT16,		0.0, 0.0 },
+	{ "float16div",		"float16 divide",	stress_fp_float16_div,	STRESS_FP_TYPE_FLOAT16 },
 #endif
-	{ "floatdiv",		"float divide",		stress_fp_float_div,	STRESS_FP_TYPE_FLOAT,		0.0, 0.0 },
-	{ "doublediv",		"double divide",	stress_fp_double_div,	STRESS_FP_TYPE_DOUBLE,		0.0, 0.0 },
-	{ "ldoublediv",		"long double divide",	stress_fp_ldouble_div,	STRESS_FP_TYPE_LONG_DOUBLE,	0.0, 0.0 },
+	{ "floatdiv",		"float divide",		stress_fp_float_div,	STRESS_FP_TYPE_FLOAT },
+	{ "doublediv",		"double divide",	stress_fp_double_div,	STRESS_FP_TYPE_DOUBLE },
+	{ "ldoublediv",		"long double divide",	stress_fp_ldouble_div,	STRESS_FP_TYPE_LONG_DOUBLE },
 };
+
+static stress_metrics_t stress_fp_metrics[SIZEOF_ARRAY(stress_fp_funcs)];
+
+#define STRESS_NUM_FP_FUNCS	(SIZEOF_ARRAY(stress_fp_funcs))
 
 typedef struct {
 	const int fp_type;
@@ -393,6 +447,7 @@ static const fp_type_map_t fp_type_map[] = {
 	{ STRESS_FP_TYPE_LONG_DOUBLE,	"long double" },
 	{ STRESS_FP_TYPE_DOUBLE,	"double" },
 	{ STRESS_FP_TYPE_FLOAT,		"float" },
+	{ STRESS_FP_TYPE_BF16,		"bf16" },
 	{ STRESS_FP_TYPE_FLOAT16,	"float16" },
 	{ STRESS_FP_TYPE_FLOAT32,	"float32" },
 	{ STRESS_FP_TYPE_FLOAT64,	"float64" },
@@ -412,36 +467,39 @@ static const char * PURE stress_fp_type(const int fp_type)
 	return "unknown";
 }
 
-static void stress_fp_call_method(
+static int stress_fp_call_method(
 	stress_args_t *args,
 	fp_data_t *fp_data,
 	const size_t method,
 	const bool verify)
 {
 	double dt;
-	stress_fp_funcs_t *func = &stress_fp_funcs[method];
+	const stress_fp_funcs_t *func = &stress_fp_funcs[method];
+	stress_metrics_t *metrics = &stress_fp_metrics[method];
 
 	dt = func->fp_func(args, fp_data, 0);
-	func->duration += dt;
-	func->ops += (FP_ELEMENTS * LOOPS_PER_CALL);
+	metrics->duration += dt;
+	metrics->count += (FP_ELEMENTS * LOOPS_PER_CALL);
 
-	if ((method > 0) && (method < SIZEOF_ARRAY(stress_fp_funcs)) && verify) {
+	if ((method > 0) && (method < STRESS_NUM_FP_FUNCS && verify)) {
 		register size_t i;
 		const int fp_type = stress_fp_funcs[method].fp_type;
 		const char *method_name = stress_fp_funcs[method].name;
 		const char *fp_description = stress_fp_type(fp_type);
 
 		dt = func->fp_func(args, fp_data, 1);
-		func->duration += dt;
-		func->ops += (FP_ELEMENTS * LOOPS_PER_CALL);
+		if (dt < 0.0)
+			return EXIT_FAILURE;
+		metrics->duration += dt;
+		metrics->count += (FP_ELEMENTS * LOOPS_PER_CALL);
 
 		/*
 		 *  a SIGALRM during 2nd computation pre-verification can
 		 *  cause long doubles on some arches to abort early, so
 		 *  don't verify these results
 		 */
-		if (!stress_continue_flag())
-			return;
+		if (UNLIKELY(!stress_continue_flag()))
+			return EXIT_SUCCESS;
 
 		for (i = 0; i < FP_ELEMENTS; i++) {
 			long double r0, r1;
@@ -449,37 +507,37 @@ static void stress_fp_call_method(
 
 			switch (fp_type) {
 			case STRESS_FP_TYPE_LONG_DOUBLE:
-				ret = memcmp(&fp_data[i].ld.r[0], &fp_data[i].ld.r[1], sizeof(fp_data[i].ld.r[0]));
+				ret = shim_memcmp(&fp_data[i].ld.r[0], &fp_data[i].ld.r[1], sizeof(fp_data[i].ld.r[0]));
 				r0 = (long double)fp_data[i].ld.r[0];
 				r1 = (long double)fp_data[i].ld.r[1];
 				break;
 			case STRESS_FP_TYPE_DOUBLE:
-				ret = memcmp(&fp_data[i].d.r[0], &fp_data[i].d.r[1], sizeof(fp_data[i].d.r[0]));
+				ret = shim_memcmp(&fp_data[i].d.r[0], &fp_data[i].d.r[1], sizeof(fp_data[i].d.r[0]));
 				r0 = (long double)fp_data[i].d.r[0];
 				r1 = (long double)fp_data[i].d.r[1];
 				break;
 			case STRESS_FP_TYPE_FLOAT:
-				ret = memcmp(&fp_data[i].f.r[0], &fp_data[i].f.r[1], sizeof(fp_data[i].f.r[0]));
+				ret = shim_memcmp(&fp_data[i].f.r[0], &fp_data[i].f.r[1], sizeof(fp_data[i].f.r[0]));
 				r0 = (long double)fp_data[i].f.r[0];
 				r1 = (long double)fp_data[i].f.r[1];
 				break;
 #if defined(HAVE_Float32)
 			case STRESS_FP_TYPE_FLOAT32:
-				ret = memcmp(&fp_data[i].f32.r[0], &fp_data[i].f32.r[1], sizeof(fp_data[i].f32.r[0]));
+				ret = shim_memcmp(&fp_data[i].f32.r[0], &fp_data[i].f32.r[1], sizeof(fp_data[i].f32.r[0]));
 				r0 = (long double)fp_data[i].f32.r[0];
 				r1 = (long double)fp_data[i].f32.r[1];
 				break;
 #endif
 #if defined(HAVE_Float64)
 			case STRESS_FP_TYPE_FLOAT64:
-				ret = memcmp(&fp_data[i].f64.r[0], &fp_data[i].f64.r[1], sizeof(fp_data[i].f64.r[0]));
+				ret = shim_memcmp(&fp_data[i].f64.r[0], &fp_data[i].f64.r[1], sizeof(fp_data[i].f64.r[0]));
 				r0 = (long double)fp_data[i].f64.r[0];
 				r1 = (long double)fp_data[i].f64.r[1];
 				break;
 #endif
 #if defined(HAVE__float80)
 			case STRESS_FP_TYPE_FLOAT80:
-				ret = memcmp(&fp_data[i].f80.r[0], &fp_data[i].f80.r[1], sizeof(fp_data[i].f80.r[0]));
+				ret = shim_memcmp(&fp_data[i].f80.r[0], &fp_data[i].f80.r[1], sizeof(fp_data[i].f80.r[0]));
 				r0 = (long double)fp_data[i].f80.r[0];
 				r1 = (long double)fp_data[i].f80.r[1];
 				break;
@@ -487,60 +545,39 @@ static void stress_fp_call_method(
 #if defined(HAVE__float128) ||	\
     defined(HAVE_Float128)
 			case STRESS_FP_TYPE_FLOAT128:
-				ret = memcmp(&fp_data[i].f128.r[0], &fp_data[i].f128.r[1], sizeof(fp_data[i].f128.r[0]));
+				ret = shim_memcmp(&fp_data[i].f128.r[0], &fp_data[i].f128.r[1], sizeof(fp_data[i].f128.r[0]));
 				r0 = (long double)fp_data[i].f128.r[0];
 				r1 = (long double)fp_data[i].f128.r[1];
 				break;
 #endif
 			default:
 				/* Should never happen! */
-				return;
+				return EXIT_SUCCESS;
 			}
 			if (ret) {
 				pr_fail("%s %s %s verification failure on element %zd, got %Lf, expected %Lf\n",
 					args->name, fp_description, method_name, i, r0, r1);
+				return EXIT_FAILURE;
 			}
 		}
 	}
+	return EXIT_SUCCESS;
 }
 
 static double stress_fp_all(
 	stress_args_t *args,
 	fp_data_t *fp_data,
-	const int index)
+	const int idx)
 {
 	size_t i;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
-	(void)index;
+	(void)idx;
 
-	for (i = 1; i < SIZEOF_ARRAY(stress_fp_funcs); i++) {
-		stress_fp_call_method(args, fp_data, i, verify);
+	for (i = 1; i < STRESS_NUM_FP_FUNCS; i++) {
+		if (stress_fp_call_method(args, fp_data, i, verify) == EXIT_FAILURE)
+			return -1.0;
 	}
 	return 0.0;
-}
-
-/*
- *  stress_set_fp_method()
- *	set the default vector floating point stress method
- */
-static int stress_set_fp_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_fp_funcs); i++) {
-		if (!strcmp(stress_fp_funcs[i].name, name)) {
-			stress_set_setting("fp-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "fp-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_fp_funcs); i++) {
-		(void)fprintf(stderr, " %s", stress_fp_funcs[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
 }
 
 static int stress_fp(stress_args_t *args)
@@ -549,6 +586,7 @@ static int stress_fp(stress_args_t *args)
 	fp_data_t *fp_data;
 	size_t fp_method = 0;	/* "all" */
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
+	int rc = EXIT_SUCCESS;
 
 	stress_catch_sigill();
 
@@ -557,15 +595,23 @@ static int stress_fp(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (fp_data == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate %d floating point elements, skipping stressor\n",
-			args->name, FP_ELEMENTS);
+		pr_inf_skip("%s: failed to mmap %d floating point elements%s, skipping stressor\n",
+			args->name, FP_ELEMENTS, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(fp_data, mmap_size, "fp-data");
 	(void)stress_madvise_mergeable(fp_data, mmap_size);
 
 	(void)stress_get_setting("fp-method", &fp_method);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
+	for (i = 0; i < SIZEOF_ARRAY(stress_fp_metrics); i++) {
+		stress_fp_metrics[i].duration = 0.0;
+		stress_fp_metrics[i].count = 0.0;
+	}
 
 	for (i = 0; i < FP_ELEMENTS; i++) {
 		long double ld;
@@ -584,6 +630,12 @@ static int stress_fp(stress_args_t *args)
 		fp_data[i].f.r_init = (float)ld;
 		fp_data[i].f.r[0] = (float)ld;
 		fp_data[i].f.r[1] = (float)ld;
+
+#if defined(HAVE__bf16)
+		fp_data[i].bf16.r_init = (__bf16)ld;
+		fp_data[i].bf16.r[0] = (__bf16)ld;
+		fp_data[i].bf16.r[1] = (__bf16)ld;
+#endif
 
 #if defined(HAVE_Float16)
 		fp_data[i].f16.r_init = (_Float16)ld;
@@ -624,6 +676,9 @@ static int stress_fp(stress_args_t *args)
 		fp_data[i].ld.add = ld;
 		fp_data[i].d.add = (double)ld;
 		fp_data[i].f.add = (float)ld;
+#if defined(HAVE__bf16)
+		fp_data[i].bf16.add = (__bf16)ld;
+#endif
 #if defined(HAVE_Float16)
 		fp_data[i].f16.add = (_Float16)ld;
 #endif
@@ -646,6 +701,9 @@ static int stress_fp(stress_args_t *args)
 		fp_data[i].ld.add_rev = ld;
 		fp_data[i].d.add_rev = (double)ld;
 		fp_data[i].f.add_rev = (float)ld;
+#if defined(HAVE__bf16)
+		fp_data[i].bf16.add_rev = (__bf16)ld;
+#endif
 #if defined(HAVE_Float16)
 		fp_data[i].f16.add_rev = (_Float16)ld;
 #endif
@@ -669,6 +727,9 @@ static int stress_fp(stress_args_t *args)
 		fp_data[i].ld.mul = ld;
 		fp_data[i].d.mul = (double)ld;
 		fp_data[i].f.mul = (float)ld;
+#if defined(HAVE__bf16)
+		fp_data[i].bf16.mul = (__bf16)ld;
+#endif
 #if defined(HAVE_Float16)
 		fp_data[i].f16.mul = (_Float16)ld;
 #endif
@@ -708,19 +769,22 @@ static int stress_fp(stress_args_t *args)
 	}
 
 	do {
-		stress_fp_call_method(args, fp_data, fp_method, verify);
+		if (stress_fp_call_method(args, fp_data, fp_method, verify) == EXIT_FAILURE) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 	} while (stress_continue(args));
 
-	for (i = 1; i < SIZEOF_ARRAY(stress_fp_funcs); i++) {
-		const double ops = stress_fp_funcs[i].ops;
-		const double duration = stress_fp_funcs[i].duration;
-		if ((duration > 0.0) && (ops > 0.0)) {
+	for (i = 1; i < STRESS_NUM_FP_FUNCS; i++) {
+		const double count = stress_fp_metrics[i].count;
+		const double duration = stress_fp_metrics[i].duration;
+		if ((duration > 0.0) && (count > 0.0)) {
 			char msg[64];
-			const double rate = stress_fp_funcs[i].ops / stress_fp_funcs[i].duration;
+			const double rate = count / duration;
 
 			(void)snprintf(msg, sizeof(msg), "Mfp-ops per sec, %-20s", stress_fp_funcs[i].description);
 			stress_metrics_set(args, i - 1, msg,
-				rate / 1000000.0, STRESS_HARMONIC_MEAN);
+				rate / 1000000.0, STRESS_METRIC_HARMONIC_MEAN);
 		}
 	}
 
@@ -728,17 +792,23 @@ static int stress_fp(stress_args_t *args)
 
 	(void)munmap((void *)fp_data, mmap_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-        { OPT_fp_method,	stress_set_fp_method },
+static const char *stress_fp_method(const size_t i)
+{
+	return (i < STRESS_NUM_FP_FUNCS) ? stress_fp_funcs[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_fp_method, "fp-method", TYPE_ID_SIZE_T_METHOD, 0, 1, stress_fp_method },
+	END_OPT,
 };
 
-stressor_info_t stress_fp_info = {
+const stressor_info_t stress_fp_info = {
 	.stressor = stress_fp,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_FP | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

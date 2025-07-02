@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 #include "core-killpid.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_FIEMAP_H)
 #include <linux/fiemap.h>
@@ -43,19 +45,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   NULL }
 };
 
-static int stress_set_fiemap_bytes(const char *opt)
-{
-	uint64_t fiemap_bytes;
-
-	fiemap_bytes = stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("fiemap-bytes", fiemap_bytes,
-		MIN_FIEMAP_SIZE, MAX_FIEMAP_SIZE);
-	return stress_set_setting("fiemap-bytes", TYPE_ID_UINT64, &fiemap_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fiemap_bytes,	stress_set_fiemap_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_fiemap_bytes, "fiemap-bytes", TYPE_ID_UINT64_BYTES_FS, MIN_FIEMAP_SIZE, MAX_FIEMAP_SIZE, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LINUX_FS_H) &&		\
@@ -89,11 +81,11 @@ static int stress_fiemap_writer(
 		uint64_t offset;
 
 		offset = stress_mwc64modn(len) & ~0x1fffUL;
-		if (lseek(fd, (off_t)offset, SEEK_SET) < 0)
+		if (UNLIKELY(lseek(fd, (off_t)offset, SEEK_SET) < 0))
 			break;
-		if (!stress_bogo_inc_lock(args, counter_lock, false))
+		if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, false)))
 			break;
-		if (write(fd, buf, sizeof(buf)) < 0) {
+		if (UNLIKELY(write(fd, buf, sizeof(buf)) < 0)) {
 			if (errno == ENOSPC)
 				continue;
 			if ((errno != EAGAIN) && (errno != EINTR)) {
@@ -102,7 +94,7 @@ static int stress_fiemap_writer(
 				goto tidy;
 			}
 		}
-		if (!stress_bogo_inc_lock(args, counter_lock, false))
+		if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, false)))
 			break;
 #if defined(FALLOC_FL_PUNCH_HOLE) && \
     defined(FALLOC_FL_KEEP_SIZE)
@@ -111,15 +103,15 @@ static int stress_fiemap_writer(
 		(void)shim_usleep(1000);
 
 		offset = stress_mwc64modn(len);
-		if (shim_fallocate(fd, FALLOC_FL_PUNCH_HOLE |
-				  FALLOC_FL_KEEP_SIZE, (off_t)offset, 8192) < 0) {
+		if (UNLIKELY(shim_fallocate(fd, FALLOC_FL_PUNCH_HOLE |
+					    FALLOC_FL_KEEP_SIZE, (off_t)offset, 8192) < 0)) {
 			if (errno == ENOSPC)
 				continue;
 			if (errno == EOPNOTSUPP)
 				punch_hole = false;
 		}
 		(void)shim_usleep(1000);
-		if (!stress_bogo_inc_lock(args, counter_lock, false))
+		if (UNLIKELY(!stress_bogo_inc_lock(args, counter_lock, false)))
 			break;
 #else
 		UNEXPECTED
@@ -149,16 +141,17 @@ static void stress_fiemap_ioctl(
 		size_t extents_size;
 
 		fiemap = (struct fiemap *)calloc(1, sizeof(*fiemap));
-		if (!fiemap) {
-			pr_err("Out of memory allocating fiemap\n");
+		if (UNLIKELY(!fiemap)) {
+			pr_err("%s: out of memory allocating fiemap%s\n",
+				args->name, stress_get_memfree_str());
 			break;
 		}
 		fiemap->fm_length = ~0UL;
 
 		/* Find out how many extents there are */
-		if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
+		if (UNLIKELY(ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0)) {
 			if (errno == EOPNOTSUPP) {
-				if (args->instance == 0)
+				if (stress_instance_zero(args))
 					pr_inf_skip("%s: ioctl FS_IOC_FIEMAP not supported on the file system, skipping stressor\n",
 						args->name);
 				free(fiemap);
@@ -169,8 +162,8 @@ static void stress_fiemap_ioctl(
 			free(fiemap);
 			break;
 		}
-		shim_sched_yield();
-		if (!stress_continue(args)) {
+		(void)shim_sched_yield();
+		if (UNLIKELY(!stress_continue(args))) {
 			free(fiemap);
 			break;
 		}
@@ -182,9 +175,10 @@ static void stress_fiemap_ioctl(
 		/* Resize fiemap to allow us to read in the extents */
 		tmp = (struct fiemap *)realloc(fiemap,
 			sizeof(*fiemap) + extents_size);
-		if (!tmp) {
-			pr_fail("%s: ioctl FS_IOC_FIEMAP failed, errno=%d (%s)\n",
-				args->name, errno, strerror(errno));
+		if (UNLIKELY(!tmp)) {
+			pr_fail("%s: realloc failed%s, errno=%d (%s)\n",
+				args->name, stress_get_memfree_str(),
+				errno, strerror(errno));
 			free(fiemap);
 			break;
 		}
@@ -194,18 +188,18 @@ static void stress_fiemap_ioctl(
 		fiemap->fm_extent_count = fiemap->fm_mapped_extents;
 		fiemap->fm_mapped_extents = 0;
 
-		if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
+		if (UNLIKELY(ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0)) {
 			pr_fail("%s: ioctl FS_IOC_FIEMAP failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			free(fiemap);
 			break;
 		}
 		free(fiemap);
-		shim_sched_yield();
-		if (!stress_continue(args))
+		(void)shim_sched_yield();
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #if !defined(O_SYNC)
-		if (c++ > COUNT_MAX) {
+		if (UNLIKELY(c++ > COUNT_MAX)) {
 			c = 0;
 			fdatasync(fd);
 		}
@@ -217,21 +211,29 @@ static void stress_fiemap_ioctl(
  *  stress_fiemap_spawn()
  *	helper to spawn off fiemap stressor
  */
-static inline pid_t stress_fiemap_spawn(stress_args_t *args, const int fd)
+static inline pid_t stress_fiemap_spawn(
+	stress_args_t *args,
+	const int fd,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid)
 {
-	pid_t pid;
-
-	pid = fork();
-	if (pid < 0)
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		return -1;
-	if (pid == 0) {
+	} else if (s_pid->pid == 0) {
+		s_pid->pid = getpid();
+
+		stress_sync_start_wait_s_pid(s_pid);
+
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
 		stress_mwc_reseed();
 		stress_fiemap_ioctl(args, fd);
 		_exit(EXIT_SUCCESS);
+	} else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
 
 /*
@@ -240,11 +242,11 @@ static inline pid_t stress_fiemap_spawn(stress_args_t *args, const int fd)
  */
 static int stress_fiemap(stress_args_t *args)
 {
-	pid_t pids[MAX_FIEMAP_PROCS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	int ret, fd, rc = EXIT_FAILURE;
 	char filename[PATH_MAX];
 	size_t n;
-	uint64_t fiemap_bytes = DEFAULT_FIEMAP_SIZE;
+	uint64_t fiemap_bytes, fiemap_bytes_total = DEFAULT_FIEMAP_SIZE;
 	struct fiemap fiemap;
 	const char *fs_type;
 #if defined(O_SYNC)
@@ -253,21 +255,32 @@ static int stress_fiemap(stress_args_t *args)
 	const int flags = O_CREAT | O_RDWR;
 #endif
 
-	counter_lock = stress_lock_create();
+	counter_lock = stress_lock_create("counter");
 	if (!counter_lock) {
 		pr_err("%s: failed to create counter lock\n", args->name);
 		return EXIT_NO_RESOURCE;
 	}
 
-	if (!stress_get_setting("fiemap-bytes", &fiemap_bytes)) {
-		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			fiemap_bytes = MAXIMIZED_FILE_SIZE;
-		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			fiemap_bytes = MIN_FIEMAP_SIZE;
+	s_pids = stress_sync_s_pids_mmap(MAX_FIEMAP_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs, skipping stressor\n", args->name, MAX_FIEMAP_PROCS);
+		stress_lock_destroy(counter_lock);
+		return EXIT_NO_RESOURCE;
 	}
-	fiemap_bytes /= args->num_instances;
-	if (fiemap_bytes < MIN_FIEMAP_SIZE)
+
+	if (!stress_get_setting("fiemap-bytes", &fiemap_bytes_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			fiemap_bytes_total = MAXIMIZED_FILE_SIZE;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			fiemap_bytes_total = MIN_FIEMAP_SIZE;
+	}
+	fiemap_bytes = fiemap_bytes_total / args->instances;
+	if (fiemap_bytes < MIN_FIEMAP_SIZE) {
 		fiemap_bytes = MIN_FIEMAP_SIZE;
+		fiemap_bytes_total = fiemap_bytes * args->instance;
+	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, fiemap_bytes, fiemap_bytes_total);
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0) {
@@ -291,32 +304,38 @@ static int stress_fiemap(stress_args_t *args)
 	if (ioctl(fd, FS_IOC_FIEMAP, &fiemap) < 0) {
 		errno = EOPNOTSUPP;
 		if (errno == EOPNOTSUPP) {
-			if (args->instance == 0)
-				pr_inf_skip("%s: FS_IOC_FIEMAP not supported on the file system, skipping stressor%s\n",
+			if (stress_instance_zero(args))
+				pr_inf_skip("%s: ioctl FS_IOC_FIEMAP not supported on the file system, skipping stressor%s\n",
 					args->name, fs_type);
 			rc = EXIT_NOT_IMPLEMENTED;
 			goto close_clean;
 		}
 	}
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	for (n = 0; n < MAX_FIEMAP_PROCS; n++) {
-		if (!stress_continue(args)) {
+		stress_sync_start_init(&s_pids[n]);
+
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto reap;
 		}
 
-		pids[n] = stress_fiemap_spawn(args, fd);
-		if (pids[n] < 0)
+		if (stress_fiemap_spawn(args, fd, &s_pids_head, &s_pids[n]) < 0)
 			goto reap;
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+        stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	rc = stress_fiemap_writer(args, fd, fiemap_bytes);
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	/* And reap stressors */
-	stress_kill_and_wait_many(args, pids, n, SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, n, SIGALRM, true);
 close_clean:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)close(fd);
@@ -326,23 +345,24 @@ dir_clean:
 clean:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
+	(void)stress_sync_s_pids_munmap(s_pids, MAX_FIEMAP_PROCS);
 	stress_lock_destroy(counter_lock);
 
 	return rc;
 }
 
-stressor_info_t stress_fiemap_info = {
+const stressor_info_t stress_fiemap_info = {
 	.stressor = stress_fiemap,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_fiemap_info = {
+const stressor_info_t stress_fiemap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/fiemap.h, linux/fs.h or ioctl() FS_IOC_FIEMAP support"

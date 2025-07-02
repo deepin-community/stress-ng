@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,41 +24,25 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-#define STRESS_GOTO_FORWARD	(1)
-#define STRESS_GOTO_BACKWARD	(2)
-#define STRESS_GOTO_RANDOM	(3)
+#define STRESS_GOTO_UNDEFINED	(-1)
+#define STRESS_GOTO_FORWARD	(0)
+#define STRESS_GOTO_BACKWARD	(1)
+#define STRESS_GOTO_RANDOM	(2)
 
-typedef struct {
-	const char *option;
-	const int  direction;
-} stress_goto_direction_t;
+static const char * const stress_goto_directions[] = {
+	"forward",	/* STRESS_GOTO_FORWARD */
+	"backward",	/* STRESS_GOTO_BACKWARD */
+	"random",	/* STRESS_GOTO_RANDOM */
+};
 
-static int stress_set_goto_direction(const char *opts)
+static const char *stress_goto_direction(const size_t i)
 {
-	size_t i;
-
-	static const stress_goto_direction_t stress_goto_direction[] = {
-		{ "forward",	STRESS_GOTO_FORWARD },
-		{ "backward",	STRESS_GOTO_BACKWARD },
-		{ "random",	STRESS_GOTO_RANDOM },
-	};
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_goto_direction); i++) {
-		if (!strcmp(opts, stress_goto_direction[i].option)) {
-			return stress_set_setting("goto-direction", TYPE_ID_INT, &stress_goto_direction[i].direction);
-		}
-	}
-	(void)fprintf(stderr, "goto-option option '%s' not known, options are:", opts);
-	for (i = 0; i < SIZEOF_ARRAY(stress_goto_direction); i++)
-		(void)fprintf(stderr, "%s %s", i == 0 ? "" : ",", stress_goto_direction[i].option);
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_goto_directions)) ? stress_goto_directions[i] : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_goto_direction,	stress_set_goto_direction },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_goto_direction, "goto-direction", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_goto_direction },
+	END_OPT,
 };
 
 #define MAX_LABELS	(0x400)
@@ -74,11 +58,12 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
 }
 
 /*
- *  Intel icx can take hours optimizating the code,
+ *  Intel icx and clang can take hours optimizating the code,
  *  so workaround this by defaulting it to -O0 until
  *  this is resolved
  */
-#if defined(HAVE_COMPILER_ICX)
+#if defined(HAVE_COMPILER_ICX) ||	\
+    defined(HAVE_COMPILER_CLANG)
 #define OPTIMIZE_GOTO	OPTIMIZE0
 #else
 #define OPTIMIZE_GOTO	OPTIMIZE3
@@ -91,7 +76,8 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
 static int OPTIMIZE_GOTO stress_goto(stress_args_t *args)
 {
 	size_t i;
-	int rc = EXIT_SUCCESS, goto_direction;
+	int rc = EXIT_SUCCESS;
+	size_t goto_direction = STRESS_GOTO_RANDOM;
 	double t1, t2, duration, rate;
 	uint64_t lo, hi, bogo_counter;
 
@@ -251,9 +237,10 @@ static int OPTIMIZE_GOTO stress_goto(stress_args_t *args)
 		labels_backward[i] = default_labels[(MAX_LABELS + i - 1) % MAX_LABELS];
 	}
 
-	goto_direction = STRESS_GOTO_RANDOM;
 	(void)stress_get_setting("goto-direction", &goto_direction);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	switch (goto_direction) {
@@ -271,7 +258,7 @@ static int OPTIMIZE_GOTO stress_goto(stress_args_t *args)
 	t1 = stress_time_now();
 	for (;;) {
 L0x000:
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (goto_direction == STRESS_GOTO_RANDOM)
 			labels = stress_mwc1() ? labels_backward : labels_forward;
@@ -445,25 +432,25 @@ L0x000:
 	duration = t2 - t1;
 	rate = (duration > 0.0) ? (1024.0 * (double)stress_bogo_get(args)) / duration : 0.0;
 	stress_metrics_set(args, 0, "million gotos per sec",
-		rate / 1000000.0, STRESS_HARMONIC_MEAN);
+		rate / 1000000.0, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return rc;
 }
 
-stressor_info_t stress_goto_info = {
+const stressor_info_t stress_goto_info = {
 	.stressor = stress_goto,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_goto_info = {
+const stressor_info_t stress_goto_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without compiler support gcc style 'labels as values' feature"

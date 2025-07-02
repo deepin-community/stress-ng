@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -83,18 +83,50 @@ static void * OPTIMIZE3 lsearch_nonlibc(
 	return result;
 }
 
-/*
- *  stress_set_lsearch_size()
- *      set lsearch size from given option string
- */
-static int stress_set_lsearch_size(const char *opt)
+static inline void OPTIMIZE3 * lfind_sentinel(
+	const void *key,
+	const void *base,
+	size_t *nmemb,
+	size_t size,
+	int (*compare)(const void *p1, const void *p2))
 {
-	uint64_t lsearch_size;
+	char *ptr = (char *)shim_unconstify_ptr(base);
+	register char *ptr_end;
+	char tmp[size];
 
-	lsearch_size = stress_get_uint64(opt);
-	stress_check_range("lsearch-size", lsearch_size,
-		MIN_LSEARCH_SIZE, MAX_LSEARCH_SIZE);
-	return stress_set_setting("lsearch-size", TYPE_ID_UINT64, &lsearch_size);
+	if (*nmemb < 1)
+		return NULL;
+
+	ptr_end = (char *)shim_unconstify_ptr(base) + (((*nmemb) - 1) * size);
+
+	/* save last value */
+	shim_memcpy((void *)tmp, ptr_end, size);
+	/* copy key to last value */
+	shim_memcpy((void *)ptr_end, key, size);
+
+	/* compare until we reach end value */
+	while (compare(ptr, key))
+		ptr += size;
+
+	/* copy saved last value back */
+	shim_memcpy((void *)ptr_end, tmp, size);
+	return ((ptr < ptr_end) || (compare(ptr_end, key) == 0)) ? ptr : NULL;
+}
+
+static void * OPTIMIZE3 lsearch_sentinel(
+	const void *key,
+	void *base,
+	size_t *nmemb,
+	size_t size,
+	int (*compare)(const void *p1, const void *p2))
+{
+	register void *result = lfind_sentinel(key, base, nmemb, size, compare);
+
+	if (!result) {
+		result = shim_memcpy((char *)base + ((*nmemb) * size), key, size);
+		++(*nmemb);
+	}
+	return result;
 }
 
 static const stress_lsearch_method_t stress_lsearch_methods[] = {
@@ -103,32 +135,28 @@ static const stress_lsearch_method_t stress_lsearch_methods[] = {
 	{ "lsearch-libc",	lfind,		lsearch },
 #endif
 	{ "lsearch-nonlibc",	lfind_nonlibc,	lsearch_nonlibc },
+	{ "lsearch-sentinel",	lfind_sentinel,	lsearch_sentinel },
 };
 
-static int stress_set_lsearch_method(const char *opt)
+static const char *stress_lsearch_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_lsearch_methods); i++) {
-		if (strcmp(opt, stress_lsearch_methods[i].name) == 0) {
-			stress_set_setting("lsearch-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "lsearch-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_lsearch_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_lsearch_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_lsearch_methods)) ? stress_lsearch_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_lsearch_method,	stress_set_lsearch_method },
-	{ OPT_lsearch_size,	stress_set_lsearch_size },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_lsearch_method, "lsearch-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_lsearch_method },
+	{ OPT_lsearch_size,   "lsearch-size",   TYPE_ID_UINT64, MIN_LSEARCH_SIZE, MAX_LSEARCH_SIZE, NULL },
+	END_OPT,
 };
+
+static int32_t OPTIMIZE3 stress_lsearch_cmp_int32(const void *p1, const void *p2)
+{
+	register const int32_t v1 = *(const int32_t *)p1;
+	register const int32_t v2 = *(const int32_t *)p2;
+
+	stress_sort_compares++;
+	return (v1 != v2);
+}
 
 /*
  *  stress_lsearch()
@@ -142,6 +170,7 @@ static int stress_lsearch(stress_args_t *args)
 	double rate, duration = 0.0, count = 0.0, sorted = 0.0;
 	lsearch_func_t lsearch_func;
 	lfind_func_t lfind_func;
+	int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("lsearch-method", &lsearch_method);
 	lfind_func = stress_lsearch_methods[lsearch_method].lfind_func;
@@ -155,20 +184,24 @@ static int stress_lsearch(stress_args_t *args)
 	}
 	max = (size_t)lsearch_size;
 
-	if ((data = calloc(max, sizeof(*data))) == NULL) {
-		pr_inf_skip("%s: malloc failed allocating %zd integers, "
-			"out of memory, skipping stressor\n", args->name, max);
+	if ((data = (int32_t *)calloc(max, sizeof(*data))) == NULL) {
+		pr_inf_skip("%s: malloc failed allocating %zu integers%s, "
+			"skipping stressor\n",
+			args->name, max, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	if ((root = calloc(max, sizeof(*data))) == NULL) {
+	if ((root = (int32_t *)calloc(max, sizeof(*data))) == NULL) {
 		free(data);
-		pr_inf_skip("%s: malloc failed allocating %zd integers , "
-			"out of memory, skipping stressor\n", args->name, max);
+		pr_inf_skip("%s: malloc failed allocating %zu integers%s, "
+			"skipping stressor\n",
+			args->name, max, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
 	stress_sort_data_int32_init(data, max);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -178,22 +211,25 @@ static int stress_lsearch(stress_args_t *args)
 		stress_sort_data_int32_shuffle(data, max);
 
 		/* Step #1, populate with data */
-		for (i = 0; stress_continue_flag() && (i < max); i++) {
-			VOID_RET(void *, lsearch_func(&data[i], root, &n, sizeof(*data), stress_sort_cmp_fwd_int32));
+		for (i = 0; LIKELY(stress_continue_flag() && (i < max)); i++) {
+			VOID_RET(void *, lsearch_func(&data[i], root, &n, sizeof(*data), stress_lsearch_cmp_int32));
 		}
 		/* Step #2, find */
 		stress_sort_compare_reset();
 		t = stress_time_now();
-		for (i = 0; stress_continue_flag() && (i < n); i++) {
+		for (i = 0; LIKELY(stress_continue_flag() && (i < n)); i++) {
 			int32_t *result;
 
-			result = lfind_func(&data[i], root, &n, sizeof(*data), stress_sort_cmp_fwd_int32);
+			result = lfind_func(&data[i], root, &n, sizeof(*data), stress_lsearch_cmp_int32);
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
-				if (result == NULL)
+				if (result == NULL) {
 					pr_fail("%s: element %zu could not be found\n", args->name, i);
-				else if (*result != data[i])
+					rc = EXIT_FAILURE;
+				} else if (*result != data[i]) {
 					pr_fail("%s: element %zu found %" PRIu32 ", expecting %" PRIu32 "\n",
-					args->name, i, *result, data[i]);
+						args->name, i, *result, data[i]);
+					rc = EXIT_FAILURE;
+				}
 			}
 		}
 		duration += stress_time_now() - t;
@@ -206,19 +242,19 @@ static int stress_lsearch(stress_args_t *args)
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "lsearch comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "lsearch comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
 	free(root);
 	free(data);
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_lsearch_info = {
+const stressor_info_t stress_lsearch_info = {
 	.stressor = stress_lsearch,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SEARCH,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,12 +17,15 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-killpid.h"
 
 #if defined(HAVE_SYS_MOUNT_H)
 #include <sys/mount.h>
 #endif
+
+#define STRESS_UMOUNT_PROCS	(3)
 
 static const stress_help_t help[] = {
 	{ NULL,	"umount N",	 "start N workers exercising umount races" },
@@ -50,10 +53,9 @@ static int stress_umount_supported(const char *name)
  *  stress_umount_umount()
  *	umount a path with retries.
  */
-static void stress_umount_umount(stress_args_t *args, const char *path, const uint64_t ns_delay)
+static int stress_umount_umount(stress_args_t *args, const char *path, const uint64_t ns_delay)
 {
-	int i;
-	int ret;
+	int i, ret, rc = EXIT_SUCCESS;
 
 	/*
 	 *  umount is attempted at least twice, the first successful mount
@@ -62,6 +64,8 @@ static void stress_umount_umount(stress_args_t *args, const char *path, const ui
 	 *  know that umount been successful and can then return.
 	 */
 	for (i = 0; i < 100; i++) {
+		static bool warned = false;
+
 #if defined(HAVE_UMOUNT2) &&	\
     defined(MNT_FORCE)
 		if (stress_mwc1()) {
@@ -74,16 +78,23 @@ static void stress_umount_umount(stress_args_t *args, const char *path, const ui
 #endif
 		if (ret == 0) {
 			if (i > 1) {
-				shim_nanosleep_uint64(ns_delay);
+				(void)shim_nanosleep_uint64(ns_delay);
 			}
 			continue;
 		}
 		switch (errno) {
+		case EPERM:
+			if (!warned) {
+				warned = true;
+				pr_inf_skip("%s: umount failed, no permission, skipping stresor\n",
+					args->name);
+			}
+			return EXIT_NO_RESOURCE;
 		case EAGAIN:
 		case EBUSY:
 		case ENOMEM:
 			/* Wait and then re-try */
-			shim_nanosleep_uint64(ns_delay);
+			(void)shim_nanosleep_uint64(ns_delay);
 			break;
 		case EINVAL:
 		case ENOENT:
@@ -92,14 +103,15 @@ static void stress_umount_umount(stress_args_t *args, const char *path, const ui
 			 *  it can't be umounted.  We now assume it
 			 *  has been successfully umounted
 			 */
-			return;
+			return rc;
 		default:
 			/* Unexpected, so report it */
-			pr_inf("%s: umount failed %s: %d %s\n", args->name,
+			pr_inf("%s: umount failed %s, errno=%d %s\n", args->name,
 				path, errno, strerror(errno));
-			return;
+			return EXIT_FAILURE;
 		}
 	}
+	return rc;
 }
 
 /*
@@ -116,14 +128,14 @@ static void stress_umount_read_proc_mounts(stress_args_t *args, const char *path
 		ssize_t ret;
 
 		fd = open("/proc/mounts", O_RDONLY);
-		if (fd < 0)
+		if (UNLIKELY(fd < 0))
 			break;
 		do {
 			ret = read(fd, buffer, sizeof(buffer));
 		} while (ret > 0);
 		(void)close(fd);
 
-		shim_nanosleep_uint64(stress_mwc64modn(1000000));
+		(void)shim_nanosleep_uint64(stress_mwc64modn(1000000));
 	} while (stress_continue(args));
 
 	_exit(0);
@@ -135,15 +147,16 @@ static void stress_umount_read_proc_mounts(stress_args_t *args, const char *path
  */
 static void stress_umount_umounter(stress_args_t *args, const char *path)
 {
+	int rc;
 	stress_parent_died_alarm();
 	(void)sched_settings_apply(true);
 
 	do {
-		stress_umount_umount(args, path, 10000);
-		shim_nanosleep_uint64(stress_mwc64modn(10000));
+		rc = stress_umount_umount(args, path, 10000);
+		(void)shim_nanosleep_uint64(stress_mwc64modn(10000));
 	} while (stress_continue(args));
 
-	_exit(0);
+	_exit(rc);
 }
 
 /*
@@ -154,7 +167,7 @@ static void stress_umount_umounter(stress_args_t *args, const char *path)
 static void stress_umount_mounter(stress_args_t *args, const char *path)
 {
 	const uint64_t ramfs_size = 64 * KB;
-	int i = 0;
+	int i = 0, rc = EXIT_SUCCESS;
 
 	stress_parent_died_alarm();
 	(void)sched_settings_apply(true);
@@ -167,22 +180,33 @@ static void stress_umount_mounter(stress_args_t *args, const char *path)
 		(void)snprintf(opt, sizeof(opt), "size=%" PRIu64, ramfs_size);
 		ret = mount("", path, fs, 0, opt);
 		if (ret < 0) {
-			if ((errno != ENOSPC) &&
-			    (errno != ENOMEM) &&
-			    (errno != ENODEV))
+			if (errno == EPERM) {
+				static bool warned = false;
+
+				if (UNLIKELY(!warned)) {
+					warned = true;
+					pr_inf_skip("%s: mount failed, no permission, "
+						"skipping stressor\n", args->name);
+				}
+				rc = EXIT_NO_RESOURCE;
+			} else if (UNLIKELY((errno != ENOSPC) &&
+					    (errno != ENOMEM) &&
+					    (errno != ENODEV))) {
 				pr_fail("%s: mount failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+			}
 			/* Just in case, force umount */
 			goto cleanup;
 		} else {
 			stress_bogo_inc(args);
 		}
-		stress_umount_umount(args, path, 1000000);
+		(void)stress_umount_umount(args, path, 1000000);
 	} while (stress_continue(args));
 
 cleanup:
-	stress_umount_umount(args, path, 100000000);
-	_exit(0);
+	(void)stress_umount_umount(args, path, 100000000);
+	_exit(rc);
 }
 
 /*
@@ -192,33 +216,39 @@ cleanup:
 static pid_t stress_umount_spawn(
 	stress_args_t *args,
 	const char *path,
-	void (*func)(stress_args_t *args, const char *path))
+	void (*func)(stress_args_t *args, const char *path),
+	stress_pid_t **s_pid_head,
+	stress_pid_t *s_pid)
 {
-	pid_t pid;
-
 again:
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return 0;
-		pr_inf("%s: fork failed: %d (%s), skipping stressor\n",
+		pr_inf("%s: fork failed, errno=%d (%s), skipping stressor\n",
 			args->name, errno, strerror(errno));
 		return -1;
-	}
-	if (pid == 0) {
+	} else if (s_pid->pid == 0) {
+		s_pid->pid = getpid();
+
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
+
+		stress_sync_start_wait_s_pid(s_pid);
 
 		stress_set_proc_state(args->name, STRESS_STATE_RUN);
 		func(args, path);
 		stress_set_proc_state(args->name, STRESS_STATE_WAIT);
 
 		_exit(EXIT_SUCCESS);
+	} else {
+		stress_sync_start_s_pid_list_add(s_pid_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
+
 
 /*
  *  stress_umount()
@@ -226,36 +256,52 @@ again:
  */
 static int stress_umount(stress_args_t *args)
 {
-	pid_t pids[3] = { -1, -1, -1 };
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	int ret = EXIT_NO_RESOURCE;
 	char pathname[PATH_MAX], realpathname[PATH_MAX];
 
-	if (stress_sigchld_set_handler(args) < 0)
+	s_pids = stress_sync_s_pids_mmap(STRESS_UMOUNT_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, STRESS_UMOUNT_PROCS, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
+	}
 
-	stress_temp_dir(pathname, sizeof(pathname), args->name, args->pid, args->instance);
+	stress_sync_start_init(&s_pids[0]);
+	stress_sync_start_init(&s_pids[1]);
+	stress_sync_start_init(&s_pids[2]);
+
+	if (stress_sigchld_set_handler(args) < 0) {
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_UMOUNT_PROCS);
+		return EXIT_NO_RESOURCE;
+	}
+
+	stress_temp_dir(pathname, sizeof(pathname), args->name,
+		args->pid, args->instance);
 	if (mkdir(pathname, S_IRGRP | S_IWGRP) < 0) {
 		pr_fail("%s: cannot mkdir %s, errno=%d (%s)\n",
 			args->name, pathname, errno, strerror(errno));
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_UMOUNT_PROCS);
 		return EXIT_FAILURE;
 	}
 	if (!realpath(pathname, realpathname)) {
 		pr_fail("%s: cannot realpath %s, errno=%d (%s)\n",
 			args->name, pathname, errno, strerror(errno));
 		(void)stress_temp_dir_rm_args(args);
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_UMOUNT_PROCS);
 		return EXIT_FAILURE;
 	}
 
-	pids[0] = stress_umount_spawn(args, realpathname, stress_umount_mounter);
-	if (pids[0] < 1)
+	if (stress_umount_spawn(args, realpathname, stress_umount_mounter, &s_pids_head, &s_pids[0]) < 0)
 		goto reap;
-	pids[1] = stress_umount_spawn(args, realpathname, stress_umount_umounter);
-	if (pids[1] < 1)
+	if (stress_umount_spawn(args, realpathname, stress_umount_umounter, &s_pids_head, &s_pids[1]) < 0)
 		goto reap;
-	pids[2] = stress_umount_spawn(args, realpathname, stress_umount_read_proc_mounts);
-	if (pids[2] < 1)
+	if (stress_umount_spawn(args, realpathname, stress_umount_read_proc_mounts, &s_pids_head, &s_pids[2]) < 0)
 		goto reap;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Wait for SIGALARMs */
@@ -266,23 +312,24 @@ static int stress_umount(stress_args_t *args)
 	ret = EXIT_SUCCESS;
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	stress_kill_and_wait_many(args, pids, SIZEOF_ARRAY(pids), SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, STRESS_UMOUNT_PROCS, SIGALRM, true);
 	(void)stress_temp_dir_rm_args(args);
+	(void)stress_sync_s_pids_munmap(s_pids, STRESS_UMOUNT_PROCS);
 
 	return ret;
 }
 
-stressor_info_t stress_umount_info = {
+const stressor_info_t stress_umount_info = {
 	.stressor = stress_umount,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_umount_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_umount_info = {
+const stressor_info_t stress_umount_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_umount_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

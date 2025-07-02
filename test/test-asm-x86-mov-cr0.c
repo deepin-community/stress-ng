@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,7 +23,7 @@
     defined(__i386__)   || defined(__i386)
 int main(int argc, char **argv)
 {
-	unsigned long cr0;
+	unsigned long int cr0;
 
         __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0) : : "memory");
 

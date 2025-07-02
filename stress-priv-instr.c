@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -182,7 +182,7 @@ static void *page;
 
 static void stress_ppc64_tlbie(void)
 {
-        unsigned long address = (unsigned long)page;
+        unsigned long int address = (unsigned long int)page;
 
 	__asm__ __volatile__("tlbie %0, 0" : : "r" (address) : "memory");
 }
@@ -256,7 +256,7 @@ static op_info_t op_info[] =
 #define HAVE_PRIV_INSTR
 static void stress_sparc_rdpr(void)
 {
-	unsigned long ver;
+	unsigned long int ver;
 
 	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
 }
@@ -344,7 +344,7 @@ static void stress_x86_lmsw(void)
 #if defined(HAVE_ASM_X86_MOV_CR0)
 static void stress_x86_mov_cr0(void)
 {
-	unsigned long cr0;
+	unsigned long int cr0;
 
 	__asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0) : : "memory");
 }
@@ -353,7 +353,7 @@ static void stress_x86_mov_cr0(void)
 #if defined(HAVE_ASM_X86_MOV_DR0)
 static void stress_x86_mov_dr0(void)
 {
-	unsigned long dr0;
+	unsigned long int dr0;
 
 	__asm__ __volatile__("mov %%dr0, %0" : "=r"(dr0) : : "memory");
 }
@@ -486,6 +486,8 @@ static int stress_priv_instr(stress_args_t *args)
 #if defined(HAVE_PRIV_PAGE)
 	page = mmap(NULL, args->page_size, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	if (page != MAP_FAILED)
+		stress_set_vma_anon_name(page, args->page_size, "priv-page");
 #endif
 	if (stress_sighandler(args->name, SIGSEGV, stress_sigsegv_handler, NULL))
 		return EXIT_NO_RESOURCE;
@@ -503,11 +505,13 @@ static int stress_priv_instr(stress_args_t *args)
 		op_info[i].trapped = false;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		ret = sigsetjmp(jmp_env, 1);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 	} while (ret == 1);
 
@@ -535,7 +539,7 @@ finish:
 	if (len > 0) {
 		char *str;
 
-		str = calloc(len, sizeof(*str));
+		str = (char *)calloc(len, sizeof(*str));
 		if (str) {
 			int unhandled = 0;
 
@@ -558,7 +562,7 @@ finish:
 
 	rate = (count > 0.0) ? (duration / count) : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per privileged op trap",
-		STRESS_DBL_NANOSECOND * rate, STRESS_HARMONIC_MEAN);
+		STRESS_DBL_NANOSECOND * rate, STRESS_METRIC_HARMONIC_MEAN);
 
 #if defined(HAVE_PRIV_PAGE)
 	if (page != MAP_FAILED)
@@ -572,18 +576,18 @@ finish:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_priv_instr_info = {
+const stressor_info_t stress_priv_instr_info = {
 	.stressor = stress_priv_instr,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_priv_instr_info = {
+const stressor_info_t stress_priv_instr_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "no privileged op-code test for this architecture"

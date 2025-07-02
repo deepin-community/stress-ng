@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,7 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+#include "core-capabilities.h"
 #include "core-pthread.h"
 
 #if defined(HAVE_SPAWN_H)
@@ -145,83 +146,25 @@ static const stress_help_t help[] = {
 	{ NULL,	"exec-method M",	"select exec method: all, execve, execveat" },
 	{ NULL,	"exec-no-pthread",	"do not use pthread_create" },
 	{ NULL,	"exec-ops N",		"stop after N exec bogo operations" },
-	{ NULL,	NULL,			NULL }
+	{ NULL,	NULL,			NULL },
 };
 
-/*
- *  stress_set_exec_max()
- *	set maximum number of forks allowed
- */
-static int stress_set_exec_max(const char *opt)
+static const char *stress_exec_method(const size_t i)
 {
-	uint32_t exec_max;
-
-	exec_max = stress_get_uint32(opt);
-	stress_check_range("exec-max", (uint64_t)exec_max, MIN_EXECS, MAX_EXECS);
-	return stress_set_setting("exec-max", TYPE_ID_INT32, &exec_max);
+	return (i < SIZEOF_ARRAY(stress_exec_methods)) ? stress_exec_methods[i].name : NULL;
 }
 
-/*
- * stress_search_exec_method
- * 	search the given option in the given array and if found set the
- * 	corresponding option.
- */
-static int stress_search_exec_method(
-	const char *name,
-	const stress_exec_method_t *methods,
-	const size_t n,
-	const char *opt)
+static const char *stress_exec_fork_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < n; i++) {
-		if (!strcmp(opt, methods[i].name))
-			return stress_set_setting(name, TYPE_ID_INT, &methods[i].method);
-	}
-
-	(void)fprintf(stderr, "%s must be one of:", name);
-	for (i = 0; i < n; i++) {
-		(void)fprintf(stderr, " %s", methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_exec_fork_methods)) ? stress_exec_fork_methods[i].name : NULL;
 }
 
-/*
- *  stress_set_exec_method()
- *	set exec call method
- */
-static int stress_set_exec_method(const char *opt)
-{
-	return stress_search_exec_method("exec-method", stress_exec_methods,
-					SIZEOF_ARRAY(stress_exec_methods), opt);
-}
-
-/*
- *  stress_set_exec_method()
- *	set exec call method
- */
-static int stress_set_exec_fork_method(const char *opt)
-{
-	return stress_search_exec_method("exec-fork-method", stress_exec_fork_methods,
-					SIZEOF_ARRAY(stress_exec_fork_methods), opt);
-}
-
-/*
- *  stress_set_exec_no_pthread()
- *	set no pthread flag
- */
-static int stress_set_exec_no_pthread(const char *opt)
-{
-	return stress_set_setting_true("exec-no-pthread", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_exec_max,		stress_set_exec_max },
-	{ OPT_exec_method,	stress_set_exec_method },
-	{ OPT_exec_fork_method,	stress_set_exec_fork_method },
-	{ OPT_exec_no_pthread,	stress_set_exec_no_pthread },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_exec_max,		"exec-max",         TYPE_ID_INT32, MIN_EXECS, MAX_EXECS, NULL },
+	{ OPT_exec_method,	"exec-method",	    TYPE_ID_SIZE_T_METHOD, 0, 0, stress_exec_method },
+	{ OPT_exec_fork_method,	"exec-fork-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_exec_fork_method },
+	{ OPT_exec_no_pthread,	"exec-no-pthread",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 /*
@@ -263,7 +206,7 @@ static stress_pid_hash_t *stress_exec_alloc_pid(const bool alloc_stack)
 {
 	NOCLOBBER stress_pid_hash_t *sph;
 
-	/* Any on the free list, re-use these */
+	/* Any on the free list, reuse these */
 	if (free_list) {
 		sph = free_list;
 		free_list = free_list->next;
@@ -286,7 +229,6 @@ static stress_pid_hash_t *stress_exec_alloc_pid(const bool alloc_stack)
 #else
 		const int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #endif
-		pr_inf("%x\n", flags);
 		sph->stack = stress_mmap_populate(NULL, CLONE_STACK_SIZE,
 				PROT_READ | PROT_WRITE, flags, -1, 0);
 		if (sph->stack == MAP_FAILED) {
@@ -294,6 +236,7 @@ static stress_pid_hash_t *stress_exec_alloc_pid(const bool alloc_stack)
 			stress_exec_free_list_add(sph);
 			return NULL;
 		}
+		stress_set_vma_anon_name(sph->stack, CLONE_STACK_SIZE, "clone-stack");
 	}
 #else
 	(void)alloc_stack;
@@ -374,7 +317,7 @@ static int stress_exec_supported(const char *name)
 	 *  this could allow somebody to try and run another
 	 *  executable as root.
 	 */
-	if (geteuid() == 0) {
+	if (stress_check_capability(SHIM_CAP_IS_ROOT)) {
 		pr_inf_skip("%s stressor must not run as root, skipping the stressor\n", name);
 		return -1;
 	}
@@ -386,7 +329,7 @@ static int stress_exec_supported(const char *name)
  *	perform one of the various execs depending on how
  *	ea->exec_method is set.
  */
-static int stress_exec_method(const stress_exec_context_t *context)
+static int stress_call_exec_method(const stress_exec_context_t *context)
 {
 	int ret;
 
@@ -425,7 +368,7 @@ static void *stress_exec_from_pthread(void *arg)
 
 	(void)snprintf(buffer, sizeof(buffer), "%s-pthread-exec", context->args->name);
 	stress_set_proc_name(buffer);
-	ret = stress_exec_method(context);
+	ret = stress_call_exec_method(context);
 	pthread_exit((void *)&ret);
 
 	return NULL;
@@ -486,7 +429,7 @@ static inline int stress_do_exec(stress_exec_context_t *context)
 	 *  pthread failure or 75% of the execs just fall back to
 	 *  the normal non-pthread exec
 	 */
-	ret = stress_exec_method(context);
+	ret = stress_call_exec_method(context);
 	/*
 	 *  If exec fails, we end up here, so kill dummy pthread
 	 */
@@ -497,7 +440,7 @@ static inline int stress_do_exec(stress_exec_context_t *context)
 	/*
 	 *  non-pthread enable systems just do normal exec
 	 */
-	return stress_exec_method(context);
+	return stress_call_exec_method(context);
 #endif
 }
 
@@ -711,16 +654,25 @@ static int stress_exec(stress_args_t *args)
 #endif
 	uint64_t volatile exec_fails = 0, exec_calls = 0;
 	uint32_t exec_max = DEFAULT_EXECS;
+	size_t exec_method_idx;
+	size_t exec_fork_method_idx;
 	int exec_method = EXEC_METHOD_ALL;
 	int exec_fork_method = EXEC_FORK_METHOD_FORK;
 	bool exec_no_pthread = false;
 	size_t arg_max, cache_max;
 	char *str;
 
-	(void)stress_get_setting("exec-max", &exec_max);
-	(void)stress_get_setting("exec-method", &exec_method);
-	(void)stress_get_setting("exec-fork-method", &exec_fork_method);
+	if (!stress_get_setting("exec-max", &exec_max)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			exec_max = MAX_EXECS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			exec_max = MIN_EXECS;
+	}
 	(void)stress_get_setting("exec-no-pthread", &exec_no_pthread);
+	if (stress_get_setting("exec-method", &exec_method_idx))
+		exec_method = stress_exec_methods[exec_method_idx].method;
+	if (stress_get_setting("exec-fork-method", &exec_fork_method_idx))
+		exec_fork_method = stress_exec_fork_methods[exec_fork_method_idx].method;
 
 	stress_ksm_memory_merge(1);
 
@@ -729,7 +681,7 @@ static int stress_exec(stress_args_t *args)
 	 */
 	exec_prog = stress_get_proc_self_exe(exec_path, sizeof(exec_path));
 	if (!exec_prog) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: skipping stressor, can't determine stress-ng "
 				"executable name\n", args->name);
 		return EXIT_NOT_IMPLEMENTED;
@@ -739,7 +691,7 @@ static int stress_exec(stress_args_t *args)
 	/* Remind folk that vfork can only do execve in this stressor */
 	if ((exec_fork_method == EXEC_FORK_METHOD_VFORK) &&
 	    (exec_method != EXEC_METHOD_EXECVE) &&
-	    (args->instance == 0)) {
+	    (stress_instance_zero(args))) {
 		pr_inf("%s: limiting vfork to only use execve()\n", args->name);
 	}
 #endif
@@ -749,9 +701,11 @@ static int stress_exec(stress_args_t *args)
 		mmap(NULL, cache_max, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (stress_pid_cache == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate PID hash cache, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to allocate %zu byte PID hash cache%s, skipping stressor\n",
+			args->name, cache_max, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(stress_pid_cache, cache_max, "pid-cache");
 	stress_pid_cache_index = 0;
 	stress_pid_cache_items = (size_t)exec_max;
 
@@ -760,11 +714,13 @@ static int stress_exec(stress_args_t *args)
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (str == MAP_FAILED)
 		str = NULL;
-	else
+	else {
+		stress_set_vma_anon_name(str, arg_max, "exec-args");
 		(void)shim_memset(str, 'X', arg_max - 1);
+	}
 
 #if !defined(HAVE_EXECVEAT)
-	if (args->instance == 0 &&
+	if (stress_instance_zero(args) &&
 	    ((exec_method == EXEC_METHOD_ALL) ||
 	     (exec_method == EXEC_METHOD_EXECVEAT))) {
 		pr_inf("%s: execveat not available, just using execve\n", args->name);
@@ -786,6 +742,8 @@ static int stress_exec(stress_args_t *args)
 		goto err;
 	}
 #endif
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -793,7 +751,7 @@ static int stress_exec(stress_args_t *args)
 
 		for (i = 0; i < exec_max; i++) {
 			int status;
-			pid_t pid;
+			pid_t pid, wret;
 #if defined(HAVE_CLONE)
 			char *stack_top;
 			const bool alloc_stack = (exec_fork_method == EXEC_FORK_METHOD_CLONE);
@@ -802,7 +760,7 @@ static int stress_exec(stress_args_t *args)
 #endif
 			NOCLOBBER stress_pid_hash_t *sph;
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			sph = stress_exec_alloc_pid(alloc_stack);
@@ -876,9 +834,9 @@ static int stress_exec(stress_args_t *args)
 			stress_exec_add_pid(sph, pid);
 
 			/* Check if we can reap children */
-			ret = waitpid(-1, &status, WNOHANG);
-			if ((ret > 0) && WIFEXITED(status)) {
-				stress_exec_remove_pid((pid_t)ret);
+			wret = waitpid(-1, &status, WNOHANG);
+			if ((wret > 0) && WIFEXITED(status)) {
+				stress_exec_remove_pid(wret);
 				exec_calls++;
 				stress_bogo_inc(args);
 			}
@@ -955,11 +913,11 @@ err:
 	return rc;
 }
 
-stressor_info_t stress_exec_info = {
+const stressor_info_t stress_exec_info = {
 	.stressor = stress_exec,
 	.supported = stress_exec_supported,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

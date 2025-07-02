@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -224,44 +224,49 @@ static int stress_rseq(stress_args_t *args)
 	 *  stats when the child gets SEGV'd by rseq when we use
 	 *  in invalid signature
 	 */
-	rseq_info = stress_mmap_populate(NULL, args->page_size,
+	rseq_info = (rseq_info_t *)stress_mmap_populate(NULL, sizeof(*rseq_info),
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (rseq_info == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate shared page, "
+		pr_inf_skip("%s: failed to mmap %zu byte shared page%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, sizeof(*rseq_info),
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(rseq_info, sizeof(*rseq_info), "state");
 
 	rseq_area = stress_rseq_get_area();
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("libc rseq_area @ %p\n", rseq_area);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = stress_oomable_child(args, NULL, stress_rseq_oomable, STRESS_OOMABLE_QUIET);
 
 	rate = (rseq_info->crit_count > 0) ?
 		(double)rseq_info->crit_interruptions * 1000000000.0 / (rseq_info->crit_count) : 0.0;
-	stress_metrics_set(args, 0, "critical section interruptions per billion rseq ops", rate, STRESS_HARMONIC_MEAN);
+	stress_metrics_set(args, 0, "critical section interruptions per billion rseq ops",
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	(void)munmap(rseq_info, args->page_size);
+	(void)munmap((void *)rseq_info, sizeof(*rseq_info));
 
 	return ret;
 }
 
-stressor_info_t stress_rseq_info = {
+const stressor_info_t stress_rseq_info = {
 	.stressor = stress_rseq,
 	.supported = stress_rseq_supported,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help
 };
 #else
-stressor_info_t stress_rseq_info = {
+const stressor_info_t stress_rseq_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help,
 	.unimplemented_reason = "built without Linux restartable sequences support"
 };

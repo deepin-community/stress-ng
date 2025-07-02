@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,13 +19,15 @@
 #ifndef CORE_VMSTAT_H
 #define CORE_VMSTAT_H
 
-#include "stress-ng.h"
+#include "core-attribute.h"
 
 extern WARN_UNUSED int stress_set_status(const char *const opt);
 extern WARN_UNUSED int stress_set_vmstat(const char *const opt);
 extern WARN_UNUSED int stress_set_thermalstat(const char *const opt);
 extern WARN_UNUSED int stress_set_iostat(const char *const opt);
+extern WARN_UNUSED int stress_set_raplstat(const char *const opt);
 extern WARN_UNUSED char *stress_find_mount_dev(const char *name);
+extern void stress_set_vmstat_units(const char *const opt);
 extern void stress_vmstat_start(void);
 extern void stress_vmstat_stop(void);
 

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,6 +66,7 @@ static int stress_fault(stress_args_t *args)
 	double t1 = 0.0, t2 = 0.0, dt;
 #endif
 	NOCLOBBER double duration = 0.0, count = 0.0;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -81,7 +82,11 @@ static int stress_fault(stress_args_t *args)
 
 	mapto = mmap(NULL, page_size, PROT_READ,
 		MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	if (mapto != MAP_FAILED)
+		stress_set_vma_anon_name(mapto, page_size, "mapping-ro-page");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 #if defined(HAVE_GETRUSAGE) &&		\
@@ -100,6 +105,7 @@ static int stress_fault(stress_args_t *args)
 			do_jmp = false;
 			pr_fail("%s: unexpected %s, terminating early\n",
 				args->name, stress_strsignal(die_signum));
+			rc = EXIT_FAILURE;
 			break;
 		}
 
@@ -109,22 +115,25 @@ static int stress_fault(stress_args_t *args)
 				continue;	/* Try again */
 			pr_fail("%s: open %s failed, errno=%d (%s)\n",
 				args->name, filename, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			break;
 		}
 #if defined(HAVE_POSIX_FALLOCATE)
-		if (shim_posix_fallocate(fd, 0, 1) < 0) {
-			if ((errno == ENOSPC) || (errno == EINTR)) {
+		ret = shim_posix_fallocate(fd, 0, 1);
+		if (ret != 0) {
+			if ((ret == ENOSPC) || (ret == EINTR)) {
 				(void)close(fd);
 				continue;	/* Try again */
 			}
 			(void)close(fd);
 			pr_fail("%s: posix_fallocate failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			break;
 		}
 #else
 		{
-			char buffer[1];
+			char buffer[1] = { 0 };
 
 redo:
 			if (stress_continue_flag() &&
@@ -138,13 +147,14 @@ redo:
 				(void)close(fd);
 				pr_fail("%s: write failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 				break;
 			}
 		}
 #endif
 		ret = sigsetjmp(jmp_env, 1);
 		if (ret) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				do_jmp = false;
 			if (fd != -1)
 				(void)close(fd);
@@ -160,23 +170,27 @@ redo:
 
 		ptr = (uint8_t *)mmap(NULL, 1, PROT_READ | PROT_WRITE,
 			MAP_SHARED, fd, 0);
-		(void)close(fd);
-
 		if (ptr == MAP_FAILED) {
 			if ((errno == EAGAIN) ||
 			    (errno == ENOMEM) ||
-			    (errno == ENFILE))
+			    (errno == ENFILE)) {
+				(void)close(fd);
 				goto next;
-			pr_err("%s: mmap failed: errno=%d (%s)\n",
-				args->name, errno, strerror(errno));
+			}
+			pr_err("%s: mmap of 1 byte failed%s, errno=%d (%s)\n",
+				args->name, stress_get_memfree_str(),
+				errno, strerror(errno));
+			(void)close(fd);
 			break;
 
 		}
+		(void)close(fd);
 		t = stress_time_now();
 		*ptr = 0;	/* Cause the page fault */
 		duration += stress_time_now() - t;
 		count += 1.0;
 
+		stress_set_vma_anon_name(ptr, page_size, "page-fault-major");
 #if defined(HAVE_MADVISE) &&	\
     defined(MADV_DONTNEED)
 		if (madvise((void *)ptr, page_size, MADV_DONTNEED) == 0) {
@@ -197,7 +211,7 @@ redo:
 		}
 #endif
 		if (stress_munmap_retry_enomem((void *)ptr, page_size) < 0) {
-			pr_err("%s: munmap failed: errno=%d (%s)\n",
+			pr_err("%s: munmap failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			break;
 		}
@@ -218,6 +232,7 @@ next:
 					MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 				if (ptr != MAP_FAILED) {
 					stress_uint8_put(*ptr);
+					stress_set_vma_anon_name(ptr, page_size, "page-fault-minor");
 #if defined(HAVE_MADVISE) &&	\
     defined(MADV_DONTNEED)
 					if (madvise((void *)ptr, page_size, MADV_DONTNEED) == 0) {
@@ -264,19 +279,19 @@ next:
 		double average_duration;
 
 		stress_metrics_set(args, 0, "minor page faults per sec",
-			(double)usage.ru_minflt / dt, STRESS_HARMONIC_MEAN);
+			(double)usage.ru_minflt / dt, STRESS_METRIC_HARMONIC_MEAN);
 		stress_metrics_set(args, 1, "major page faults per sec",
-			(double)usage.ru_majflt / dt, STRESS_HARMONIC_MEAN);
+			(double)usage.ru_majflt / dt, STRESS_METRIC_HARMONIC_MEAN);
 		average_duration = (count > 0.0) ? duration / count : 0.0;
 		stress_metrics_set(args, 2, "nanosecs per page fault",
-			average_duration * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+			average_duration * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	}
 #endif
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_fault_info = {
+const stressor_info_t stress_fault_info = {
 	.stressor = stress_fault,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
 	.help = help
 };

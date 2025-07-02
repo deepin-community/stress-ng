@@ -17,10 +17,12 @@
  *
  */
 #include "stress-ng.h"
+#include "core-affinity.h"
 #include "core-builtin.h"
 #include "core-cpu-cache.h"
 #include "core-killpid.h"
 #include "core-lock.h"
+#include "core-pragma.h"
 
 #include <sched.h>
 
@@ -52,7 +54,7 @@ static const stress_help_t help[] = {
 
 typedef int (*stress_cacheline_func)(
         stress_args_t *args,
-        const int index,
+        const int idx,
         const bool parent,
         const size_t l1_cacheline_size);
 
@@ -67,7 +69,7 @@ static uint64_t get_L1_line_size(stress_args_t *args)
 #if defined(__linux__) ||	\
     defined(__APPLE__)
 	stress_cpu_cache_cpus_t *cpu_caches;
-	stress_cpu_cache_t *cache = NULL;
+	const stress_cpu_cache_t *cache = NULL;
 
 	cpu_caches = stress_cpu_cache_get_all_details();
 	if (!cpu_caches) {
@@ -105,19 +107,20 @@ static uint64_t get_L1_line_size(stress_args_t *args)
 
 static int stress_cacheline_adjacent(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	register uint8_t val8 = *(data8);
 	volatile uint8_t *data8adjacent = (volatile uint8_t *)(((uintptr_t)data8) ^ 1);
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		(*data8)++;
 		(void)(*data8adjacent);
@@ -144,7 +147,7 @@ static int stress_cacheline_adjacent(
 
 		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: adjacent method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -153,18 +156,19 @@ static int stress_cacheline_adjacent(
 
 static int stress_cacheline_copy(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	const volatile uint8_t *data8adjacent = (volatile uint8_t *)(((uintptr_t)data8) ^ 1);
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		register uint8_t val8;
 
@@ -180,7 +184,7 @@ static int stress_cacheline_copy(
 
 		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: copy method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -189,18 +193,19 @@ static int stress_cacheline_copy(
 
 static int stress_cacheline_inc(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	register uint8_t val8 = *(data8);
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		(*data8)++;
 		stress_asm_mb();
@@ -220,7 +225,7 @@ static int stress_cacheline_inc(
 
 		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: inc method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -229,18 +234,19 @@ static int stress_cacheline_inc(
 
 static int stress_cacheline_rdwr(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	register uint8_t val8 = *(data8);
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		uint8_t tmp;
 
@@ -295,7 +301,7 @@ static int stress_cacheline_rdwr(
 
 		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: rdwr method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -304,18 +310,19 @@ static int stress_cacheline_rdwr(
 
 static int stress_cacheline_mix(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)(uintptr_t)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	static uint8_t tmp = 0xa5;
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		register uint8_t val8;
 
@@ -325,7 +332,7 @@ static int stress_cacheline_mix(
 		EXERCISE(val8);
 		if (UNLIKELY(val8 != *data8)) {
 			pr_fail("%s: mix method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 		tmp = val8;
@@ -335,13 +342,13 @@ static int stress_cacheline_mix(
 
 static int stress_cacheline_rdrev64(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	const ssize_t cacheline_size = (ssize_t)g_shared->cacheline.size;
 	uintptr_t aligned_cacheline = (uintptr_t)buffer & ~(l1_cacheline_size - 1);
 
@@ -356,6 +363,7 @@ static int stress_cacheline_rdrev64(
 		val8 = *data8;
 
 		/* read cache line backwards */
+PRAGMA_UNROLL
 		for (j = cacheline_size - 8; j >= 0; j -= 8) {
 			volatile uint64_t *data64 = (volatile uint64_t *)(aligned_cacheline + (size_t)j);
 
@@ -364,7 +372,7 @@ static int stress_cacheline_rdrev64(
 		}
 		if (UNLIKELY(val8 != *data8)) {
 			pr_fail("%s: rdrev64 method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -373,13 +381,13 @@ static int stress_cacheline_rdrev64(
 
 static int stress_cacheline_rdfwd64(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	const size_t cacheline_size = g_shared->cacheline.size;
 	uintptr_t aligned_cacheline = (uintptr_t)buffer & ~(l1_cacheline_size - 1);
 
@@ -394,6 +402,9 @@ static int stress_cacheline_rdfwd64(
 		val8 = *data8;
 
 		/* read cache line forwards */
+#if !defined(HAVE_COMPILER_CLANG)
+PRAGMA_UNROLL
+#endif
 		for (j = 0; j < cacheline_size; j += 8) {
 			volatile uint64_t *data64 = (volatile uint64_t *)(aligned_cacheline + j);
 
@@ -402,7 +413,7 @@ static int stress_cacheline_rdfwd64(
 		}
 		if (UNLIKELY(val8 != *data8)) {
 			pr_fail("%s: rdfwd64: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -411,13 +422,13 @@ static int stress_cacheline_rdfwd64(
 
 static int stress_cacheline_rdints(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	volatile uint16_t *data16 = (uint16_t *)(((uintptr_t)data8) & ~(uintptr_t)1);
 	volatile uint32_t *data32 = (uint32_t *)(((uintptr_t)data8) & ~(uintptr_t)3);
 	volatile uint64_t *data64 = (uint64_t *)(((uintptr_t)data8) & ~(uintptr_t)7);
@@ -428,6 +439,7 @@ static int stress_cacheline_rdints(
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		uint8_t val8;
 
@@ -455,7 +467,7 @@ static int stress_cacheline_rdints(
 #endif
 		if (UNLIKELY(val8 != *data8)) {
 			pr_fail("%s: rdints method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -464,17 +476,18 @@ static int stress_cacheline_rdints(
 
 static int stress_cacheline_bits(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		register uint8_t val8;
 
@@ -484,17 +497,17 @@ static int stress_cacheline_bits(
 		val8 = (uint8_t)(1U << (i & 7));
 		*data8 = val8;
 		stress_asm_mb();
-		if (*data8 != val8) {
+		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: bits method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 		val8 ^= 0xff;
 		*data8 = val8;
 		stress_asm_mb();
-		if (*data8 != val8) {
+		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: bits method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -504,18 +517,19 @@ static int stress_cacheline_bits(
 #if defined(SHIM_ATOMIC_INC)
 static int stress_cacheline_atomicinc(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	register int i;
 	volatile uint8_t *buffer = (volatile uint8_t *)g_shared->cacheline.buffer;
-	volatile uint8_t *data8 = buffer + index;
+	volatile uint8_t *data8 = buffer + idx;
 	register uint8_t val8 = *(data8);
 
 	(void)parent;
 	(void)l1_cacheline_size;
 
+PRAGMA_UNROLL
 	for (i = 0; i < 1024; i++) {
 		SHIM_ATOMIC_INC(data8);
 		SHIM_ATOMIC_INC(data8);
@@ -528,7 +542,7 @@ static int stress_cacheline_atomicinc(
 
 		if (UNLIKELY(*data8 != val8)) {
 			pr_fail("%s: atomicinc method: cache line error in offset 0x%x, expected %2" PRIx8 ", got %2" PRIx8 "\n",
-				args->name, index, val8, *data8);
+				args->name, idx, val8, *data8);
 			return EXIT_FAILURE;
 		}
 	}
@@ -538,7 +552,7 @@ static int stress_cacheline_atomicinc(
 
 static int stress_cacheline_all(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size);
 
@@ -558,52 +572,28 @@ static const stress_cacheline_method_t cacheline_methods[] = {
 	{ "rdwr",	stress_cacheline_rdwr },
 };
 
+static const char *stress_cacheline_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(cacheline_methods)) ? cacheline_methods[i].name : NULL;
+}
+
 static int stress_cacheline_all(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size)
 {
 	size_t i;
 	const size_t n = SIZEOF_ARRAY(cacheline_methods);
 
-	for (i = 1; stress_continue(args) && (i < n); i++) {
+	for (i = 1; LIKELY(stress_continue(args) && (i < n)); i++) {
 		int rc;
 
-		rc = cacheline_methods[i].func(args, index, parent, l1_cacheline_size);
+		rc = cacheline_methods[i].func(args, idx, parent, l1_cacheline_size);
 		if (rc != EXIT_SUCCESS)
 			return rc;
 	}
 	return EXIT_SUCCESS;
-}
-
-static int stress_set_cacheline_affinity(const char *opt)
-{
-	return stress_set_setting_true("cacheline-affinity", opt);
-}
-
-/*
- *  stress_set_cacheline_method()
- *	set the default cacheline stress method
- */
-static int stress_set_cacheline_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(cacheline_methods); i++) {
-		if (!strcmp(cacheline_methods[i].name, name)) {
-			stress_set_setting("cacheline-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "cacheline-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(cacheline_methods); i++) {
-		(void)fprintf(stderr, " %s", cacheline_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
 }
 
 #if defined(HAVE_SCHED_GETAFFINITY) &&	\
@@ -615,22 +605,26 @@ static int stress_set_cacheline_method(const char *name)
  */
 static inline void stress_cacheline_change_affinity(
 	stress_args_t *args,
-	const uint32_t cpus,
+	const uint32_t n_cpus,
+	const uint32_t *cpus,
 	bool parent)
 {
-	cpu_set_t mask;
-	double now = stress_time_now() * 100;
-	uint32_t cpu = ((uint32_t)args->instance + (uint32_t)parent + (uint32_t)now) % cpus;
+	if (n_cpus > 0) {
+		cpu_set_t mask;
+		const double now = stress_time_now() * 100;
+		const uint32_t cpu_idx = ((uint32_t)args->instance + (uint32_t)parent + (uint32_t)now) % n_cpus;
+		const uint32_t cpu = cpus[cpu_idx];
 
-	CPU_ZERO(&mask);
-	CPU_SET((int)cpu, &mask);
-	VOID_RET(int, sched_setaffinity(0, sizeof(mask), &mask));
+		CPU_ZERO(&mask);
+		CPU_SET((int)cpu, &mask);
+		VOID_RET(int, sched_setaffinity(0, sizeof(mask), &mask));
+	}
 }
 #endif
 
 static int stress_cacheline_child(
 	stress_args_t *args,
-	const int index,
+	const int idx,
 	const bool parent,
 	const size_t l1_cacheline_size,
 	stress_cacheline_func func,
@@ -639,39 +633,46 @@ static int stress_cacheline_child(
 	int rc;
 #if defined(HAVE_SCHED_GETAFFINITY) &&	\
     defined(HAVE_SCHED_SETAFFINITY)
-	const uint32_t cpus = (uint32_t)stress_get_processors_configured();
+	uint32_t *cpus;
+	const uint32_t n_cpus = stress_get_usable_cpus(&cpus, true);
 #endif
 
 	(void)cacheline_affinity;
 
 	do {
-		rc = func(args, index, parent, l1_cacheline_size);
+		rc = func(args, idx, parent, l1_cacheline_size);
 		if (parent)
 			stress_bogo_inc(args);
 
 #if defined(HAVE_SCHED_GETAFFINITY) &&	\
     defined(HAVE_SCHED_SETAFFINITY)
 		if (cacheline_affinity)
-			stress_cacheline_change_affinity(args, cpus, parent);
+			stress_cacheline_change_affinity(args, n_cpus, cpus, parent);
 #endif
 	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
+#if defined(HAVE_SCHED_GETAFFINITY) &&	\
+    defined(HAVE_SCHED_SETAFFINITY)
+	stress_free_usable_cpus(&cpus);
+#endif
 	return rc;
 }
 
 /*
  *  stress_cacheline_init()
- *	called once by stress-ng, so we can set index to 0
+ *	called once by stress-ng, so we can set idx to 0
  */
-static void stress_cacheline_init(void)
+static void stress_cacheline_init(const uint32_t instances)
 {
+	(void)instances;
+
 	g_shared->cacheline.index = 0;
-	g_shared->cacheline.lock = stress_lock_create();
+	g_shared->cacheline.lock = stress_lock_create("cacheline");
 }
 
 /*
  *  stress_cacheline_deinit()
- *	called once by stress-ng, so we can set index to 0
+ *	called once by stress-ng, so we can set idx to 0
  */
 static void stress_cacheline_deinit(void)
 {
@@ -682,7 +683,7 @@ static void stress_cacheline_deinit(void)
 	}
 }
 
-static int stress_cacheline_next_index(void)
+static int stress_cacheline_next_idx(void)
 {
 	int ret;
 
@@ -700,12 +701,12 @@ static int stress_cacheline_next_index(void)
 
 /*
  *  stress_cacheline()
- *	execise a cacheline by multiple processes
+ *	exercise a cacheline by multiple processes
  */
 static int stress_cacheline(stress_args_t *args)
 {
 	size_t l1_cacheline_size = (size_t)get_L1_line_size(args);
-	int index;
+	int idx;
 	pid_t pid;
 	int rc = EXIT_SUCCESS;
 	size_t cacheline_method = 0;
@@ -720,20 +721,20 @@ static int stress_cacheline(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
-	index = stress_cacheline_next_index();
-	if (index < 0) {
-		pr_inf("%s: failed to get cacheline index, skipping stressor\n", args->name);
+	idx = stress_cacheline_next_idx();
+	if (idx < 0) {
+		pr_inf("%s: failed to get cacheline idx, skipping stressor\n", args->name);
 		return EXIT_NO_RESOURCE;
 	}
 
 	(void)stress_get_setting("cacheline-affinity", &cacheline_affinity);
 	(void)stress_get_setting("cacheline-method", &cacheline_method);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_dbg("%s: using method '%s'\n", args->name, cacheline_methods[cacheline_method].name);
 		pr_dbg("%s: L1 cache line size %zd bytes\n", args->name, l1_cacheline_size);
 
-		if ((args->num_instances * 2) < l1_cacheline_size) {
+		if ((args->instances * 2) < l1_cacheline_size) {
 			pr_inf("%s: to fully exercise a %zd byte cache line, %zd instances are required\n",
 				args->name, l1_cacheline_size, l1_cacheline_size / 2);
 		}
@@ -741,42 +742,45 @@ static int stress_cacheline(stress_args_t *args)
 
 	func = cacheline_methods[cacheline_method].func;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	pid = fork();
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
-		pr_err("%s: fork failed: errno=%d: (%s)\n",
+		pr_err("%s: fork failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	} else if (pid == 0) {
-		rc = stress_cacheline_child(args, index + 1, false, l1_cacheline_size, func, cacheline_affinity);
+		rc = stress_cacheline_child(args, idx + 1, false, l1_cacheline_size, func, cacheline_affinity);
 		_exit(rc);
 	} else {
-		stress_cacheline_child(args, index, true, l1_cacheline_size, func, cacheline_affinity);
-		stress_kill_and_wait(args, pid, SIGALRM, false);
+		stress_cacheline_child(args, idx, true, l1_cacheline_size, func, cacheline_affinity);
+		if (stress_kill_and_wait(args, pid, SIGALRM, false) != EXIT_SUCCESS)
+			rc = EXIT_FAILURE;
 	}
 
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_cacheline_affinity,	stress_set_cacheline_affinity },
-	{ OPT_cacheline_method,		stress_set_cacheline_method },
-	{ 0,				NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_cacheline_affinity, "cacheline-affinity", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_cacheline_method,   "cacheline-method",   TYPE_ID_SIZE_T_METHOD, 0, 0, stress_cacheline_method },
+	END_OPT,
 };
 
-stressor_info_t stress_cacheline_info = {
+const stressor_info_t stress_cacheline_info = {
 	.stressor = stress_cacheline,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.init = stress_cacheline_init,
 	.deinit = stress_cacheline_deinit,
 	.help = help

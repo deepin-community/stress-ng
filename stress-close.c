@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -128,13 +128,22 @@ static const int types[] = {
 	0,
 };
 
+static const int close_range_flags[] = {
+#if defined(CLOSE_RANGE_UNSHARE)
+	CLOSE_RANGE_UNSHARE,
+#endif
+#if defined(CLOSE_RANGE_CLOEXEC)
+	CLOSE_RANGE_CLOEXEC,
+#endif
+	0
+};
+
 /*
  *  stress_close_func()
- *	pthread that exits immediately
+ *	pthread that close file descriptors
  */
 static void *stress_close_func(void *arg)
 {
-	static void *nowt = NULL;
 	stress_pthread_args_t *pargs = (stress_pthread_args_t *)arg;
 	stress_args_t *args = pargs->args;
 
@@ -147,16 +156,19 @@ static void *stress_close_func(void *arg)
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 #endif
 
+	stress_random_small_sleep();
+
 	while (stress_continue(args)) {
 		const uint64_t delay =
 			max_delay_us ? stress_mwc64modn(max_delay_us) : 0;
 		int fds[FDS_TO_DUP], i, ret;
+		int flag;
 
 		for (i = 0; i < FDS_TO_DUP; i++) {
 			fds[i] = dup2(fileno(stderr), i + FDS_START);
 		}
 
-		shim_usleep_interruptible(delay);
+		(void)shim_usleep_interruptible(delay);
 		if (fd != -1)
 			(void)close(fd);
 		if (dupfd != -1)
@@ -164,7 +176,7 @@ static void *stress_close_func(void *arg)
 
 #if defined(F_GETFL)
 		{
-			int fd_rnd = (int)stress_mwc32() + 64;
+			const int fd_rnd = (int)stress_mwc32() + 64;
 
 			/*
 			 *  close random unused fd to force EBADF
@@ -178,7 +190,8 @@ static void *stress_close_func(void *arg)
 		/*
 		 *  close a range of fds
 		 */
-		ret = shim_close_range(FDS_START, FDS_START + FDS_TO_DUP, 0);
+		flag = close_range_flags[stress_mwc8modn(SIZEOF_ARRAY(close_range_flags))];
+		ret = shim_close_range(FDS_START, FDS_START + FDS_TO_DUP, flag);
 		if ((ret < 0) || (errno == ENOSYS)) {
 			for (i = 0; i < FDS_TO_DUP; i++)
 				(void)close(fds[i]);
@@ -194,12 +207,12 @@ static void *stress_close_func(void *arg)
 		VOID_RET(int, shim_close_range(FDS_START + FDS_TO_DUP, FDS_START, ~0U));
 	}
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
  *  stress_close()
- *	stress by creating pthreads
+ *	stress by closing file descriptors
  */
 static int stress_close(stress_args_t *args)
 {
@@ -263,6 +276,8 @@ static int stress_close(stress_args_t *args)
 #else
 	UNEXPECTED
 #endif
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -316,6 +331,7 @@ static int stress_close(stress_args_t *args)
 		case 7:
 			if (LIKELY(pipe(pipefds) == 0)) {
 				fd = pipefds[0];
+				pipefds[0] = -1;
 				(void)close(pipefds[1]);
 			}
 			break;
@@ -350,7 +366,9 @@ static int stress_close(stress_args_t *args)
 			fd = open("/tmp/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 			break;
 #endif
-#if defined(HAVE_LIB_RT)
+#if defined(HAVE_LIB_RT) &&	\
+    defined(HAVE_SHM_OPEN) &&	\
+    defined(HAVE_SHM_UNLINK)
 		case 12:
 			fd = shm_open(shm_name, O_CREAT | O_RDWR | O_TRUNC,
 				S_IRUSR | S_IWUSR);
@@ -410,7 +428,10 @@ static int stress_close(stress_args_t *args)
 			if (UNLIKELY(ret >= 0)) {
 				pr_fail("%s: faccessat opened file descriptor succeeded unexpectedly, "
 					"errno=%d (%s)\n", args->name, errno, strerror(errno));
-				(void)close(ret);
+				(void)close(fd);
+				if (dupfd != -1)
+					(void)close(dupfd);
+				rc = EXIT_FAILURE;
 				goto tidy;
 			}
 #else
@@ -418,7 +439,9 @@ static int stress_close(stress_args_t *args)
 #endif
 			VOID_RET(int, shim_fstat(fd, &statbuf));
 
-			VOID_RET(int, close(dup(STDOUT_FILENO)));
+			ret = dup(STDOUT_FILENO);
+			if (LIKELY(ret != -1))
+				(void)close(ret);
 
 			t = stress_time_now();
 			if (LIKELY(close(fd) == 0)) {
@@ -428,13 +451,13 @@ static int stress_close(stress_args_t *args)
 				/*
 				 *  A close on a successfully closed fd should fail
 				 */
-				if (close(fd) == 0) {
+				if (UNLIKELY(close(fd) == 0)) {
 					pr_fail("%s: unexpectedly able to close the same file %d twice\n",
 						args->name, fd);
 					close_failure = true;
 				} else {
-					if ((errno != EBADF) &&
-					    (errno != EINTR)) {
+					if (UNLIKELY((errno != EBADF) &&
+						     (errno != EINTR))) {
 						pr_fail("%s: expected error on close failure, error=%d (%s)\n",
 							args->name,  errno, strerror(errno));
 						close_failure = true;
@@ -464,7 +487,7 @@ tidy:
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "close calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	for (i = 0; i < MAX_PTHREADS; i++) {
 		if (rets[i] == -1)
@@ -487,16 +510,16 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_close_info = {
+const stressor_info_t stress_close_info = {
 	.stressor = stress_close,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_close_info = {
+const stressor_info_t stress_close_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without pthread support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_RTC_H)
 #include <linux/rtc.h>
@@ -59,7 +61,7 @@ static inline int stress_rtc_dev(stress_args_t *args)
 	if (!do_dev)
 		return -EACCES;
 
-	if ((fd = open("/dev/rtc", O_RDONLY)) < 0) {
+	if (UNLIKELY((fd = open("/dev/rtc", O_RDONLY)) < 0)) {
 		do_dev = false;
 		return -errno;
 	}
@@ -68,11 +70,11 @@ static inline int stress_rtc_dev(stress_args_t *args)
 	{
 		struct rtc_time rtc_tm;
 
-		if (ioctl(fd, RTC_RD_TIME, &rtc_tm) < 0) {
+		if (UNLIKELY(ioctl(fd, RTC_RD_TIME, &rtc_tm) < 0)) {
 			if ((errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_RD_TIME failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		} else {
@@ -85,11 +87,11 @@ static inline int stress_rtc_dev(stress_args_t *args)
 	{
 		struct rtc_time rtc_tm;
 
-		if (ioctl(fd, RTC_ALM_READ, &rtc_tm) < 0) {
-			if ((errno != EINTR) && (errno != ENOTTY)) {
+		if (UNLIKELY(ioctl(fd, RTC_ALM_READ, &rtc_tm) < 0)) {
+			if ((errno != EINVAL) && (errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_ALRM_READ failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		} else {
@@ -104,11 +106,11 @@ static inline int stress_rtc_dev(stress_args_t *args)
 	{
 		struct rtc_wkalrm wake_alarm;
 
-		if (ioctl(fd, RTC_WKALM_RD, &wake_alarm) < 0) {
-			if ((errno != EINTR) && (errno != ENOTTY)) {
+		if (UNLIKELY(ioctl(fd, RTC_WKALM_RD, &wake_alarm) < 0)) {
+			if ((errno != EINVAL) && (errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_WKALRM_RD failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		} else {
@@ -142,13 +144,13 @@ static inline int stress_rtc_dev(stress_args_t *args)
 
 #if defined(RTC_EPOCH_READ)
 	{
-		unsigned long tmp;
+		unsigned long int tmp;
 
-		if (ioctl(fd, RTC_EPOCH_READ, &tmp) < 0) {
-			if ((errno != EINTR) && (errno != ENOTTY)) {
+		if (UNLIKELY(ioctl(fd, RTC_EPOCH_READ, &tmp) < 0)) {
+			if ((errno != EINVAL) && (errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_EPOCH_READ failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		} else {
@@ -161,13 +163,13 @@ static inline int stress_rtc_dev(stress_args_t *args)
 
 #if defined(RTC_IRQP_READ)
 	{
-		unsigned long tmp;
+		unsigned long int tmp;
 
-		if (ioctl(fd, RTC_IRQP_READ, &tmp) < 0) {
-			if ((errno != EINTR) && (errno != ENOTTY)) {
+		if (UNLIKELY(ioctl(fd, RTC_IRQP_READ, &tmp) < 0)) {
+			if ((errno != EINVAL) && (errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_IRQP_READ failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		} else {
@@ -197,13 +199,13 @@ static inline int stress_rtc_dev(stress_args_t *args)
 
 #if defined(RTC_VL_READ)
 	{
-		unsigned long tmp;
+		unsigned long int tmp;
 
-		if (ioctl(fd, RTC_VL_READ, &tmp) < 0) {
-			if ((errno != EINTR) && (errno != ENOTTY)) {
+		if (UNLIKELY(ioctl(fd, RTC_VL_READ, &tmp) < 0)) {
+			if ((errno != EINVAL) && (errno != EINTR) && (errno != ENOTTY)) {
+				ret = -errno;
 				pr_fail("%s: ioctl RTC_VL_READ failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-				ret = -errno;
 				goto err;
 			}
 		}
@@ -270,14 +272,17 @@ static inline int stress_rtc_sys(stress_args_t *args)
 
 		(void)snprintf(path, sizeof(path), "/sys/class/rtc/rtc0/%s", interfaces[i]);
 		ret = stress_system_read(path, buf, sizeof(buf));
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (ret == -EINTR) {
 				rc = (int)ret;
 				break;
 			} else if (ret == -ENOENT) {
 				enoents++;
+			} else if (ret == -EINVAL) {
+				/* this can occur on interrupted EFI rtc reads, ignore */
+				continue;
 			} else {
-				pr_fail("%s: read of %s failed: errno=%zd (%s)\n",
+				pr_fail("%s: read of %s failed, errno=%zd (%s)\n",
 					args->name, path, -ret, strerror((int)-ret));
 				rc = (int)ret;
 			}
@@ -300,7 +305,7 @@ static inline int stress_rtc_proc(stress_args_t *args)
 	ret = stress_system_read(path, buf, sizeof(buf));
 	if (ret < 0) {
 		if ((ret != -ENOENT) && (ret != -EINTR)) {
-			pr_fail("%s: read of %s failed: errno=%zd (%s)\n",
+			pr_fail("%s: read of %s failed, errno=%zd (%s)\n",
 			args->name, path, -ret, strerror((int)-ret));
 		}
 	}
@@ -313,6 +318,10 @@ static inline int stress_rtc_proc(stress_args_t *args)
  */
 static int stress_rtc(stress_args_t *args)
 {
+	int rc = EXIT_SUCCESS;
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -320,33 +329,45 @@ static int stress_rtc(stress_args_t *args)
 
 		ret = stress_rtc_dev(args);
 		if (ret < 0) {
-			if ((ret != -EACCES) && (ret != -EBUSY))
+			if ((ret != -ENOENT) && (ret != -EINTR) &&
+			    (ret != -EACCES) && (ret != -EBUSY) &&
+			    (ret != -EPERM)) {
+				rc = EXIT_FAILURE;
 				break;
+			}
 		}
 		ret = stress_rtc_sys(args);
-		if (ret < 0)
+		if (ret < 0) {
+			if ((ret != -ENOENT) && (ret != -EINTR)) {
+				rc = EXIT_FAILURE;
+			}
 			break;
+		}
 		ret = stress_rtc_proc(args);
-		if (ret < 0)
+		if (ret < 0) {
+			if ((ret != -ENOENT) && (ret != -EINTR)) {
+				rc = EXIT_FAILURE;
+			}
 			break;
+		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_rtc_info = {
+const stressor_info_t stress_rtc_info = {
 	.stressor = stress_rtc,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_rtc_info = {
+const stressor_info_t stress_rtc_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/rtc.h real-time clock support"

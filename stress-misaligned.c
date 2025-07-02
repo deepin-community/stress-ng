@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,10 +19,25 @@
  */
 #include "stress-ng.h"
 #include "core-arch.h"
+#include "core-asm-x86.h"
 #include "core-builtin.h"
+#include "core-cpu.h"
 #include "core-madvise.h"
 #include "core-target-clones.h"
+#include "core-numa.h"
 #include "core-nt-store.h"
+
+#include <time.h>
+
+#if defined(HAVE_LINUX_MEMPOLICY_H) &&  \
+    defined(__NR_mbind)
+#include <linux/mempolicy.h>
+#define HAVE_MISALIGNED_NUMA	(1)
+#endif
+
+#define BITS_PER_BYTE           (8)
+#define NUMA_LONG_BITS          (sizeof(unsigned long int) * BITS_PER_BYTE)
+
 
 #define MISALIGN_LOOPS		(64)
 
@@ -31,7 +46,7 @@
 #undef HAVE_ATOMIC
 #endif
 /* Disable atomic ops for PPC64 with gcc < 5.0 as these can lock up in VM */
-#if defined(STRESS_ARCH_PPC64) &&	\
+#if (defined(STRESS_ARCH_PPC64) || defined(STRESS_ARCH_PPC)) &&	\
     !NEED_GNUC(5, 0, 0)
 #undef HAVE_ATOMIC
 #endif
@@ -46,6 +61,28 @@
 #define STRESS_MISALIGNED_ERROR		(1)
 #define STRESS_MISALIGNED_TIMED_OUT	(2)
 #define STRESS_MISALIGNED_WAIT_TIME_NS	(800000000)
+
+#if defined(HAVE_ATOMIC)
+
+#if defined(HAVE_ATOMIC_FETCH_ADD_2)
+#define SHIM_ATOMIC_FETCH_ADD_2(ptr, val, order)	__atomic_fetch_add_2(ptr, val, order)
+#elif defined(HAVE_ATOMIC_FETCH_ADD)
+#define SHIM_ATOMIC_FETCH_ADD_2(ptr, val, order)	__atomic_fetch_add(ptr, val, order)
+#endif
+
+#if defined(HAVE_ATOMIC_FETCH_ADD_4)
+#define SHIM_ATOMIC_FETCH_ADD_4(ptr, val, order)	__atomic_fetch_add_4(ptr, val, order)
+#elif defined(HAVE_ATOMIC_FETCH_ADD)
+#define SHIM_ATOMIC_FETCH_ADD_4(ptr, val, order)	__atomic_fetch_add(ptr, val, order)
+#endif
+
+#if defined(HAVE_ATOMIC_FETCH_ADD_8)
+#define SHIM_ATOMIC_FETCH_ADD_8(ptr, val, order)	__atomic_fetch_add_8(ptr, val, order)
+#elif defined(HAVE_ATOMIC_FETCH_ADD)
+#define SHIM_ATOMIC_FETCH_ADD_8(ptr, val, order)	__atomic_fetch_add(ptr, val, order)
+#endif
+
+#endif
 
 static const stress_help_t help[] = {
 	{ NULL,	"misaligned N",	   	"start N workers performing misaligned read/writes" },
@@ -72,6 +109,12 @@ typedef struct {
 } stress_misaligned_method_info_t;
 
 static stress_misaligned_method_info_t *current_method;
+
+static inline ALWAYS_INLINE void stress_misligned_disable(void)
+{
+	if (current_method)
+		current_method->disabled = true;
+}
 
 #if defined(__SSE__) &&         \
     defined(STRESS_ARCH_X86) && \
@@ -117,7 +160,7 @@ static void stress_misaligned_int16rd(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(void)*ptr1;
 		stress_asm_mb();
 		(void)*ptr2;
@@ -182,7 +225,7 @@ static void stress_misaligned_int16wr(
 	volatile uint16_t *ptr16 = (uint16_t *)(buffer + page_size - 15);
 	volatile uint16_t *ptr17  = (uint16_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		register uint16_t ui16 = (uint16_t)i;
 
 		*ptr1  = ui16;
@@ -222,39 +265,39 @@ static void stress_misaligned_int16wr(
 		*ptr17 = ui16;
 		stress_asm_mb();
 
-		if (*ptr1 != ui16)
+		if (UNLIKELY(*ptr1 != ui16))
 			goto fail;
-		if (*ptr2 != ui16)
+		if (UNLIKELY(*ptr2 != ui16))
 			goto fail;
-		if (*ptr3 != ui16)
+		if (UNLIKELY(*ptr3 != ui16))
 			goto fail;
-		if (*ptr4 != ui16)
+		if (UNLIKELY(*ptr4 != ui16))
 			goto fail;
-		if (*ptr5 != ui16)
+		if (UNLIKELY(*ptr5 != ui16))
 			goto fail;
-		if (*ptr6 != ui16)
+		if (UNLIKELY(*ptr6 != ui16))
 			goto fail;
-		if (*ptr7 != ui16)
+		if (UNLIKELY(*ptr7 != ui16))
 			goto fail;
-		if (*ptr8 != ui16)
+		if (UNLIKELY(*ptr8 != ui16))
 			goto fail;
-		if (*ptr9 != ui16)
+		if (UNLIKELY(*ptr9 != ui16))
 			goto fail;
-		if (*ptr10 != ui16)
+		if (UNLIKELY(*ptr10 != ui16))
 			goto fail;
-		if (*ptr11 != ui16)
+		if (UNLIKELY(*ptr11 != ui16))
 			goto fail;
-		if (*ptr12 != ui16)
+		if (UNLIKELY(*ptr12 != ui16))
 			goto fail;
-		if (*ptr13 != ui16)
+		if (UNLIKELY(*ptr13 != ui16))
 			goto fail;
-		if (*ptr14 != ui16)
+		if (UNLIKELY(*ptr14 != ui16))
 			goto fail;
-		if (*ptr15 != ui16)
+		if (UNLIKELY(*ptr15 != ui16))
 			goto fail;
-		if (*ptr16 != ui16)
+		if (UNLIKELY(*ptr16 != ui16))
 			goto fail;
-		if (*ptr17 != ui16)
+		if (UNLIKELY(*ptr17 != ui16))
 			goto fail;
 	}
 	return;
@@ -292,7 +335,7 @@ static void stress_misaligned_int16inc(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(*ptr1)++;
 		stress_asm_mb();
 		(*ptr2)++;
@@ -332,8 +375,8 @@ static void stress_misaligned_int16inc(
 	}
 }
 
-#if defined(HAVE_ATOMIC_FETCH_ADD_2) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_2) &&	\
     defined(__ATOMIC_SEQ_CST)
 static void stress_misaligned_int16atomic(
 	stress_args_t *args,
@@ -363,42 +406,42 @@ static void stress_misaligned_int16atomic(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
-		__atomic_fetch_add_2(ptr1, 1, __ATOMIC_SEQ_CST);
+	while (LIKELY(stress_continue_flag() && --i)) {
+		SHIM_ATOMIC_FETCH_ADD_2(ptr1, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr2, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr2, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr3, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr3, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr4, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr4, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr5, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr5, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr6, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr6, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr7, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr7, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_2(ptr8, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-
-		__atomic_fetch_add_2(ptr9, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr10, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr11, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr12, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr13, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr14, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr15, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_2(ptr16, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr8, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 
-		__atomic_fetch_add_2(ptr17, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_2(ptr9, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr10, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr11, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr12, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr13, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr14, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr15, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_2(ptr16, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+
+		SHIM_ATOMIC_FETCH_ADD_2(ptr17, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 	}
 }
@@ -424,7 +467,7 @@ static void stress_misaligned_int32rd(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(void)*ptr1;
 		stress_asm_mb();
 		(void)*ptr2;
@@ -465,7 +508,7 @@ static void stress_misaligned_int32wr(
 	volatile uint32_t *ptr8 = (uint32_t *)(buffer + page_size - 13);
 	volatile uint32_t *ptr9 = (uint32_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		register uint32_t ui32 = (uint32_t)i;
 
 		*ptr1 = ui32;
@@ -489,23 +532,23 @@ static void stress_misaligned_int32wr(
 		*ptr9 = ui32;
 		stress_asm_mb();
 
-		if (*ptr1 != ui32)
+		if (UNLIKELY(*ptr1 != ui32))
 			goto fail;
-		if (*ptr2 != ui32)
+		if (UNLIKELY(*ptr2 != ui32))
 			goto fail;
-		if (*ptr3 != ui32)
+		if (UNLIKELY(*ptr3 != ui32))
 			goto fail;
-		if (*ptr4 != ui32)
+		if (UNLIKELY(*ptr4 != ui32))
 			goto fail;
-		if (*ptr5 != ui32)
+		if (UNLIKELY(*ptr5 != ui32))
 			goto fail;
-		if (*ptr6 != ui32)
+		if (UNLIKELY(*ptr6 != ui32))
 			goto fail;
-		if (*ptr7 != ui32)
+		if (UNLIKELY(*ptr7 != ui32))
 			goto fail;
-		if (*ptr8 != ui32)
+		if (UNLIKELY(*ptr8 != ui32))
 			goto fail;
-		if (*ptr9 != ui32)
+		if (UNLIKELY(*ptr9 != ui32))
 			goto fail;
 	}
 	return;
@@ -533,7 +576,14 @@ static void stress_misaligned_int32wrnt(
 	uint32_t *ptr8 = (uint32_t *)(buffer + page_size - 13);
 	uint32_t *ptr9 = (uint32_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	if (!stress_cpu_x86_has_sse2()) {
+		if (stress_instance_zero(args))
+			pr_inf("%s: int32wrnt disabled, 32 bit non-temporal store not available\n", args->name);
+		stress_misligned_disable();
+		return;
+	}
+
+	while (LIKELY(stress_continue_flag() && --i)) {
 		register uint32_t ui32 = (uint32_t)i;
 
 		stress_nt_store32(ptr1, ui32);
@@ -546,23 +596,23 @@ static void stress_misaligned_int32wrnt(
 		stress_nt_store32(ptr8, ui32);
 		stress_nt_store32(ptr9, ui32);
 
-		if (*ptr1 != ui32)
+		if (UNLIKELY(*ptr1 != ui32))
 			goto fail;
-		if (*ptr2 != ui32)
+		if (UNLIKELY(*ptr2 != ui32))
 			goto fail;
-		if (*ptr3 != ui32)
+		if (UNLIKELY(*ptr3 != ui32))
 			goto fail;
-		if (*ptr4 != ui32)
+		if (UNLIKELY(*ptr4 != ui32))
 			goto fail;
-		if (*ptr5 != ui32)
+		if (UNLIKELY(*ptr5 != ui32))
 			goto fail;
-		if (*ptr6 != ui32)
+		if (UNLIKELY(*ptr6 != ui32))
 			goto fail;
-		if (*ptr7 != ui32)
+		if (UNLIKELY(*ptr7 != ui32))
 			goto fail;
-		if (*ptr8 != ui32)
+		if (UNLIKELY(*ptr8 != ui32))
 			goto fail;
-		if (*ptr9 != ui32)
+		if (UNLIKELY(*ptr9 != ui32))
 			goto fail;
 	}
 	return;
@@ -594,7 +644,7 @@ static void stress_misaligned_int32inc(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(*ptr1)++;
 		stress_asm_mb();
 		(*ptr2)++;
@@ -618,8 +668,8 @@ static void stress_misaligned_int32inc(
 	}
 }
 
-#if defined(HAVE_ATOMIC_FETCH_ADD_4) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_4) &&	\
     defined(__ATOMIC_SEQ_CST)
 static void stress_misaligned_int32atomic(
 	stress_args_t *args,
@@ -641,26 +691,26 @@ static void stress_misaligned_int32atomic(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
-		__atomic_fetch_add_4(ptr1, 1, __ATOMIC_SEQ_CST);
+	while (LIKELY(stress_continue_flag() && --i)) {
+		SHIM_ATOMIC_FETCH_ADD_4(ptr1, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_4(ptr2, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_4(ptr2, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_4(ptr3, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_4(ptr3, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_4(ptr4, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-
-		__atomic_fetch_add_4(ptr5, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_4(ptr6, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_4(ptr7, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_4(ptr8, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_4(ptr4, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 
-		__atomic_fetch_add_4(ptr9, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_4(ptr5, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_4(ptr6, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_4(ptr7, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_4(ptr8, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+
+		SHIM_ATOMIC_FETCH_ADD_4(ptr9, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 	}
 }
@@ -682,7 +732,7 @@ static void stress_misaligned_int64rd(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(void)*ptr1;
 		stress_asm_mb();
 		(void)*ptr2;
@@ -711,7 +761,7 @@ static void stress_misaligned_int64wr(
 	volatile uint64_t *ptr4 = (uint64_t *)(buffer + page_size - 9);
 	volatile uint64_t *ptr5 = (uint64_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		register uint64_t ui64 = (uint64_t)i;
 
 		*ptr1 = ui64;
@@ -727,15 +777,15 @@ static void stress_misaligned_int64wr(
 		*ptr5 = ui64;
 		stress_asm_mb();
 
-		if (*ptr1 != ui64)
+		if (UNLIKELY(*ptr1 != ui64))
 			goto fail;
-		if (*ptr2 != ui64)
+		if (UNLIKELY(*ptr2 != ui64))
 			goto fail;
-		if (*ptr3 != ui64)
+		if (UNLIKELY(*ptr3 != ui64))
 			goto fail;
-		if (*ptr4 != ui64)
+		if (UNLIKELY(*ptr4 != ui64))
 			goto fail;
-		if (*ptr5 != ui64)
+		if (UNLIKELY(*ptr5 != ui64))
 			goto fail;
 	}
 	return;
@@ -759,7 +809,14 @@ static void stress_misaligned_int64wrnt(
 	uint64_t *ptr4 = (uint64_t *)(buffer + page_size - 9);
 	uint64_t *ptr5 = (uint64_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	if (!stress_cpu_x86_has_sse2()) {
+		if (stress_instance_zero(args))
+			pr_inf("%s: int64wrnt disabled, 64 bit non-temporal store not available\n", args->name);
+		stress_misligned_disable();
+		return;
+	}
+
+	while (LIKELY(stress_continue_flag() && --i)) {
 		register uint64_t ui64 = (uint64_t)i;
 
 		stress_nt_store64(ptr1, ui64);
@@ -768,15 +825,65 @@ static void stress_misaligned_int64wrnt(
 		stress_nt_store64(ptr4, ui64);
 		stress_nt_store64(ptr5, ui64);
 
-		if (*ptr1 != ui64)
+		if (UNLIKELY(*ptr1 != ui64))
 			goto fail;
-		if (*ptr2 != ui64)
+		if (UNLIKELY(*ptr2 != ui64))
 			goto fail;
-		if (*ptr3 != ui64)
+		if (UNLIKELY(*ptr3 != ui64))
 			goto fail;
-		if (*ptr4 != ui64)
+		if (UNLIKELY(*ptr4 != ui64))
 			goto fail;
-		if (*ptr5 != ui64)
+		if (UNLIKELY(*ptr5 != ui64))
+			goto fail;
+	}
+	return;
+
+fail:
+	pr_inf("%s: int64wrt: difference between 64 bit value written and value read back\n", args->name);
+	*succeeded = false;
+}
+#endif
+
+#if defined(HAVE_ASM_X86_MOVDIRI) &&	\
+    defined(STRESS_ARCH_X86_64)
+static void stress_misaligned_int64wrds(
+	stress_args_t *args,
+	uintptr_t buffer,
+	const size_t page_size,
+	bool *succeeded)
+{
+	register int i = MISALIGN_LOOPS;
+	uint64_t *ptr1 = (uint64_t *)(buffer + 1);
+	uint64_t *ptr2 = (uint64_t *)(buffer + 9);
+	uint64_t *ptr3 = (uint64_t *)(buffer + page_size - 1);
+	uint64_t *ptr4 = (uint64_t *)(buffer + page_size - 9);
+	uint64_t *ptr5 = (uint64_t *)(buffer + 63);
+
+	if (!stress_cpu_x86_has_movdiri()) {
+		if (stress_instance_zero(args))
+			pr_inf("%s: int64wrds disabled, 64 bit direct store not available\n", args->name);
+		stress_misligned_disable();
+		return;
+	}
+
+	while (LIKELY(stress_continue_flag() && --i)) {
+		register uint64_t ui64 = (uint64_t)i;
+
+		stress_ds_store64(ptr1, ui64);
+		stress_ds_store64(ptr2, ui64);
+		stress_ds_store64(ptr3, ui64);
+		stress_ds_store64(ptr4, ui64);
+		stress_ds_store64(ptr5, ui64);
+
+		if (UNLIKELY(*ptr1 != ui64))
+			goto fail;
+		if (UNLIKELY(*ptr2 != ui64))
+			goto fail;
+		if (UNLIKELY(*ptr3 != ui64))
+			goto fail;
+		if (UNLIKELY(*ptr4 != ui64))
+			goto fail;
+		if (UNLIKELY(*ptr5 != ui64))
 			goto fail;
 	}
 	return;
@@ -803,7 +910,7 @@ static void stress_misaligned_int64inc(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		(*ptr1)++;
 		stress_asm_mb();
 		(*ptr2)++;
@@ -819,8 +926,8 @@ static void stress_misaligned_int64inc(
 	}
 }
 
-#if defined(HAVE_ATOMIC_FETCH_ADD_8) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_8) &&	\
     defined(__ATOMIC_SEQ_CST)
 static void stress_misaligned_int64atomic(
 	stress_args_t *args,
@@ -838,18 +945,18 @@ static void stress_misaligned_int64atomic(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
-		__atomic_fetch_add_8(ptr1, 1, __ATOMIC_SEQ_CST);
+	while (LIKELY(stress_continue_flag() && --i)) {
+		SHIM_ATOMIC_FETCH_ADD_8(ptr1, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
-		__atomic_fetch_add_8(ptr2, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-
-		__atomic_fetch_add_8(ptr3, 1, __ATOMIC_SEQ_CST);
-		stress_asm_mb();
-		__atomic_fetch_add_8(ptr4, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr2, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 
-		__atomic_fetch_add_8(ptr5, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr3, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+		SHIM_ATOMIC_FETCH_ADD_8(ptr4, 1, __ATOMIC_SEQ_CST);
+		stress_asm_mb();
+
+		SHIM_ATOMIC_FETCH_ADD_8(ptr5, 1, __ATOMIC_SEQ_CST);
 		stress_asm_mb();
 	}
 }
@@ -902,7 +1009,7 @@ static void stress_misaligned_int128wr(
 	volatile __uint128_t *ptr2 = (__uint128_t *)(buffer + page_size - 1);
 	volatile __uint128_t *ptr3 = (__uint128_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		__uint128_t ui128 = (__uint128_t)i;
 
 		*ptr1 = ui128;
@@ -914,11 +1021,11 @@ static void stress_misaligned_int128wr(
 		*ptr3 = ui128;
 		stress_asm_mb();
 
-		if (*ptr1 != ui128)
+		if (UNLIKELY(*ptr1 != ui128))
 			goto fail;
-		if (*ptr2 != ui128)
+		if (UNLIKELY(*ptr2 != ui128))
 			goto fail;
-		if (*ptr3 != ui128)
+		if (UNLIKELY(*ptr3 != ui128))
 			goto fail;
 	}
 	return;
@@ -940,7 +1047,14 @@ static void stress_misaligned_int128wrnt(
 	__uint128_t *ptr2 = (__uint128_t *)(buffer + page_size - 1);
 	__uint128_t *ptr3 = (__uint128_t *)(buffer + 63);
 
-	while (stress_continue_flag() && --i) {
+	if (!stress_cpu_x86_has_sse2()) {
+		if (stress_instance_zero(args))
+			pr_inf("%s: int128wrnt disabled, 128 bit non-temporal store not available\n", args->name);
+		stress_misligned_disable();
+		return;
+	}
+
+	while (LIKELY(stress_continue_flag() && --i)) {
 		stress_nt_store128(ptr1, (__uint128_t)i);
 		stress_nt_store128(ptr2, (__uint128_t)i);
 		stress_nt_store128(ptr3, (__uint128_t)i);
@@ -969,8 +1083,8 @@ static void TARGET_CLONE_NO_SSE stress_misaligned_int128inc(
 	}
 }
 
-#if defined(HAVE_ATOMIC_FETCH_ADD_8) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_8) &&	\
     defined(__ATOMIC_SEQ_CST)
 static void stress_misaligned_int128atomic(
 	stress_args_t *args,
@@ -986,17 +1100,21 @@ static void stress_misaligned_int128atomic(
 	(void)args;
 	(void)succeeded;
 
-	while (stress_continue_flag() && --i) {
+	while (LIKELY(stress_continue_flag() && --i)) {
 		/* No add 16 variant, so do 2 x 8 adds for now */
-		__atomic_fetch_add_8(ptr1, 1, __ATOMIC_SEQ_CST);
-		__atomic_fetch_add_8(ptr1 + 1, 1, __ATOMIC_SEQ_CST);
+		volatile uint64_t *ptr1u64 = (volatile uint64_t *)ptr1;
+		volatile uint64_t *ptr2u64 = (volatile uint64_t *)ptr2;
+		volatile uint64_t *ptr3u64 = (volatile uint64_t *)ptr3;
 
-		__atomic_fetch_add_8(ptr2, 1, __ATOMIC_SEQ_CST);
-		__atomic_fetch_add_8(ptr2 + 1, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr1u64, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr1u64 + 1, 1, __ATOMIC_SEQ_CST);
 
-		__atomic_fetch_add_8(ptr3, 1, __ATOMIC_SEQ_CST);
-		__atomic_fetch_add_8(ptr3 + 1, 1, __ATOMIC_SEQ_CST);
-	}
+		SHIM_ATOMIC_FETCH_ADD_8(ptr2u64, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr2u64 + 1, 1, __ATOMIC_SEQ_CST);
+
+		SHIM_ATOMIC_FETCH_ADD_8(ptr3u64, 1, __ATOMIC_SEQ_CST);
+		SHIM_ATOMIC_FETCH_ADD_8(ptr3u64 + 1, 1, __ATOMIC_SEQ_CST);
+	 }
 }
 #endif
 #endif
@@ -1009,8 +1127,8 @@ static stress_misaligned_method_info_t stress_misaligned_methods[] = {
 	{ "int16rd",	stress_misaligned_int16rd,	false,	false },
 	{ "int16wr",	stress_misaligned_int16wr,	false,	false },
 	{ "int16inc",	stress_misaligned_int16inc,	false,	false },
-#if defined(HAVE_ATOMIC_FETCH_ADD_2) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_2) &&	\
     defined(__ATOMIC_SEQ_CST)
 	{ "int16atomic",stress_misaligned_int16atomic,	false,	false },
 #endif
@@ -1020,8 +1138,8 @@ static stress_misaligned_method_info_t stress_misaligned_methods[] = {
 	{ "int32wrnt",	stress_misaligned_int32wrnt,	false,	false },
 #endif
 	{ "int32inc",	stress_misaligned_int32inc,	false,	false },
-#if defined(HAVE_ATOMIC_FETCH_ADD_4) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_4) &&	\
     defined(__ATOMIC_SEQ_CST)
 	{ "int32atomic",stress_misaligned_int32atomic,	false,	false },
 #endif
@@ -1030,9 +1148,13 @@ static stress_misaligned_method_info_t stress_misaligned_methods[] = {
 #if defined(HAVE_NT_STORE64)
 	{ "int64wrnt",	stress_misaligned_int64wrnt,	false,	false },
 #endif
+#if defined(HAVE_ASM_X86_MOVDIRI) &&	\
+    defined(STRESS_ARCH_X86_64)
+	{ "int64wrds",	stress_misaligned_int64wrds,	false,  false },
+#endif
 	{ "int64inc",	stress_misaligned_int64inc,	false,	false },
-#if defined(HAVE_ATOMIC_FETCH_ADD_8) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_8) &&	\
     defined(__ATOMIC_SEQ_CST)
 	{ "int64atomic",stress_misaligned_int64atomic,	false,	false },
 #endif
@@ -1043,8 +1165,8 @@ static stress_misaligned_method_info_t stress_misaligned_methods[] = {
 	{ "int128wrnt",	stress_misaligned_int128wrnt,	false,	false },
 #endif
 	{ "int128inc",	stress_misaligned_int128inc,	false,	false },
-#if defined(HAVE_ATOMIC_FETCH_ADD_8) &&	\
-    defined(HAVE_ATOMIC) &&		\
+#if defined(HAVE_ATOMIC) &&		\
+    defined(SHIM_ATOMIC_FETCH_ADD_8) &&	\
     defined(__ATOMIC_SEQ_CST)
 	{ "int128atomic",stress_misaligned_int128atomic,false,	false },
 #endif
@@ -1060,28 +1182,27 @@ static void stress_misaligned_all(
 	static bool exercised = false;
 	size_t i;
 
-	for (i = 1; i < SIZEOF_ARRAY(stress_misaligned_methods) && stress_continue_flag(); i++) {
+	for (i = 1; LIKELY(i < SIZEOF_ARRAY(stress_misaligned_methods) && stress_continue_flag()); i++) {
 		stress_misaligned_method_info_t *info = &stress_misaligned_methods[i];
 
-		if (info->disabled)
+		if (UNLIKELY(info->disabled))
 			continue;
 		current_method = info;
 		info->func(args, buffer, page_size, succeeded);
-		info->exercised = true;
-		exercised = true;
+		if (!info->disabled) {
+			info->exercised = true;
+			exercised = true;
+		}
 	}
 
-	if (!exercised)
+	if (UNLIKELY(!exercised))
 		stress_misaligned_methods[0].disabled = true;
 }
 
 static MLOCKED_TEXT NORETURN void stress_misaligned_handler(int signum)
 {
 	handled_signum = signum;
-
-	if (current_method)
-		current_method->disabled = true;
-
+	stress_misligned_disable();
 	siglongjmp(jmp_env, STRESS_MISALIGNED_ERROR);
 }
 
@@ -1133,7 +1254,7 @@ static void stress_misaligned_exercised(stress_args_t *args)
 	for (i = 0; i < SIZEOF_ARRAY(stress_misaligned_methods); i++) {
 		const stress_misaligned_method_info_t *info = &stress_misaligned_methods[i];
 
-		if (info->exercised) {
+		if (info->exercised && !info->disabled) {
 			char *tmp;
 			const size_t name_len = strlen(info->name);
 
@@ -1155,38 +1276,9 @@ static void stress_misaligned_exercised(stress_args_t *args)
 	if (str)
 		pr_inf("%s: exercised %s\n", args->name, str);
 	else
-		pr_inf("%s: nothing exercised due to misalignment faults\n", args->name);
+		pr_inf("%s: nothing exercised due to misalignment faults or disabled misaligned methods\n", args->name);
 
 	free(str);
-}
-
-/*
- *  stress_set_misaligned_method()
- *      set default misaligned stress method
- */
-static int stress_set_misaligned_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_misaligned_methods); i++) {
-		if (!strcmp(stress_misaligned_methods[i].name, name)) {
-			stress_set_setting("misaligned-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "misaligned-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_misaligned_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_misaligned_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
-static void stress_misaligned_set_default(void)
-{
-	stress_set_misaligned_method("all");
 }
 
 /*
@@ -1204,8 +1296,17 @@ static int stress_misaligned(stress_args_t *args)
 	bool succeeded = true;
 #if defined(HAVE_TIMER_FUNCTIONALITY)
 	struct sigevent sev;
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
+	const clockid_t clockid = CLOCK_PROCESS_CPUTIME_ID;
+#else
+	const clockid_t clockid = CLOCK_REALTIME;
 #endif
-
+#endif
+#if defined(HAVE_MISALIGNED_NUMA)
+	NOCLOBBER stress_numa_mask_t *numa_mask = NULL;
+	NOCLOBBER stress_numa_mask_t *numa_nodes = NULL;
+	int numa_loop;
+#endif
 	(void)stress_get_setting("misaligned-method", &misaligned_method);
 
 	if (stress_sighandler(args->name, SIGBUS, stress_misaligned_handler, NULL) < 0)
@@ -1224,31 +1325,55 @@ static int stress_misaligned(stress_args_t *args)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffer == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate 1 page buffer, "
+		pr_inf_skip("%s: cannot allocate 1 page buffer%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffer, buffer_size, "misaligned-data");
 	(void)stress_madvise_mergeable(buffer, buffer_size);
+
+#if defined(HAVE_MISALIGNED_NUMA)
+	numa_mask = stress_numa_mask_alloc();
+	if (numa_mask) {
+		numa_nodes = stress_numa_mask_alloc();
+		if (!numa_nodes) {
+			stress_numa_mask_free(numa_mask);
+			numa_mask = NULL;
+		} else {
+			if (stress_numa_mask_nodes_get(numa_nodes) < 1) {
+				stress_numa_mask_free(numa_nodes);
+				numa_nodes = NULL;
+				stress_numa_mask_free(numa_mask);
+				numa_mask = NULL;
+			} else {
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, buffer, buffer_size, page_size);
+			}
+		}
+	}
+#endif
 
 #if defined(HAVE_TIMER_FUNCTIONALITY)
 	(void)shim_memset(&sev, 0, sizeof(sev));
 	sev.sigev_notify = SIGEV_SIGNAL;
 	sev.sigev_signo = SIGRTMIN;
 	sev.sigev_value.sival_ptr = &timer_id;
-	if (timer_create(CLOCK_REALTIME, &sev, &timer_id) == 0) {
+	if (timer_create(clockid, &sev, &timer_id) == 0) {
 		use_timer = true;
 		stress_misaligned_reset_timer();
 	}
 #endif
 	stress_misaligned_enable_all();
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	method = &stress_misaligned_methods[misaligned_method];
 	current_method = method;
 	ret = sigsetjmp(jmp_env, 1);
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		switch (ret) {
 		case STRESS_MISALIGNED_ERROR:
 			pr_inf_skip("%s: skipping method %s, misaligned operations tripped %s\n",
@@ -1257,7 +1382,7 @@ static int stress_misaligned(stress_args_t *args)
 				stress_strsignal(handled_signum));
 			break;
 		case STRESS_MISALIGNED_TIMED_OUT:
-			pr_inf_skip("%s: skipping method %s, misaligned operations timed out after %.3f seconds (got stuck)\n",
+			pr_inf_skip("%s: skipping method %s, misaligned operations timed out after %.3f seconds, not fully tested\n",
 				args->name, current_method->name,
 				(double)STRESS_MISALIGNED_WAIT_TIME_NS / STRESS_DBL_NANOSECOND);
 			break;
@@ -1266,6 +1391,9 @@ static int stress_misaligned(stress_args_t *args)
 		}
 	}
 
+#if defined(HAVE_MISALIGNED_NUMA)
+	numa_loop = 0;
+#endif
 	rc = EXIT_SUCCESS;
 	do {
 		if (stress_time_now() > args->time_end)
@@ -1279,6 +1407,20 @@ static int stress_misaligned(stress_args_t *args)
 #endif
 		method->func(args, (uintptr_t)buffer, page_size, &succeeded);
 		method->exercised = true;
+
+#if defined(HAVE_MISALIGNED_NUMA)
+		/*
+		 *  On NUMA systems with > 1 node, randomize the
+		 *  NUMA node binding of pages in the buffer
+		 */
+		if (numa_mask && numa_nodes && (numa_mask->nodes > 1)) {
+			numa_loop++;
+			if (numa_loop > 1024) {
+				numa_loop = 0;
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, buffer, buffer_size, page_size);
+			}
+		}
+#endif
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
@@ -1298,6 +1440,12 @@ static int stress_misaligned(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
+#if defined(HAVE_MISALIGNED_NUMA)
+	if (numa_mask)
+		stress_numa_mask_free(numa_mask);
+	if (numa_nodes)
+		stress_numa_mask_free(numa_nodes);
+#endif
 	(void)munmap((void *)buffer, buffer_size);
 
 	if (!succeeded && (rc == EXIT_SUCCESS))
@@ -1306,16 +1454,20 @@ static int stress_misaligned(stress_args_t *args)
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_misaligned_method,	stress_set_misaligned_method },
-	{ 0,			NULL }
+static const char *stress_misaligned_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_misaligned_methods)) ? stress_misaligned_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_misaligned_method, "misaligned-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_misaligned_method },
+	END_OPT,
 };
 
-stressor_info_t stress_misaligned_info = {
+const stressor_info_t stress_misaligned_info = {
 	.stressor = stress_misaligned,
-	.set_default = stress_misaligned_set_default,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

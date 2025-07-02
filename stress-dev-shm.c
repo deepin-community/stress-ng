@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -84,16 +84,17 @@ static inline int stress_dev_shm_child(
 			/*
 			 *  Now try to map this into our address space
 			 */
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
-			addr = mmap(NULL, (size_t)sz, PROT_READ | PROT_WRITE,
+			addr = (uint32_t *)mmap(NULL, (size_t)sz, PROT_READ | PROT_WRITE,
 				MAP_PRIVATE, fd, 0);
 			if (addr != MAP_FAILED) {
 				register uint32_t *ptr;
 				register const uint32_t *end = addr + ((size_t)sz / sizeof(*end));
 				const size_t words = page_size / sizeof(*ptr);
-				uint32_t rnd = stress_mwc32();
+				const uint32_t rnd = stress_mwc32();
 
+				stress_set_vma_anon_name(addr, (size_t)sz, "mmapped-dev-shm");
 				(void)stress_madvise_random(addr, (size_t)sz);
 				(void)stress_madvise_mergeable(addr, (size_t)sz);
 
@@ -111,13 +112,13 @@ static inline int stress_dev_shm_child(
 						pr_fail("%s: address %p does not contain correct value, "
 							"got 0x%" PRIx32 ", expecting 0x%" PRIx32 "\n",
 							args->name, ptr, *ptr, val);
-						(void)munmap(addr, (size_t)sz);
+						(void)munmap((void *)addr, (size_t)sz);
 						VOID_RET(int, ftruncate(fd, 0));
 						return EXIT_FAILURE;
 					}
 				}
-				(void)msync(addr, (size_t)sz, MS_INVALIDATE);
-				(void)munmap(addr, (size_t)sz);
+				(void)msync((void *)addr, (size_t)sz, MS_INVALIDATE);
+				(void)munmap((void *)addr, (size_t)sz);
 
 			}
 			sz = (ssize_t)page_size;
@@ -146,20 +147,21 @@ again:
 				goto again;
 			if (!stress_continue(args))
 				goto finish;
-			pr_err("%s: fork failed: errno=%d: (%s)\n",
+			pr_err("%s: fork failed, errno=%d: (%s)\n",
 				args->name, errno, strerror(errno));
 			/* Nope, give up! */
 			(void)close(context->fd);
 			return EXIT_FAILURE;
 		} else if (pid > 0) {
 			/* Parent */
-			int ret, status = 0;
+			pid_t ret;
+			int status = 0;
 
 			ret = shim_waitpid(pid, &status, 0);
 			if (ret < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 				stress_force_killed_bogo(args);
 				(void)stress_kill_pid_wait(pid, &status);
 			}
@@ -205,19 +207,19 @@ static int stress_dev_shm(stress_args_t *args)
 	 */
 	if (access("/dev/shm", R_OK | W_OK) < 0) {
 		if (errno == ENOENT) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: /dev/shm does not exist, skipping test\n",
 					args->name);
 			return EXIT_NO_RESOURCE;
 		} else {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: cannot access /dev/shm, errno=%d (%s), skipping test\n",
 					args->name, errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
 	}
 
-	(void)snprintf(path, sizeof(path), "/dev/shm/stress-dev-shm-%d-%d-%" PRIu32,
+	(void)snprintf(path, sizeof(path), "/dev/shm/stress-dev-shm-%" PRIu32 "-%d-%" PRIu32,
 		args->instance, getpid(), stress_mwc32());
 	context.fd = open(path, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR);
 	if (context.fd < 0) {
@@ -227,6 +229,8 @@ static int stress_dev_shm(stress_args_t *args)
 	}
 	(void)shim_unlink(path);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = stress_oomable_child(args, &context, stress_dev_shm_oomable_child, STRESS_OOMABLE_NORMAL);
@@ -237,16 +241,16 @@ static int stress_dev_shm(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_dev_shm_info = {
+const stressor_info_t stress_dev_shm_info = {
 	.stressor = stress_dev_shm,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_dev_shm_info = {
+const stressor_info_t stress_dev_shm_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

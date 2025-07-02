@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -121,9 +121,41 @@ int stress_madvise_random(void *addr, const size_t length)
  */
 int stress_madvise_mergeable(void *addr, const size_t length)
 {
-#if defined(MADV_MERGEABLE) && \
-    defined(HAVE_MADVISE)
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_MERGEABLE)
 	return madvise(addr, length, MADV_MERGEABLE);
+#else
+	(void)addr;
+	(void)length;
+	return 0;
+#endif
+}
+
+/*
+ *  stress_madvise_collapse()
+ *	where possible collapse mapping into THP
+ */
+int stress_madvise_collapse(void *addr, size_t length)
+{
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_COLLAPSE)
+	return madvise(addr, length, MADV_COLLAPSE);
+#else
+	(void)addr;
+	(void)length;
+	return 0;
+#endif
+}
+
+/*
+ *  stress_madvise_nohugepage()
+ *	apply MADV_NOHUGEPAGE to force as many PTEs as possible
+ */
+int stress_madvise_nohugepage(void *addr, const size_t length)
+{
+#if defined(HAVE_MADVISE) && \
+    defined(MADV_NOHUGEPAGE)
+	return madvise(addr, length, MADV_NOHUGEPAGE);
 #else
 	(void)addr;
 	(void)length;
@@ -140,7 +172,7 @@ void stress_madvise_pid_all_pages(const pid_t pid, const int advise)
 #if defined(HAVE_MADVISE) &&	\
     defined(__linux__)
 	FILE *fp;
-	char path[PATH_MAX];
+	char path[4096];
 	char buf[4096];
 
 	(void)snprintf(path, sizeof(path), "/proc/%" PRIdMAX "/maps", (intmax_t)pid);
@@ -150,11 +182,12 @@ void stress_madvise_pid_all_pages(const pid_t pid, const int advise)
 		return;
 	while (fgets(buf, sizeof(buf), fp)) {
 		void *start, *end, *offset;
-		int major, minor, n;
+		int n;
+		unsigned int major, minor;
 		uint64_t inode;
 		char prot[5];
 
-		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %s\n",
+		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %4095s\n",
 			&start, &end, prot, &offset, &major, &minor,
 			&inode, path);
 		if (n < 7)

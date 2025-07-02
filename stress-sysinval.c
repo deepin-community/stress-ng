@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -105,7 +105,7 @@ static const stress_help_t help[] = {
 #define ARG_BPF_CMDS		0x00000003UL | ARG_MISC
 #define ARG_BPF_LEN		0x00000004UL | ARG_MISC
 
-#define ARG_VALUE(x, v)		{ (x), SIZEOF_ARRAY(v), (unsigned long *)v }
+#define ARG_VALUE(x, v)		{ (x), SIZEOF_ARRAY(v), (unsigned long int *)v }
 #define ARG_MISC_ID(x)		((x) & ~ARG_MISC)
 
 /*
@@ -113,21 +113,21 @@ static const stress_help_t help[] = {
  */
 #define RORn(val, n)						\
 do {								\
-	val = (sizeof(unsigned long) == sizeof(uint32_t)) ?	\
+	val = (sizeof(unsigned long int) == sizeof(uint32_t)) ?	\
 		shim_ror32n(val, n) : shim_ror64n(val, n);	\
 } while (0)
 
-#define SHR_UL(v, shift) ((unsigned long)(((unsigned long long)v) << shift))
+#define SHR_UL(v, shift) ((unsigned long int)(((unsigned long long int)v) << shift))
 
 /*
  *  per system call testing information, each system call
  *  to be exercised has one or more of these records.
  */
 typedef struct {
-	const unsigned long syscall;	/* system call number */
-	const char *name;		/* text name of system call */
-	const int num_args;		/* number of arguments */
-	unsigned long arg_bitmasks[6];	/* semantic info about each argument */
+	const unsigned long int syscall;	/* system call number */
+	const char *name;			/* text name of system call */
+	const int num_args;			/* number of arguments */
+	unsigned long int arg_bitmasks[6];	/* semantic info about each argument */
 } stress_syscall_arg_t;
 
 /*
@@ -138,9 +138,9 @@ typedef struct {
  *  permutations
  */
 typedef struct {
-	unsigned long bitmask;		/* bitmask representing arg type */
+	unsigned long int bitmask;	/* bitmask representing arg type */
 	size_t num_values;		/* number of different invalid values */
-	unsigned long *values;		/* invalid values */
+	unsigned long int *values;	/* invalid values */
 } stress_syscall_arg_values_t;
 
 /*
@@ -150,9 +150,9 @@ typedef struct {
  */
 typedef struct stress_syscall_args_hash {
 	struct stress_syscall_args_hash *next;	/* next item in list */
-	unsigned long hash;		/* has of system call and args */
-	unsigned long syscall;		/* system call number */
-	unsigned long args[6];		/* arguments */
+	unsigned long int hash;		/* has of system call and args */
+	unsigned long int syscall;	/* system call number */
+	unsigned long int args[6];	/* arguments */
 	uint8_t	 type;			/* type of failure */
 } stress_syscall_arg_hash_t;
 
@@ -176,6 +176,7 @@ typedef struct {
  */
 static stress_syscall_hash_table_t *hash_table;
 
+static volatile bool do_jmp;
 static sigjmp_buf jmpbuf;
 
 static const int sigs[] = {
@@ -1136,6 +1137,9 @@ static const stress_syscall_arg_t stress_syscall_args[] = {
 #endif
 #if DEFSYS(mremap)
 	{ SYS(mremap), 5, { ARG_PTR, ARG_LEN, ARG_PTR, ARG_LEN, ARG_FLAG, ARG_PTR } },
+#endif
+#if DEFSYS(mseal)
+	{ SYS(mseal), 3, { ARG_PTR, ARG_LEN, ARG_INT, 0, 0, 0 } },
 #endif
 #if DEFSYS(msgctl)
 	{ SYS(msgctl), 3, { ARG_INT, ARG_INT, ARG_PTR, 0, 0, 0 } },
@@ -2177,7 +2181,7 @@ typedef struct {
 	volatile uint64_t skip_errno_zero;
 	volatile uint64_t skip_timed_out;
 	uint64_t crash_count[SYSCALL_ARGS_SIZE];
-	unsigned long args[6];
+	unsigned long int args[6];
 	unsigned char filler[4096];
 	struct {
 		mode_t mode;
@@ -2197,43 +2201,43 @@ static void NORETURN func_exit(void)
 /*
  *  Various invalid argument values
  */
-static unsigned long none_values[] = { 0 };
-static unsigned long mode_values[] = {
-	(unsigned long)-1, INT_MAX, (unsigned long)INT_MIN,
-	~(unsigned long)0, 1ULL << 20,
+static unsigned long int none_values[] = { 0 };
+static unsigned long int mode_values[] = {
+	(unsigned long int)-1, INT_MAX, (unsigned long int)INT_MIN,
+	~(unsigned long int)0, 1ULL << 20,
 };
-static unsigned long access_mode_values[] = {
-	(unsigned long)~(F_OK | R_OK | W_OK | X_OK)
+static unsigned long int access_mode_values[] = {
+	(unsigned long int)~(F_OK | R_OK | W_OK | X_OK)
 };
-static long sockfds[] = {
-	/* sockfd */ 0, 0, -1, INT_MAX, INT_MIN, ~(long)0
+static long int sockfds[] = {
+	/* sockfd */ 0, 0, -1, INT_MAX, INT_MIN, ~(long int)0
 };
-static long fds[] = {
-	/* fd */ 0, -1, INT_MAX, INT_MIN, ~(long)0
+static long int fds[] = {
+	/* fd */ 0, -1, INT_MAX, INT_MIN, ~(long int)0
 };
-static long dirfds[] = {
-	-1, AT_FDCWD, INT_MIN, ~(long)0
+static long int dirfds[] = {
+	-1, AT_FDCWD, INT_MIN, ~(long int)0
 };
-static long clockids[] = {
-	-1, INT_MAX, INT_MIN, ~(long)0, SHR_UL(0xfe23ULL, 18)
+static long int clockids[] = {
+	-1, INT_MAX, INT_MIN, ~(long int)0, SHR_UL(0xfe23ULL, 18)
 };
-static long sockaddrs[] = {
+static long int sockaddrs[] = {
 	/*small_ptr*/ 0, /*page_ptr*/ 0, 0, -1, INT_MAX, INT_MIN
 };
-static unsigned long brk_addrs[] = {
-	0, (unsigned long)-1, INT_MAX, (unsigned long)INT_MIN,
-	~(unsigned long)0, 4096
+static unsigned long int brk_addrs[] = {
+	0, (unsigned long int)-1, INT_MAX, (unsigned long int)INT_MIN,
+	~(unsigned long int)0, 4096
 };
-static unsigned long empty_filenames[] = {
-	(unsigned long)"", (unsigned long)NULL
+static unsigned long int empty_filenames[] = {
+	(unsigned long int)"", (unsigned long int)NULL
 };
-static unsigned long zero_filenames[] = {
-	(unsigned long)"/dev/zero"
+static unsigned long int zero_filenames[] = {
+	(unsigned long int)"/dev/zero"
 };
-static unsigned long null_filenames[] = {
-	(unsigned long)"/dev/null"
+static unsigned long int null_filenames[] = {
+	(unsigned long int)"/dev/null"
 };
-static long flags[] = {
+static long int flags[] = {
 	-1, -2, INT_MIN, SHR_UL(0xffffULL, 20),
 	0x00000001, 0x00000002, 0x00000004, 0x00000008,
 	0x00000010, 0x00000020, 0x00000040, 0x00000080,
@@ -2244,41 +2248,41 @@ static long flags[] = {
 	0x01000000, 0x02000000, 0x04000000, 0x08000000,
 	0x10000000, 0x20000000, 0x40000000, 0x80000000
 };
-static unsigned long lengths[] = {
-	(unsigned long)-1, (unsigned long)-2,
-	(unsigned long)INT_MIN, INT_MAX,
-	~(unsigned long)0, -SHR_UL(1, 31)
+static unsigned long int lengths[] = {
+	(unsigned long int)-1, (unsigned long int)-2,
+	(unsigned long int)INT_MIN, INT_MAX,
+	~(unsigned long int)0, -SHR_UL(1, 31)
 };
-static long ints[] = {
+static long int ints[] = {
 	0, -1, -2, INT_MIN, INT_MAX, SHR_UL(0xff, 30), SHR_UL(1, 30),
-	(long)-SHR_UL(0xff, 30), (long)-SHR_UL(1, 30)
+	(long int)-SHR_UL(0xff, 30), (long int)-SHR_UL(1, 30)
 };
-static unsigned long uints[] = {
-	INT_MAX, SHR_UL(0xff, 30), -SHR_UL(0xff, 30), ~(unsigned long)0
+static unsigned long int uints[] = {
+	INT_MAX, SHR_UL(0xff, 30), -SHR_UL(0xff, 30), ~(unsigned long int)0
 };
-static unsigned long func_ptrs[] = {
-	(unsigned long)func_exit
+static unsigned long int func_ptrs[] = {
+	(unsigned long int)func_exit
 };
-static unsigned long ptrs[] = {
-	/*small_ptr*/ 0, /*page_ptr*/ 0, 0, (unsigned long)-1,
-	INT_MAX, (unsigned long)INT_MIN, (unsigned long)~4096L
+static unsigned long int ptrs[] = {
+	/*small_ptr*/ 0, /*page_ptr*/ 0, 0, (unsigned long int)-1,
+	INT_MAX, (unsigned long int)INT_MIN, (unsigned long int)~4096L
 };
-static unsigned long ptrs_wr[] = {
+static unsigned long int ptrs_wr[] = {
 	/*small_ptr_wr*/ 0, /*page_ptr_wr*/ 0, 0,
-	(unsigned long)-1, INT_MAX, (unsigned long)INT_MIN,
-	(unsigned long)~4096L
+	(unsigned long int)-1, INT_MAX, (unsigned long int)INT_MIN,
+	(unsigned long int)~4096L
 };
-static unsigned long futex_ptrs[] = {
+static unsigned long int futex_ptrs[] = {
 	/*small_ptr*/ 0, /*page_ptr*/ 0
 };
-static unsigned long non_null_ptrs[] = {
-	/*small_ptr*/ 0, /*page_ptr*/ 0, (unsigned long)-1,
-	INT_MAX, (unsigned long)INT_MIN, (unsigned long)~4096L
+static unsigned long int non_null_ptrs[] = {
+	/*small_ptr*/ 0, /*page_ptr*/ 0, (unsigned long int)-1,
+	INT_MAX, (unsigned long int)INT_MIN, (unsigned long int)~4096L
 };
-static long socklens[] = {
+static long int socklens[] = {
 	0, -1, INT_MAX, INT_MIN, 8192
 };
-static unsigned long timeouts[] = {
+static unsigned long int timeouts[] = {
 	0
 };
 static pid_t pids[] = {
@@ -2296,7 +2300,7 @@ static uid_t uids[] = {
  */
 static char *add_key_types[] = { "key_ring" };
 static char *add_key_descrs[] = { "." };
-static unsigned long bpf_cmds[] = {
+static unsigned long int bpf_cmds[] = {
 	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
@@ -2348,11 +2352,11 @@ static const stress_syscall_arg_values_t arg_values[] = {
  *   stress_syscall_hash()
  *	generate a simple hash on system call and call arguments
  */
-static unsigned long stress_syscall_hash(
-	const unsigned long syscall_num,
-	const unsigned long args[6])
+static unsigned long int stress_syscall_hash(
+	const unsigned long int syscall_num,
+	const unsigned long int args[6])
 {
-	unsigned long hash = syscall_num;
+	unsigned long int hash = syscall_num;
 
 	RORn(hash, 2);
 	hash ^= (args[0]);
@@ -2376,14 +2380,14 @@ static unsigned long stress_syscall_hash(
  * 	- will silently fail if out of memory
  */
 static void hash_table_add(
-	const unsigned long hash,
-	const unsigned long syscall_num,
-	const unsigned long *args,
+	const unsigned long int hash,
+	const unsigned long int syscall_num,
+	const unsigned long int *args,
 	const uint8_t type)
 {
 	stress_syscall_arg_hash_t *h;
 
-	if (hash_table->index >= HASH_TABLE_POOL_SIZE)
+	if (UNLIKELY(hash_table->index >= HASH_TABLE_POOL_SIZE))
 		return;
 	h = &hash_table->pool[hash_table->index];
 	h->hash = hash;
@@ -2399,7 +2403,8 @@ static void MLOCKED_TEXT stress_syscall_itimer_handler(int sig)
 {
 	(void)sig;
 
-	if (current_context) {
+	if (do_jmp && current_context) {
+		do_jmp = false;
 		current_context->type = SYSCALL_TIMED_OUT;
 		siglongjmp(jmpbuf, 1);
 	}
@@ -2410,7 +2415,7 @@ static void MLOCKED_TEXT stress_syscall_itimer_handler(int sig)
  *	set mode and uid/gid back to original if specific system
  *	calls were called and may have modified them
  */
-static void syscall_set_cwd_perms(const unsigned long syscall_num)
+static void syscall_set_cwd_perms(const unsigned long int syscall_num)
 {
 	switch (syscall_num) {
 #if DEFSYS(chmod)
@@ -2468,19 +2473,19 @@ static void syscall_permute(
 	const stress_syscall_arg_t *stress_syscall_arg,
 	volatile bool *syscall_exercised)
 {
-	unsigned long arg_bitmask = stress_syscall_arg->arg_bitmasks[arg_num];
+	unsigned long int arg_bitmask = stress_syscall_arg->arg_bitmasks[arg_num];
 	size_t i;
-	unsigned long *values = NULL;
-	unsigned long rnd_values[4];
+	unsigned long int *values = NULL;
+	unsigned long int rnd_values[4];
 	size_t num_values = 0;
 
-	if (stress_time_now() > args->time_end)
+	if (UNLIKELY(stress_time_now() > args->time_end))
 		_exit(EXIT_SUCCESS);
 
 	if (arg_num >= stress_syscall_arg->num_args) {
 		int ret;
-		const unsigned long syscall_num = stress_syscall_arg->syscall;
-		const unsigned long hash = stress_syscall_hash(syscall_num, current_context->args);
+		const unsigned long int syscall_num = stress_syscall_arg->syscall;
+		const unsigned long int hash = stress_syscall_hash(syscall_num, current_context->args);
 		stress_syscall_arg_hash_t *h = hash_table->table[hash];
 		struct itimerval it;
 
@@ -2518,10 +2523,11 @@ static void syscall_permute(
 			current_context->type = SYSCALL_TIMED_OUT;
 			goto timed_out;
 		}
+		do_jmp = true;
 
 		*syscall_exercised = true;
 
-		ret = (int)syscall((long)syscall_num,
+		ret = (int)syscall((long int)syscall_num,
 			current_context->args[0],
 			current_context->args[1],
 			current_context->args[2],
@@ -2543,6 +2549,7 @@ static void syscall_permute(
 		*/
 
 timed_out:
+		do_jmp = false;
 		if (current_context->type == SYSCALL_TIMED_OUT) {
 			/*
 			 *  Remember syscalls that block for too long so we don't retry them
@@ -2572,8 +2579,8 @@ timed_out:
 		 */
 		rnd_values[0] = stress_mwc64();
 		rnd_values[1] = SHR_UL(stress_mwc32(), 20);
-		rnd_values[2] = (unsigned long)small_ptr;
-		rnd_values[3] = (unsigned long)page_ptr;
+		rnd_values[2] = (unsigned long int)small_ptr;
+		rnd_values[3] = (unsigned long int)page_ptr;
 		values = rnd_values;
 		num_values = 4;
 		break;
@@ -2612,7 +2619,7 @@ timed_out:
 	/*
 	 *  This should not fail!
 	 */
-	if (!num_values) {
+	if (UNLIKELY(!num_values)) {
 		pr_dbg("%s: argument %d has bad bitmask %lx\n", args->name, arg_num, arg_bitmask);
 		current_context->args[arg_num] = 0;
 		return;
@@ -2640,7 +2647,7 @@ static inline int stress_do_syscall(stress_args_t *args)
 
 	(void)stress_mwc32();
 
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return 0;
 
 	if (stress_drop_capabilities(args->name) < 0)
@@ -2663,11 +2670,11 @@ static inline int stress_do_syscall(stress_args_t *args)
 			_exit(EXIT_NO_RESOURCE);
 		}
 		for (i = 0; i < SIZEOF_ARRAY(sigs); i++) {
-			if (stress_sighandler(args->name, sigs[i], stress_sig_handler_exit, NULL) < 0)
+			if (UNLIKELY(stress_sighandler(args->name, sigs[i], stress_sig_handler_exit, NULL) < 0))
 				_exit(EXIT_FAILURE);
 		}
 
-		if (stress_sighandler(args->name, SIGALRM, stress_syscall_itimer_handler, NULL) < 0)
+		if (UNLIKELY(stress_sighandler(args->name, SIGALRM, stress_syscall_itimer_handler, NULL) < 0))
 			_exit(EXIT_FAILURE);
 
 		stress_parent_died_alarm();
@@ -2699,7 +2706,7 @@ static inline int stress_do_syscall(stress_args_t *args)
 				}
 			}
 
-			for (i = 0; stress_continue(args) && (i < SYSCALL_ARGS_SIZE); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < SYSCALL_ARGS_SIZE)); i++) {
 				const size_t j = reorder[i];
 
 				(void)shim_memset(current_context->args, 0, sizeof(current_context->args));
@@ -2716,21 +2723,20 @@ static inline int stress_do_syscall(stress_args_t *args)
 		}
 		_exit(EXIT_SUCCESS);
 	} else {
-		int ret, status;
+		int status;
 
 		/*
 		 *  Don't use retry shim_waitpid here, we want to force
 		 *  kill the child no matter what happens at this point
 		 */
-		ret = waitpid(pid, &status, 0);
-		if (ret < 0) {
+		if (waitpid(pid, &status, 0) < 0) {
 			/*
 			 *  SIGALRM or a waitpid failure, so force
 			 *  kill and reap of child to make sure
 			 *  it is really dead and buried
 			 */
 			(void)stress_kill_pid(pid);
-			VOID_RET(int, waitpid(pid, &status, 0));
+			VOID_RET(pid_t, waitpid(pid, &status, 0));
 		}
 		if (current_context->type == SYSCALL_CRASH) {
 			const size_t idx = current_context->idx;
@@ -2740,7 +2746,7 @@ static inline int stress_do_syscall(stress_args_t *args)
 				current_context->args,
 				SYSCALL_CRASH);
 
-			if (idx < SYSCALL_ARGS_SIZE)
+			if (LIKELY(idx < SYSCALL_ARGS_SIZE))
 				current_context->crash_count[idx]++;
 		}
 		rc = WEXITSTATUS(status);
@@ -2784,8 +2790,8 @@ static int stress_sysinval(stress_args_t *args)
 	 *  Run-time sanity check of zero syscalls, maybe __NR or SYS_ is not
 	 *  defined.
 	 */
-	if (SYSCALL_ARGS_SIZE == (0)) {
-		if (args->instance == 0)
+	if (UNLIKELY(SYSCALL_ARGS_SIZE == (0))) {
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: no system calls detected during build, skipping stressor\n",
 				args->name);
 		return EXIT_NO_RESOURCE;
@@ -2817,6 +2823,7 @@ static int stress_sysinval(stress_args_t *args)
 			args->name, errno, strerror(errno));
 		goto tidy;
 	}
+	stress_set_vma_anon_name(stress_syscall_exercised, stress_syscall_exercised_sz, "syscall-stats");
 
 	hash_table = (stress_syscall_hash_table_t *)mmap(NULL,
 			sizeof(*hash_table),
@@ -2827,6 +2834,7 @@ static int stress_sysinval(stress_args_t *args)
 			args->name, errno, strerror(errno));
 		goto tidy;
 	}
+	stress_set_vma_anon_name(hash_table, sizeof(*hash_table), "syscall-hash-table");
 
 	current_context = (syscall_current_context_t*)
 		mmap(NULL, current_context_size, PROT_READ | PROT_WRITE,
@@ -2836,6 +2844,7 @@ static int stress_sysinval(stress_args_t *args)
 			args->name, errno, strerror(errno));
 		goto tidy;
 	}
+	stress_set_vma_anon_name(current_context, current_context_size, "syscall-context");
 
 	if (getcwd(current_context->dirfd.cwd, sizeof(current_context->dirfd.cwd)) == NULL ) {
 		pr_fail("%s: getcwd failed, errno=%d (%s)\n",
@@ -2859,6 +2868,7 @@ static int stress_sysinval(stress_args_t *args)
 		goto tidy;
 	}
 #if defined(HAVE_MPROTECT)
+	stress_set_vma_anon_name(small_ptr, small_ptr_size, "syscall-small");
 	(void)mprotect((void *)(small_ptr + page_size), page_size, PROT_NONE);
 #else
 	(void)munmap((void *)(small_ptr + page_size), page_size);
@@ -2872,6 +2882,7 @@ static int stress_sysinval(stress_args_t *args)
 			args->name, errno, strerror(errno));
 		goto tidy;
 	}
+	stress_set_vma_anon_name(page_ptr, page_size, "syscall-none");
 
 	page_ptr_wr = (uint8_t *)mmap(NULL, page_ptr_wr_size, PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -2883,23 +2894,25 @@ static int stress_sysinval(stress_args_t *args)
 	small_ptr_wr = page_ptr_wr + page_size - 1;
 #if defined(HAVE_MPROTECT)
 	(void)mprotect((void *)(page_ptr_wr + page_size), page_size, PROT_NONE);
+	stress_set_vma_anon_name(page_ptr_wr, page_ptr_wr_size, "syscall-half-write");
 #else
 	(void)munmap((void *)(page_ptr_wr + page_size), page_size);
 	page_ptr_wr_size -= page_size;
 #endif
 
-	sockaddrs[0] = (long)(small_ptr + page_size - 1);
-	sockaddrs[1] = (long)page_ptr;
-	ptrs[0] = (unsigned long)(small_ptr + page_size -1);
-	ptrs[1] = (unsigned long)page_ptr;
-	non_null_ptrs[0] = (unsigned long)(small_ptr + page_size -1);
-	non_null_ptrs[1] = (unsigned long)page_ptr;
-	futex_ptrs[0] = (unsigned long)(small_ptr + page_size -1);
-	futex_ptrs[1] = (unsigned long)page_ptr;
+	sockaddrs[0] = (long int)(small_ptr + page_size - 1);
+	sockaddrs[1] = (long int)page_ptr;
+	ptrs[0] = (unsigned long int)(small_ptr + page_size -1);
+	ptrs[1] = (unsigned long int)page_ptr;
+	non_null_ptrs[0] = (unsigned long int)(small_ptr + page_size -1);
+	non_null_ptrs[1] = (unsigned long int)page_ptr;
+	futex_ptrs[0] = (unsigned long int)(small_ptr + page_size -1);
+	futex_ptrs[1] = (unsigned long int)page_ptr;
 
 	(void)shim_memset(current_context->crash_count, 0, sizeof(current_context->crash_count));
 
-
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = stress_oomable_child(args, NULL, stress_sysinval_child, STRESS_OOMABLE_DROP_CAP);
@@ -2915,7 +2928,7 @@ static int stress_sysinval(stress_args_t *args)
  	 *  the number of syscalls actually exercised
 	 */
 	for (i = 0; i < SYSCALL_ARGS_SIZE; i++) {
-		unsigned long syscall_num = stress_syscall_args[i].syscall;
+		unsigned long int syscall_num = stress_syscall_args[i].syscall;
 		size_t exercised = 0, unique = 0;
 		size_t j;
 
@@ -2977,15 +2990,15 @@ err_dir:
 	return rc;
 }
 
-stressor_info_t stress_sysinval_info = {
+const stressor_info_t stress_sysinval_info = {
 	.stressor = stress_sysinval,
-	.class = CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_OS | CLASS_PATHOLOGICAL,
 	.help = help
 };
 #else
-stressor_info_t stress_sysinval_info = {
+const stressor_info_t stress_sysinval_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_OS | CLASS_PATHOLOGICAL,
 	.help = help,
 	.unimplemented_reason = "built without syscall.h, syscall() or system is GNU/HURD or OS X"
 };

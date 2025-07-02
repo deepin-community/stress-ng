@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2016-2017 Intel, Ltd.
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,14 +24,11 @@
 #include "core-builtin.h"
 #include "core-cpu-cache.h"
 
+#include <ctype.h>
+
 #if defined(HAVE_SYS_AUXV_H)
 #include <sys/auxv.h>
 #endif
-
-typedef struct {
-	const char	*name;			/* cache type name */
-	const stress_cpu_cache_type_t value;	/* cache type ID */
-} stress_generic_map_t;
 
 typedef enum {
 	STRESS_CACHE_SIZE,
@@ -71,7 +68,7 @@ static int stress_get_string_from_file(
 
 	/* system read will zero fill tmp */
 	ret = stress_system_read(path, tmp, tmp_len);
-	if (ret < 0)
+	if (UNLIKELY(ret < 0))
 		return -1;
 
 	ptr = strchr(tmp, '\n');
@@ -98,7 +95,7 @@ static stress_cpu_cache_t * stress_cpu_cache_get_by_cpu(
 {
 	uint32_t  i;
 
-	if (!cpu || !cache_level)
+	if (UNLIKELY(!cpu || !cache_level))
 		return NULL;
 
 	for (i = 0; i < cpu->cache_count; i++) {
@@ -127,7 +124,7 @@ uint16_t stress_cpu_cache_get_max_level(const stress_cpu_cache_cpus_t *cpus)
 	uint32_t  i;
 	uint16_t  max = 0;
 
-	if (!cpus) {
+	if (UNLIKELY(!cpus)) {
 		pr_dbg("%s: invalid cpus parameter\n", __func__);
 		return 0;
 	}
@@ -153,14 +150,14 @@ uint16_t stress_cpu_cache_get_max_level(const stress_cpu_cache_cpus_t *cpus)
  */
 stress_cpu_cache_t *stress_cpu_cache_get(const stress_cpu_cache_cpus_t *cpus, const uint16_t cache_level)
 {
-	stress_cpu_cache_cpu_t *cpu;
+	const stress_cpu_cache_cpu_t *cpu;
 
-	if (!cpus) {
+	if (UNLIKELY(!cpus)) {
 		pr_dbg("%s: invalid cpus parameter\n", __func__);
 		return NULL;
 	}
 
-	if (!cache_level) {
+	if (UNLIKELY(!cache_level)) {
 		pr_dbg("%s: invalid cache_level: %d\n",
 			__func__, cache_level);
 		return NULL;
@@ -182,7 +179,7 @@ static int stress_cpu_cache_get_value(
 	char tmp[128];
 
 	(void)stress_mk_filename(path, sizeof(path), cpu_path, file);
-	if (stress_get_string_from_file(path, tmp, sizeof(tmp)) == 0) {
+	if (LIKELY(stress_get_string_from_file(path, tmp, sizeof(tmp)) == 0)) {
 		if (sscanf(tmp, "%" SCNu64, value) == 1)
 			return 0;
 	}
@@ -215,8 +212,8 @@ static int stress_cpu_cache_get_alpha(
 	 * L2 cache		: n/a
 	 * L3 cache		: n/a
 	 */
-	cpu->caches = calloc(count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			count * sizeof(*(cpu->caches)));
 		return 0;
@@ -229,7 +226,7 @@ static int stress_cpu_cache_get_alpha(
 		while ((idx < count) && fgets(buffer, sizeof(buffer), fp)) {
 			stress_cpu_cache_type_t cache_type = CACHE_TYPE_UNKNOWN;
 			uint16_t cache_level = 0;
-			char *ptr;
+			const char *ptr;
 			uint64_t cache_size;
 			int cache_ways, cache_line_size, n;
 
@@ -294,7 +291,7 @@ static int stress_cpu_cache_get_apple(stress_cpu_cache_cpu_t *cpu)
 		const stress_cpu_cache_type_t type;	/* cache type */
 		const uint16_t level;			/* cache level 1, 2 */
 		const cache_size_type_t size_type;	/* cache size field */
-		const size_t index;			/* map to cpu->cache array index */
+		const size_t idx;			/* map to cpu->cache array index */
 	} cache_info_t;
 
 	static const cache_info_t cache_info[] = {
@@ -310,15 +307,15 @@ static int stress_cpu_cache_get_apple(stress_cpu_cache_cpu_t *cpu)
 	size_t i;
 	bool valid = false;
 
-	cpu->caches = calloc(count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			count * sizeof(*(cpu->caches)));
 		return 0;
 	}
 
 	for (i = 0; i < SIZEOF_ARRAY(cache_info); i++) {
-		const size_t idx = cache_info[i].index;
+		const size_t idx = cache_info[i].idx;
 		uint64_t value;
 
 		value = stress_bsd_getsysctl_uint64(cache_info[i].name);
@@ -372,7 +369,7 @@ static int stress_cpu_cache_get_sparc64(
 		const stress_cpu_cache_type_t type;	/* cache type */
 		const uint16_t level;			/* cache level 1, 2 */
 		const cache_size_type_t size_type;	/* cache size field */
-		const size_t index;			/* map to cpu->cache array index */
+		const size_t idx;			/* map to cpu->cache array index */
 	} cache_info_t;
 
 	static const cache_info_t cache_info[] = {
@@ -388,15 +385,15 @@ static int stress_cpu_cache_get_sparc64(
 	size_t i;
 	bool valid = false;
 
-	cpu->caches = calloc(count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			count * sizeof(*(cpu->caches)));
 		return 0;
 	}
 
 	for (i = 0; i < SIZEOF_ARRAY(cache_info); i++) {
-		const size_t idx = cache_info[i].index;
+		const size_t idx = cache_info[i].idx;
 		uint64_t value;
 
 		if (stress_cpu_cache_get_value(cpu_path, cache_info[i].filename, &value) < 0)
@@ -489,8 +486,8 @@ static int stress_cpu_cache_get_x86(stress_cpu_cache_cpu_t *cpu)
 		}
 
 		/* Now allocate */
-		cpu->caches = calloc(i, sizeof(*(cpu->caches)));
-		if (!cpu->caches) {
+		cpu->caches = (stress_cpu_cache_t *)calloc(i, sizeof(*(cpu->caches)));
+		if (UNLIKELY(!cpu->caches)) {
 			pr_err("failed to allocate %zu bytes for cpu caches\n",
 			i * sizeof(*(cpu->caches)));
 			return 0;
@@ -524,7 +521,7 @@ static int stress_cpu_cache_get_x86(stress_cpu_cache_cpu_t *cpu)
 			}
 
 			cpu->caches[i].level = (eax >> 5) & 0x7;
-			cpu->caches[i].line_size = ((ebx >> 0) & 0x7ff) + 1;
+			cpu->caches[i].line_size = ((ebx >> 0) & 0xfff) + 1;
 			cpu->caches[i].ways = ((ebx >> 22) & 0x3ff) + 1;
 			cpu->caches[i].size = ((uint64_t)(((ebx >> 12) & 0x3ff) + 1) *
 					cpu->caches[i].line_size *
@@ -556,11 +553,11 @@ static int stress_cpu_cache_get_sh4(stress_cpu_cache_cpu_t *cpu)
 	 */
 
 	fp = fopen("/proc/cpuinfo", "r");
-	if (!fp)
+	if (UNLIKELY(!fp))
 		return 0;
 
-	cpu->caches = calloc(2, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(2, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			2 * sizeof(*(cpu->caches)));
 		(void)fclose(fp);
@@ -568,7 +565,7 @@ static int stress_cpu_cache_get_sh4(stress_cpu_cache_cpu_t *cpu)
 	}
 
 	(void)shim_memset(buffer, 0, sizeof(buffer));
-	while ((cpu->cache_count) < 2 && fgets(buffer, sizeof(buffer), fp) != NULL) {
+	while ((cpu->cache_count < 2) && fgets(buffer, sizeof(buffer), fp) != NULL) {
 		const char *ptr = strchr(buffer, ':');
 
 		if (ptr &&
@@ -608,7 +605,7 @@ static int stress_cpu_cache_get_m68k(stress_cpu_cache_cpu_t *cpu)
 	cpu->cache_count = 0;
 
 	fp = fopen("/proc/cpuinfo", "r");
-	if (!fp)
+	if (UNLIKELY(!fp))
 		return 0;
 
 	(void)shim_memset(buffer, 0, sizeof(buffer));
@@ -651,8 +648,8 @@ static int stress_cpu_cache_get_m68k(stress_cpu_cache_cpu_t *cpu)
 		return 0;
 	}
 
-	cpu->caches = calloc(count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			count * sizeof(*(cpu->caches)));
 		return 0;
@@ -691,7 +688,7 @@ static uint64_t stress_cpu_cache_size_to_bytes(const char *str)
 	int	 ret;
 	char	 sz;
 
-	if (!str) {
+	if (UNLIKELY(!str)) {
 		pr_dbg("%s: empty string specified\n", __func__);
 		return 0;
 	}
@@ -732,6 +729,12 @@ static uint64_t stress_cpu_cache_size_to_bytes(const char *str)
     defined(__APPLE__)
 
 #if defined(__linux__)
+
+typedef struct {
+	const char	*name;			/* cache type name */
+	const stress_cpu_cache_type_t value;	/* cache type ID */
+} stress_generic_map_t;
+
 static const stress_generic_map_t stress_cpu_cache_type_map[] = {
 	{ "data",		CACHE_TYPE_DATA },
 	{ "instruction",	CACHE_TYPE_INSTRUCTION },
@@ -750,7 +753,7 @@ static stress_cpu_cache_type_t stress_cpu_cache_get_type(const char *name)
 {
 	const stress_generic_map_t *p;
 
-	if (!name) {
+	if (UNLIKELY(!name)) {
 		pr_dbg("%s: no cache type specified\n", __func__);
 		goto out;
 	}
@@ -782,9 +785,9 @@ static int stress_add_cpu_cache_detail(stress_cpu_cache_t *cache, const char *in
 	char path[PATH_MAX];
 
 	(void)shim_memset(path, 0, sizeof(path));
-	if (!cache)
+	if (UNLIKELY(!cache))
 		goto out;
-	if (!index_path)
+	if (UNLIKELY(!index_path))
 		goto out;
 	(void)stress_mk_filename(path, sizeof(path), index_path, "type");
 	if (stress_get_string_from_file(path, tmp, sizeof(tmp)) < 0)
@@ -828,7 +831,7 @@ out:
  */
 static int index_filter(const struct dirent *d)
 {
-	return ((strncmp(d->d_name, "index", 5) == 0) && isdigit(d->d_name[5]));
+	return ((strncmp(d->d_name, "index", 5) == 0) && isdigit((unsigned char)d->d_name[5]));
 }
 #endif
 
@@ -863,13 +866,13 @@ static int stress_cpu_cache_get_index(
 
 	(void)stress_mk_filename(path, sizeof(path), cpu_path, stress_cpu_cache_dir);
 	n = scandir(path, &namelist, index_filter, index_sort);
-	if (n <= 0) {
+	if (UNLIKELY(n <= 0)) {
 		cpu->caches = NULL;
 		return 0;
 	}
 	cpu->cache_count = (uint32_t)n;
-	cpu->caches = calloc(cpu->cache_count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(cpu->cache_count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		size_t cache_bytes = cpu->cache_count * sizeof(*(cpu->caches));
 
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
@@ -919,11 +922,11 @@ static int stress_cpu_cache_get_auxval(stress_cpu_cache_cpu_t *cpu)
      defined(AT_L2_CACHESIZE) ||	\
      defined(AT_L3_CACHESIZE))
 	typedef struct {
-		const unsigned long auxval_type;
+		const unsigned long int auxval_type;
 		const stress_cpu_cache_type_t type;	/* cache type */
 		const uint16_t level;			/* cache level 1, 2 */
 		const cache_size_type_t size_type;	/* cache size field */
-		const size_t index;			/* map to cpu->cache array index */
+		const size_t idx;			/* map to cpu->cache array index */
 	} cache_auxval_info_t;
 
 	static const cache_auxval_info_t cache_auxval_info[] = {
@@ -945,8 +948,8 @@ static int stress_cpu_cache_get_auxval(stress_cpu_cache_cpu_t *cpu)
 	size_t i;
 	bool valid = false;
 
-	cpu->caches = calloc(count, sizeof(*(cpu->caches)));
-	if (!cpu->caches) {
+	cpu->caches = (stress_cpu_cache_t *)calloc(count, sizeof(*(cpu->caches)));
+	if (UNLIKELY(!cpu->caches)) {
 		pr_err("failed to allocate %zu bytes for cpu caches\n",
 			count * sizeof(*(cpu->caches)));
 		return 0;
@@ -954,22 +957,22 @@ static int stress_cpu_cache_get_auxval(stress_cpu_cache_cpu_t *cpu)
 
 	for (i = 0; i < SIZEOF_ARRAY(cache_auxval_info); i++) {
 		const uint64_t value = getauxval(cache_auxval_info[i].auxval_type);
-		const size_t index = cache_auxval_info[i].index;
+		const size_t idx = cache_auxval_info[i].idx;
 
 		if (value)
 			valid = true;
 
-		cpu->caches[index].type = cache_auxval_info[i].type;
-		cpu->caches[index].level = cache_auxval_info[i].level;
+		cpu->caches[idx].type = cache_auxval_info[i].type;
+		cpu->caches[idx].level = cache_auxval_info[i].level;
 		switch (cache_auxval_info[i].size_type) {
 		case STRESS_CACHE_SIZE:
-			cpu->caches[index].size = value;
+			cpu->caches[idx].size = value;
 			break;
 		case STRESS_CACHE_LINE_SIZE:
-			cpu->caches[index].line_size = (uint32_t)value;
+			cpu->caches[idx].line_size = (uint32_t)value;
 			break;
 		case STRESS_CACHE_WAYS:
-			cpu->caches[index].size = (uint32_t)value;
+			cpu->caches[idx].size = (uint32_t)value;
 			break;
 		default:
 			break;
@@ -1004,11 +1007,11 @@ static int stress_cpu_cache_get_auxval(stress_cpu_cache_cpu_t *cpu)
  */
 static void stress_cpu_cache_get_details(stress_cpu_cache_cpu_t *cpu, const char *cpu_path)
 {
-	if (!cpu) {
+	if (UNLIKELY(!cpu)) {
 		pr_dbg("%s: invalid cpu parameter\n", __func__);
 		return;
 	}
-	if (!cpu_path) {
+	if (UNLIKELY(!cpu_path)) {
 		pr_dbg("%s: invalid cpu path parameter\n", __func__);
 		return;
 	}
@@ -1068,7 +1071,7 @@ static void stress_cpu_cache_get_details(stress_cpu_cache_cpu_t *cpu, const char
  */
 static int stress_cpu_cache_filter(const struct dirent *d)
 {
-	return ((strncmp(d->d_name, "cpu", 3) == 0) && isdigit(d->d_name[3]));
+	return ((strncmp(d->d_name, "cpu", 3) == 0) && isdigit((unsigned char)d->d_name[3]));
 }
 
 /*
@@ -1096,16 +1099,16 @@ stress_cpu_cache_cpus_t *stress_cpu_cache_get_all_details(void)
 	struct dirent **namelist = NULL;
 
 	cpu_count = scandir(stress_sys_cpu_prefix, &namelist, stress_cpu_cache_filter, cpu_sort);
-	if (cpu_count < 1) {
+	if (UNLIKELY(cpu_count < 1)) {
 		pr_err("no CPUs found in %s\n", stress_sys_cpu_prefix);
 		goto out;
 	}
-	cpus = calloc(1, sizeof(*cpus));
-	if (!cpus)
+	cpus = (stress_cpu_cache_cpus_t *)calloc(1, sizeof(*cpus));
+	if (UNLIKELY(!cpus))
 		goto out;
 
-	cpus->cpus = calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
-	if (!cpus->cpus) {
+	cpus->cpus = (stress_cpu_cache_cpu_t *)calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
+	if (UNLIKELY(!cpus->cpus)) {
 		free(cpus);
 		cpus = NULL;
 		goto out;
@@ -1161,12 +1164,12 @@ stress_cpu_cache_cpus_t *stress_cpu_cache_get_all_details(void)
 		pr_err("no CPUs found using sysctl hw.physicalcpu\n");
 		goto out;
 	}
-	cpus = calloc(1, sizeof(*cpus));
-	if (!cpus)
+	cpus = (stress_cpu_cache_cpus_t *)calloc(1, sizeof(*cpus));
+	if (UNLIKELY(!cpus))
 		goto out;
 
-	cpus->cpus = calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
-	if (!cpus->cpus) {
+	cpus->cpus = (stress_cpu_cache_cpu_t *)calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
+	if (UNLIKELY(!cpus->cpus)) {
 		free(cpus);
 		cpus = NULL;
 		goto out;
@@ -1202,11 +1205,11 @@ stress_cpu_cache_cpus_t *stress_cpu_cache_get_all_details(void)
 		/* Nehalem-based processors or lower, no cache info */
 		return NULL;
 	}
-	cpus = calloc(1, sizeof(*cpus));
-	if (!cpus)
+	cpus = (stress_cpu_cache_cpus_t *)calloc(1, sizeof(*cpus));
+	if (UNLIKELY(!cpus))
 		return NULL;
-	cpus->cpus = calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
-	if (!cpus->cpus) {
+	cpus->cpus = (stress_cpu_cache_cpu_t *)calloc((size_t)cpu_count, sizeof(*(cpus->cpus)));
+	if (UNLIKELY(!cpus->cpus)) {
 		free(cpus);
 		return NULL;
 	}
@@ -1269,14 +1272,14 @@ void stress_cpu_cache_get_llc_size(size_t *llc_size, size_t *cache_line_size)
 	*cache_line_size = 0;
 
 	cpu_caches = stress_cpu_cache_get_all_details();
-	if (!cpu_caches)
+	if (UNLIKELY(!cpu_caches))
 		return;
 
 	max_cache_level = stress_cpu_cache_get_max_level(cpu_caches);
-	if (max_cache_level < 1)
+	if (UNLIKELY(max_cache_level < 1))
 		goto free_cpu_caches;
 	cache = stress_cpu_cache_get(cpu_caches, max_cache_level);
-	if (!cache)
+	if (UNLIKELY(!cache))
 		goto free_cpu_caches;
 
 	*llc_size = cache->size;
@@ -1306,11 +1309,11 @@ void stress_cpu_cache_get_level_size(const uint16_t cache_level, size_t *cache_s
 	*cache_line_size = 0;
 
 	cpu_caches = stress_cpu_cache_get_all_details();
-	if (!cpu_caches)
+	if (UNLIKELY(!cpu_caches))
 		return;
 
 	cache = stress_cpu_cache_get(cpu_caches, cache_level);
-	if (!cache)
+	if (UNLIKELY(!cache))
 		goto free_cpu_caches;
 
 	*cache_size = cache->size;
@@ -1321,5 +1324,36 @@ free_cpu_caches:
 #else
 	*cache_size = 0;
 	*cache_line_size = 0;
+#endif
+}
+
+/*
+ *  stress_cpu_data_cache_flush()
+ *	flush data cache, optimal down to more generic
+ */
+void OPTIMIZE3 stress_cpu_data_cache_flush(void *addr, const size_t len)
+{
+	register uint8_t *ptr = (uint8_t *)addr;
+	register uint8_t *ptr_end = ptr + len;
+
+#if defined(HAVE_ASM_X86_CLFLUSHOPT)
+	if (stress_cpu_x86_has_clflushopt()) {
+		while (ptr < ptr_end) {
+			stress_asm_x86_clflushopt((void *)ptr);
+			ptr += 64;
+		}
+		return;
+	}
+#endif
+#if defined(HAVE_ASM_X86_CLFLUSH)
+	while (ptr < ptr_end) {
+		stress_asm_x86_clflush((void *)ptr);
+		ptr += 64;
+	}
+#elif defined(HAVE_BUILTIN___CLEAR_CACHE)
+	__builtin___clear_cache(addr, (void *)ptr_end);
+#else
+	__builtin___clear_cache(addr, (void *)ptr_end);
+	shim_cacheflush(addr, len, SHIM_ICACHE);
 #endif
 }

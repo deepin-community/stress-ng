@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-capabilities.h"
 #include "core-killpid.h"
 #include "core-net.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_IF_TUN_H)
 #include <linux/if_tun.h>
@@ -51,6 +53,11 @@ static const stress_help_t help[] = {
 	{ NULL,	"tun-ops N",	"stop after N tun bogo operations" },
 	{ NULL, "tun-tap",	"use TAP interface instead of TUN" },
 	{ NULL,	NULL,		NULL }
+};
+
+static const stress_opt_t opts[] = {
+	{ OPT_tun_tap, "tun-tap", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LINUX_IF_TUN_H) &&	\
@@ -89,11 +96,6 @@ static int stress_tun_supported(const char *name)
 	return 0;
 }
 
-static int stress_set_tun_tap(const char *opt)
-{
-	return stress_set_setting_true("tun-tap", opt);
-}
-
 /*
  *  stress_tun
  *	stress tun interface
@@ -108,6 +110,8 @@ static int stress_tun(stress_args_t *args)
 
 	(void)stress_get_setting("tun-tap", &tun_tap);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -118,11 +122,11 @@ static int stress_tun(stress_args_t *args)
 		int port = 2000 + (stress_mwc16() & 0xfff);
 
 		port = stress_net_reserve_ports(port, port);
-		if (port < 0)
+		if (UNLIKELY(port < 0))
 			continue;	/* try again */
 
 		fd = open(tun_dev, O_RDWR);
-		if (fd < 0) {
+		if (UNLIKELY(fd < 0)) {
 			pr_fail("%s: cannot open %s, errno=%d (%s)\n",
 				args->name, tun_dev, errno, strerror(errno));
 			stress_net_release_ports(port, port);
@@ -133,7 +137,7 @@ static int stress_tun(stress_args_t *args)
 		ifr.ifr_flags = tun_tap ? IFF_TAP : IFF_TUN;
 
 		ret = ioctl(fd, TUNSETIFF, (void *)&ifr);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: ioctl TUNSETIFF failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			(void)close(fd);
@@ -143,7 +147,7 @@ static int stress_tun(stress_args_t *args)
 		}
 
 		ret = ioctl(fd, TUNSETOWNER, owner);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: ioctl TUNSETOWNER failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -151,7 +155,7 @@ static int stress_tun(stress_args_t *args)
 		}
 
 		ret = ioctl(fd, TUNSETGROUP, group);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: ioctl TUNSETGROUP failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -159,7 +163,7 @@ static int stress_tun(stress_args_t *args)
 		}
 
 		sfd = socket(AF_INET, SOCK_DGRAM, 0);
-		if (sfd < 0)
+		if (UNLIKELY(sfd < 0))
 			goto clean_up;
 		ifr.ifr_addr.sa_family = AF_INET;
 		tun_addr = (struct sockaddr_in *)&ifr.ifr_addr;
@@ -169,16 +173,16 @@ static int stress_tun(stress_args_t *args)
 		 */
 		for (i = 0; i < 32; i++) {
 			(void)snprintf(ip_addr, sizeof(ip_addr), "192.168.%" PRIu8 ".%" PRIu8,
-				(stress_mwc8modn(252)) + 2,
-				(stress_mwc8modn(254)) + 1);
+				(uint8_t)((stress_mwc8modn(252)) + 2),
+				(uint8_t)((stress_mwc8modn(254)) + 1));
 
 			(void)inet_pton(AF_INET, ip_addr, &tun_addr->sin_addr);
 			ret = ioctl(sfd, SIOCSIFADDR, &ifr);
-			if (ret == 0)
+			if (LIKELY(ret == 0))
 				break;
 		}
 		(void)close(sfd);
-		if (ret < 0)
+		if (UNLIKELY(ret < 0))
 			goto clean_up;
 
 		parent_cpu = stress_get_cpu();
@@ -198,7 +202,7 @@ static int stress_tun(stress_args_t *args)
 			(void)sched_settings_apply(true);
 
 			sfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (sfd < 0) {
+			if (UNLIKELY(sfd < 0)) {
 				switch (errno) {
 				case EMFILE:
 				case ENFILE:
@@ -225,7 +229,7 @@ static int stress_tun(stress_args_t *args)
 			inet_pton(AF_INET, ip_addr, &addr.sin_addr.s_addr);
 
 			ret = bind(sfd, (struct sockaddr *)&addr, len);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				switch (errno) {
 				case EADDRINUSE:
 				case ENOMEM:
@@ -246,7 +250,7 @@ static int stress_tun(stress_args_t *args)
 			for (i = 0; i < PACKETS_TO_SEND; i++) {
 				n = recvfrom(sfd, buffer, sizeof(buffer), 0,
 					(struct sockaddr *)&addr, &len);
-				if (n < 0)
+				if (UNLIKELY(n < 0))
 					break;
 			}
 child_cleanup:
@@ -262,7 +266,7 @@ child_cleanup_fd:
 			ssize_t n;
 
 			ret = ioctl(fd, TUNSETPERSIST, 0);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				pr_fail("%s: ioctl TUNSETPERSIST failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				rc = EXIT_FAILURE;
@@ -356,7 +360,7 @@ child_cleanup_fd:
 #endif
 
 			sfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (sfd < 0) {
+			if (UNLIKELY(sfd < 0)) {
 				pr_fail("%s: parent socket failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				goto child_reap;
@@ -368,12 +372,12 @@ child_cleanup_fd:
 			len = sizeof(addr);
 			inet_pton(AF_INET, ip_addr, &addr.sin_addr.s_addr);
 
-			for (i = 0; stress_continue(args) && (i < PACKETS_TO_SEND); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < PACKETS_TO_SEND)); i++) {
 				n = sendto(sfd, buffer, sizeof(buffer), 0,
 					(struct sockaddr *)&addr, len);
-				if (n < 0)
+				if (UNLIKELY(n < 0))
 					break;
-				shim_sched_yield();
+				(void)shim_sched_yield();
 			}
 			(void)close(sfd);
 		}
@@ -394,23 +398,19 @@ clean_up:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_tun_tap,		stress_set_tun_tap },
-	{ 0,                    NULL }
-};
-
-stressor_info_t stress_tun_info = {
+const stressor_info_t stress_tun_info = {
 	.stressor = stress_tun,
-	.class = CLASS_NETWORK | CLASS_OS,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_tun_supported,
-	.opt_set_funcs = opt_set_funcs,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_tun_info = {
+const stressor_info_t stress_tun_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/if_tun.h and various undefined TUN related macros"

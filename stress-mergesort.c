@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,8 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
+#include "core-madvise.h"
 #include "core-sort.h"
 #include "core-target-clones.h"
 
@@ -45,25 +47,14 @@ typedef struct {
 
 #define IDX(base, idx, size)	((base) + ((idx) * (size)))
 
-static inline ALWAYS_INLINE void mergesort_copy(uint8_t *RESTRICT p1, uint8_t *RESTRICT p2, register size_t size)
+static inline void ALWAYS_INLINE mergesort_copy(uint8_t *RESTRICT p1, uint8_t *RESTRICT p2, register size_t size)
 {
-	if (size == 4) {
-		register uint32_t *u32p1 = (uint32_t *)p1;
-		register uint32_t *u32p2 = (uint32_t *)p2;
-		register uint32_t *u32end = (uint32_t *)(p1 + size);
+	register const uint32_t *u32end = (uint32_t *)(p1 + size);
+	register uint32_t *u32p1 = (uint32_t *)p1;
+	register uint32_t *u32p2 = (uint32_t *)p2;
 
-		while (LIKELY(u32p1 < u32end)) {
-			*(u32p1++) = *(u32p2++);
-		}
-	} else {
-		register uint8_t *u8p1 = p1;
-		register uint8_t *u8p2 = p2;
-		register uint8_t *u8end = p1 + size;
-
-		while (LIKELY(u8p1 < u8end)) {
-			*(u8p1++) = *(u8p2++);
-		}
-	}
+	while (LIKELY(u32p1 < u32end))
+		*(u32p1++) = *(u32p2++);
 }
 
 /*
@@ -88,12 +79,10 @@ static inline void mergesort_partition4(
 		mergesort_partition4(base, lhs, mid + 1, right, compar);
 
 	lhs_len = mid - left + 1;
-	rhs_len = right - mid;
-
 	lhs_size = lhs_len * 4;
-	rhs_size = rhs_len * 4;
-
 	rhs = lhs + lhs_size;
+	rhs_len = right - mid;
+	rhs_size = rhs_len * 4;
 
 	mergesort_copy(lhs, IDX(base, left, 4), lhs_size);
 	mergesort_copy(rhs, IDX(base, (mid + 1), 4), rhs_size);
@@ -102,18 +91,14 @@ static inline void mergesort_partition4(
 	lhs_end = rhs;
 	rhs_end = rhs + rhs_size;
 
-	for (;;) {
+	while ((lhs < lhs_end) && (rhs < rhs_end)) {
 		if (compar(lhs, rhs) < 0) {
 			*(uint32_t *)base = *(uint32_t *)lhs;
 			lhs += 4;
-			if (lhs > lhs_end)
-				break;
 			base += 4;
 		} else {
 			*(uint32_t *)base = *(uint32_t *)rhs;
 			rhs += 4;
-			if (rhs > rhs_end)
-				break;
 			base += 4;
 		}
 	}
@@ -152,12 +137,10 @@ static inline void mergesort_partition(
 		mergesort_partition(base, lhs, mid + 1, right, size, compar);
 
 	lhs_len = mid - left + 1;
-	rhs_len = right - mid;
-
 	lhs_size = lhs_len * size;
-	rhs_size = rhs_len * size;
-
 	rhs = lhs + lhs_size;
+	rhs_len = right - mid;
+	rhs_size = rhs_len * size;
 
 	mergesort_copy(lhs, IDX(base, left, size), lhs_size);
 	mergesort_copy(rhs, IDX(base, (mid + 1), size), rhs_size);
@@ -166,15 +149,15 @@ static inline void mergesort_partition(
 	lhs_end = rhs;
 	rhs_end = rhs + rhs_size;
 
-	for (;;) {
+	while ((lhs < lhs_end) && (rhs < rhs_end)) {
 		if (compar(lhs, rhs) < 0) {
-			mergesort_copy(base, lhs, size);
+			shim_memcpy(base, lhs, size);
 			lhs += size;
 			if (lhs > lhs_end)
 				break;
 			base += size;
 		} else {
-			mergesort_copy(base, rhs, size);
+			shim_memcpy(base, rhs, size);
 			rhs += size;
 			if (rhs > rhs_end)
 				break;
@@ -199,7 +182,7 @@ static int mergesort_nonlibc(
 	int (*compar)(const void *, const void *))
 {
 	uint8_t *lhs;
-	size_t mmap_size = nmemb * size;
+	const size_t mmap_size = nmemb * size;
 
 	lhs = (uint8_t *)stress_mmap_populate(NULL, mmap_size,
 			PROT_READ | PROT_WRITE,
@@ -227,43 +210,15 @@ static const stress_mergesort_method_t stress_mergesort_methods[] = {
 	{ "mergesort-nonlibc",	mergesort_nonlibc },
 };
 
-static int stress_set_mergesort_method(const char *opt)
+static const char *stress_mergesort_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_mergesort_methods); i++) {
-		if (strcmp(opt, stress_mergesort_methods[i].name) == 0) {
-			stress_set_setting("mergesort-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "mergesort-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_mergesort_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_mergesort_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_mergesort_methods)) ? stress_mergesort_methods[i].name : NULL;
 }
 
-/*
- *  stress_set_mergesort_size()
- *	set mergesort size
- */
-static int stress_set_mergesort_size(const char *opt)
-{
-	uint64_t mergesort_size;
-
-	mergesort_size = stress_get_uint64(opt);
-	stress_check_range("mergesort-size", mergesort_size,
-		MIN_MERGESORT_SIZE, MAX_MERGESORT_SIZE);
-	return stress_set_setting("mergesort-size", TYPE_ID_UINT64, &mergesort_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mergesort_size,	stress_set_mergesort_size },
-	{ OPT_mergesort_method,	stress_set_mergesort_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mergesort_size,   "mergesort-size",   TYPE_ID_UINT64, MIN_MERGESORT_SIZE, MAX_MERGESORT_SIZE, NULL },
+	{ OPT_mergesort_method, "mergesort-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_mergesort_method },
+	END_OPT,
 };
 
 #if !defined(__OpenBSD__) &&	\
@@ -291,9 +246,10 @@ static int stress_mergesort(stress_args_t *args)
 {
 	uint64_t mergesort_size = DEFAULT_MERGESORT_SIZE;
 	int32_t *data, *ptr;
-	size_t n, i, mergesort_method = 0;
+	size_t n, i, mergesort_method = 0, data_size;
 	struct sigaction old_action;
 	int ret;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 	double rate;
 	NOCLOBBER double duration = 0.0, count = 0.0, sorted = 0.0;
 	mergesort_func_t mergesort_func;
@@ -301,7 +257,7 @@ static int stress_mergesort(stress_args_t *args)
 	(void)stress_get_setting("mergesort-method", &mergesort_method);
 
 	mergesort_func = stress_mergesort_methods[mergesort_method].mergesort_func;
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf("%s: using method '%s'\n",
 			args->name, stress_mergesort_methods[mergesort_method].name);
 
@@ -312,12 +268,21 @@ static int stress_mergesort(stress_args_t *args)
 			mergesort_size = MIN_MERGESORT_SIZE;
 	}
 	n = (size_t)mergesort_size;
+	data_size = n * sizeof(*data);
 
-	if ((data = calloc(n, sizeof(*data))) == NULL) {
-		pr_inf_skip("%s: malloc failed, allocating %zd integers, skipping stressor\n",
-			args->name, n);
+	data = (int32_t *)stress_mmap_populate(NULL, data_size,
+			PROT_READ | PROT_WRITE,
+			MAP_ANONYMOUS | MAP_PRIVATE,
+			-1, 0);
+	if (data == MAP_FAILED) {
+		pr_inf_skip("%s: mmap failed allocating %zu integers%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, n, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	(void)stress_madvise_collapse(data, data_size);
+	stress_set_vma_anon_name(data, data_size, "mergesort-data");
 
 	ret = sigsetjmp(jmp_env, 1);
 	if (ret) {
@@ -337,6 +302,9 @@ static int stress_mergesort(stress_args_t *args)
 #endif
 
 	stress_sort_data_int32_init(data, n);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -347,9 +315,11 @@ static int stress_mergesort(stress_args_t *args)
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		/* Sort "random" data */
-		if (mergesort_func(data, n, sizeof(*data), stress_sort_cmp_fwd_int32) < 0) {
-			pr_fail("%s: mergesort of random data failed: %d (%s)\n",
+		if (UNLIKELY(mergesort_func(data, n, sizeof(*data), stress_sort_cmp_fwd_int32) < 0)) {
+			pr_fail("%s: mergesort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
+			break;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
@@ -357,24 +327,27 @@ static int stress_mergesort(stress_args_t *args)
 
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr > *(ptr + 1)) {
+					if (UNLIKELY(*ptr > *(ptr + 1))) {
 						pr_fail("%s: sort error "
 							"detected, incorrect ordering "
 							"found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* Reverse sort */
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		if (mergesort_func(data, n, sizeof(*data), stress_sort_cmp_rev_int32) < 0) {
-			pr_fail("%s: reversed mergesort of random data failed: %d (%s)\n",
+			pr_fail("%s: reversed mergesort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
+			break;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
@@ -382,16 +355,17 @@ static int stress_mergesort(stress_args_t *args)
 
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr < *(ptr + 1)) {
+					if (UNLIKELY(*ptr < *(ptr + 1))) {
 						pr_fail("%s: reverse sort "
 							"error detected, incorrect "
 							"ordering found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* And re-order */
@@ -402,8 +376,10 @@ static int stress_mergesort(stress_args_t *args)
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		if (mergesort_func(data, n, sizeof(*data), stress_sort_cmp_rev_int32) < 0) {
-			pr_fail("%s: reversed mergesort of random data failed: %d (%s)\n",
+			pr_fail("%s: reversed mergesort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
+			break;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
@@ -412,18 +388,16 @@ static int stress_mergesort(stress_args_t *args)
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr < *(ptr + 1)) {
+					if (UNLIKELY(*ptr < *(ptr + 1))) {
 						pr_fail("%s: reverse sort "
 							"error detected, incorrect "
 							"ordering found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
-			break;
-
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
@@ -433,19 +407,19 @@ tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "mergesort comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "mergesort comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
-	free(data);
+	(void)munmap((void *)data, data_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_mergesort_info = {
+const stressor_info_t stress_mergesort_info = {
 	.stressor = stress_mergesort,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SORT,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -99,10 +99,10 @@ static int monitor(stress_args_t *args, const int sock)
 		NLMSG_OK(nlmsghdr, (unsigned int)len);
 		nlmsghdr = NLMSG_NEXT(nlmsghdr, len)) {
 
-		struct cn_msg *cn_msg;
-		struct proc_event *proc_ev;
+		const struct cn_msg *cn_msg;
+		const struct proc_event *proc_ev;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			return 0;
 
 		if ((nlmsghdr->nlmsg_type == NLMSG_ERROR) ||
@@ -114,7 +114,7 @@ static int monitor(stress_args_t *args, const int sock)
 		    (cn_msg->id.val != CN_VAL_PROC))
 			continue;
 
-		proc_ev = (struct proc_event *)cn_msg->data;
+		proc_ev = (const struct proc_event *)cn_msg->data;
 
 		switch (proc_ev->what) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,14)
@@ -202,7 +202,7 @@ static int stress_netlink_proc(stress_args_t *args)
 				args->name, errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
-		pr_fail("%s: socket failed: errno=%d (%s)\n",
+		pr_fail("%s: socket failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -213,7 +213,13 @@ static int stress_netlink_proc(stress_args_t *args)
 	addr.nl_groups = CN_IDX_PROC;
 
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		pr_err("%s: bind failed: errno=%d (%s)\n",
+		if (errno == EPERM) {
+			pr_inf_skip("%s: bind failed, no permission, "
+				"skipping stressor\n", args->name);
+			(void)close(sock);
+			return EXIT_NO_RESOURCE;
+		}
+		pr_err("%s: bind failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(sock);
 		return EXIT_FAILURE;
@@ -244,12 +250,14 @@ static int stress_netlink_proc(stress_args_t *args)
 			(void)close(sock);
 			return EXIT_NO_RESOURCE;
 		}
-		pr_fail("%s: writev failed: errno=%d (%s)\n",
+		pr_fail("%s: writev failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(sock);
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -265,16 +273,16 @@ static int stress_netlink_proc(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_netlink_proc_info = {
+const stressor_info_t stress_netlink_proc_info = {
 	.stressor = stress_netlink_proc,
 	.supported = stress_netlink_proc_supported,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_netlink_proc_info = {
+const stressor_info_t stress_netlink_proc_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "built without linux/connector.h, linux/netlink.h or linux/cn_proc.h support"
 };

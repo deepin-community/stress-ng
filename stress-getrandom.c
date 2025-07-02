@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -118,6 +118,8 @@ static int stress_getrandom(stress_args_t *args)
 {
 	double duration = 0.0, bytes = 0.0, rate;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -126,7 +128,7 @@ static int stress_getrandom(stress_args_t *args)
 		double t;
 
 		t = stress_time_now();
-		for (i = 0; stress_continue(args) && (i < SIZEOF_ARRAY(getrandom_flags)); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(getrandom_flags))); i++) {
 			ssize_t ret;
 
 			ret = shim_getrandom(buffer, sizeof(buffer), getrandom_flags[i].flag);
@@ -137,7 +139,7 @@ static int stress_getrandom(stress_args_t *args)
 					continue;
 				if (errno == ENOSYS) {
 					/* Should not happen.. */
-					if (args->instance == 0)
+					if (stress_instance_zero(args))
 						pr_inf_skip("%s: stressor will be skipped, "
 							"getrandom() not supported\n",
 							args->name);
@@ -170,22 +172,22 @@ static int stress_getrandom(stress_args_t *args)
 
 	rate = (duration > 0.0) ? (8.0 * bytes) / duration : 0.0;
 	stress_metrics_set(args, 0, "getrandom bits per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_getrandom_info = {
+const stressor_info_t stress_getrandom_info = {
 	.stressor = stress_getrandom,
 	.supported = stress_getrandom_supported,
-	.class = CLASS_OS | CLASS_CPU,
+	.classifier = CLASS_OS | CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_getrandom_info = {
+const stressor_info_t stress_getrandom_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_CPU,
+	.classifier = CLASS_OS | CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without getrandom() support"

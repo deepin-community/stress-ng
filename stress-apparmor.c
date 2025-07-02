@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -165,7 +165,8 @@ static void stress_apparmor_read(
 	 *  Multiple randomly sized reads
 	 */
 	while (i < (4096 * APPARMOR_BUF_SZ)) {
-		ssize_t ret, sz = 1 + stress_mwc32modn((uint32_t)sizeof(buffer));
+		ssize_t ret;
+		const ssize_t sz = 1 + stress_mwc32modn((uint32_t)sizeof(buffer));
 redo:
 		if (!stress_apparmor_stress_continue_inc(args, false))
 			break;
@@ -193,7 +194,7 @@ static void stress_apparmor_dir(
 	const int depth)
 {
 	DIR *dp;
-	struct dirent *d;
+	const struct dirent *d;
 
 	if (!stress_apparmor_stress_continue_inc(args, false))
 		return;
@@ -235,21 +236,23 @@ static void stress_apparmor_dir(
  *  apparmor_spawn()
  *	spawn a process
  */
-static pid_t apparmor_spawn(
+static void apparmor_spawn(
 	stress_args_t *args,
-	stress_apparmor_func func)
+	stress_apparmor_func func,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid)
 {
-	pid_t pid;
-
 again:
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		return -1;
-	}
-	if (pid == 0) {
+		return;
+	} else if (s_pid->pid == 0) {
 		int ret = EXIT_SUCCESS;
+
+		s_pid->pid = getpid();
+		stress_sync_start_wait_s_pid(s_pid);
 
 		if (!stress_apparmor_stress_continue_inc(args, false))
 			goto abort;
@@ -268,8 +271,9 @@ abort:
 		free(apparmor_path);
 		(void)shim_kill(args->pid, SIGUSR1);
 		_exit(ret);
+	} else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
 }
 
 /*
@@ -319,7 +323,9 @@ static int apparmor_stress_kernel_interface(stress_args_t *args)
 	 *  Try and create a lot of contention and load
 	 */
 	do {
-		int ret = aa_kernel_interface_new(&kern_if, NULL, NULL);
+		int ret;
+
+		ret = aa_kernel_interface_new(&kern_if, NULL, NULL);
 		if (ret < 0) {
 			pr_fail("%s: aa_kernel_interface_new() failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -389,9 +395,9 @@ static inline void apparmor_corrupt_flip_bits_random(
 	const uint32_t n = stress_mwc32modn(17);
 
 	for (i = 0; i < n; i++) {
-		uint32_t rnd = stress_mwc32();
+		const uint32_t rnd = stress_mwc32modn((uint32_t)len);
 
-		copy[rnd % len] ^= (1 << ((rnd >> 16) & 7));
+		copy[rnd] ^= (1U << ((rnd >> 16) & 7));
 	}
 }
 
@@ -404,10 +410,8 @@ static inline void apparmor_corrupt_flip_seq(
 {
 	static size_t p = 0;
 
-	if (p > len)
-		p = 0;
-
-	copy[p] ^= (1 << (p & 7));
+	p = (p >= len) ? 0 : p;
+	copy[p] ^= (1U << (p & 7));
 	p++;
 }
 
@@ -420,10 +424,8 @@ static inline void apparmor_corrupt_clr_seq(
 {
 	static size_t p = 0;
 
-	if (p > len)
-		p = 0;
-
-	copy[p] &= ~(1 << (p & 7));
+	p = (p >= len) ? 0 : p;
+	copy[p] &= ~(1U << (p & 7));
 	p++;
 }
 
@@ -436,10 +438,8 @@ static inline void apparmor_corrupt_set_seq(
 {
 	static size_t p = 0;
 
-	if (p > len)
-		p = 0;
-
-	copy[p] |= (1 << (p & 7));
+	p = (p >= len) ? 0 : p;
+	copy[p] |= (1U << (p & 7));
 	p++;
 }
 
@@ -464,9 +464,9 @@ static inline void apparmor_corrupt_clr_bits_random(
 	const uint32_t n = stress_mwc32modn(17);
 
 	for (i = 0; i < n; i++) {
-		uint32_t rnd = stress_mwc32();
+		const uint32_t rnd = stress_mwc32modn((uint32_t)len);
 
-		copy[rnd % len] &= ~(1 << ((rnd >> 16) & 7));
+		copy[rnd] &= ~(1U << ((rnd >> 16) & 7));
 	}
 }
 
@@ -481,9 +481,9 @@ static inline void apparmor_corrupt_set_bits_random(
 	const uint32_t n = stress_mwc32modn(17);
 
 	for (i = 0; i < n; i++) {
-		uint32_t rnd = stress_mwc32();
+		const uint32_t rnd = stress_mwc32modn((uint32_t)len);
 
-		copy[rnd % len] |= (1 << ((rnd >> 16) & 7));
+		copy[rnd] |= (1U << ((rnd >> 16) & 7));
 	}
 }
 
@@ -518,10 +518,8 @@ static inline void apparmor_corrupt_flip_bits_random_burst(
 	size_t p = (size_t)stress_mwc32modn((uint32_t)len * sizeof(*copy));
 
 	for (i = 0; i < 32; i++) {
-		if (p > len)
-			p = 0;
-
-		copy[p] ^= (1 << (p & 7));
+		p = (p >= len) ? 0 : p;
+		copy[p] ^= (1U << (p & 7));
 		p++;
 	}
 }
@@ -533,9 +531,9 @@ static inline void apparmor_corrupt_flip_bits_random_burst(
 static inline void apparmor_corrupt_flip_one_bit_random(
 	char *copy, const size_t len)
 {
-	uint32_t rnd = stress_mwc32();
+	const uint32_t rnd = stress_mwc32modn((uint32_t)len);
 
-	copy[rnd % len] ^= 1 << stress_mwc8modn(8);
+	copy[rnd] ^= 1U << stress_mwc8modn(8);
 }
 
 /*
@@ -656,46 +654,62 @@ static const stress_apparmor_func apparmor_funcs[] = {
  */
 static int stress_apparmor(stress_args_t *args)
 {
-	pid_t pids[MAX_APPARMOR_FUNCS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	size_t i;
 	int rc = EXIT_NO_RESOURCE;
 
-	if (stress_sighandler(args->name, SIGUSR1, stress_sighandler_nop, NULL) < 0)
+	if (stress_sighandler(args->name, SIGUSR1, stress_sighandler_nop, NULL) < 0) {
 		return EXIT_FAILURE;
+	}
+
+	s_pids = stress_sync_s_pids_mmap(MAX_APPARMOR_FUNCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu PIDs%s, skipping stressor\n",
+			args->name, MAX_APPARMOR_FUNCS, stress_get_memfree_str());
+                return EXIT_NO_RESOURCE;
+	}
 
 	stress_apparmor_shared_info = (stress_apparmor_shared_info_t *)
 		stress_mmap_populate(NULL, sizeof(*stress_apparmor_shared_info),
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (stress_apparmor_shared_info == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocated shared memory, skipping stressor\n", args->name);
-		return rc;
+		pr_inf_skip("%s: failed to allocated shared memory%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
+		goto err_free_s_pids;
 	}
-	data_copy = malloc(g_apparmor_data_len);
+	stress_set_vma_anon_name(stress_apparmor_shared_info, sizeof(*stress_apparmor_shared_info), "lock-counter");
+	data_copy = (char *)malloc(g_apparmor_data_len);
 	if (!data_copy) {
-		pr_inf_skip("%s: failed to allocate apparmor data copy buffer, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to allocate apparmor data copy buffer%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
 		goto err_free_shared_info;
 	}
-	data_prev = malloc(g_apparmor_data_len);
+	data_prev = (char *)malloc(g_apparmor_data_len);
 	if (!data_prev) {
-		pr_inf_skip("%s: failed to allocate apparmor data prev buffer, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to allocate apparmor data prev buffer%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
 		goto err_free_data_copy;
 	}
-	stress_apparmor_shared_info->counter_lock = stress_lock_create();
+	stress_apparmor_shared_info->counter_lock = stress_lock_create("counter");
 	if (!stress_apparmor_shared_info->counter_lock) {
 		pr_inf_skip("%s: failed to create counter lock. skipping stressor\n", args->name);
 		goto err_free_data_prev;
 	}
-	stress_apparmor_shared_info->failure_lock = stress_lock_create();
+	stress_apparmor_shared_info->failure_lock = stress_lock_create("failure");
 	if (!stress_apparmor_shared_info->counter_lock) {
 		pr_inf_skip("%s: failed to create failure counter lock. skipping stressor\n", args->name);
 		goto err_free_counter_lock;
 	}
 
 	for (i = 0; i < MAX_APPARMOR_FUNCS; i++) {
-		pids[i] = apparmor_spawn(args, apparmor_funcs[i]);
+		stress_sync_start_init(&s_pids[i]);
+		apparmor_spawn(args, apparmor_funcs[i], &s_pids_head, &s_pids[i]);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_apparmor_stress_continue_inc(args, false)) {
@@ -709,7 +723,7 @@ static int stress_apparmor(stress_args_t *args)
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	/* Wakeup, time to die */
-	stress_kill_and_wait_many(args, pids, MAX_APPARMOR_FUNCS, SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, MAX_APPARMOR_FUNCS, SIGALRM, true);
 
 	free(apparmor_path);
 	apparmor_path = NULL;
@@ -725,14 +739,16 @@ err_free_data_copy:
 	free(data_copy);
 err_free_shared_info:
 	(void)munmap((void *)stress_apparmor_shared_info, sizeof(*stress_apparmor_shared_info));
+err_free_s_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, MAX_APPARMOR_FUNCS);
 
 	return rc;
 }
 
-stressor_info_t stress_apparmor_info = {
+const stressor_info_t stress_apparmor_info = {
 	.stressor = stress_apparmor,
 	.supported = stress_apparmor_supported,
-	.class = CLASS_OS | CLASS_SECURITY,
+	.classifier = CLASS_OS | CLASS_SECURITY,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -746,10 +762,10 @@ static int stress_apparmor_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_apparmor_info = {
+const stressor_info_t stress_apparmor_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_apparmor_supported,
-	.class = CLASS_OS | CLASS_SECURITY,
+	.classifier = CLASS_OS | CLASS_SECURITY,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/apparmor.h"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,17 @@
  */
 #define STRESS_CORE_SHIM
 
+/*
+ *  For ALT Linux gcc use at most _FORTIFY_SOURCE level 2
+ *  https://github.com/ColinIanKing/stress-ng/issues/452
+ */
+#if defined(HAVE_ALT_LINUX_GCC) &&	\
+    defined(_FORTIFY_SOURCE) &&		\
+    _FORTIFY_SOURCE > 2
+#undef _FORTIFY_SOURCE
+#define _FORTIFY_SOURCE	2
+#endif
+
 #include "stress-ng.h"
 #include "core-arch.h"
 #include "core-attribute.h"
@@ -30,6 +41,8 @@
 #include "core-shim.h"
 
 #include <sched.h>
+#include <stdarg.h>
+#include <time.h>
 #include <pwd.h>
 
 #if defined(__NR_pkey_get)
@@ -129,11 +142,11 @@ extern int setdomainname(const char *name, size_t len);
  *	the sysnr argument and all following 1..N syscall
  *	arguments.  Returns -1 and sets errno to ENOSYS
  */
-static inline long shim_enosys(long sysnr, ...)
+static inline long int shim_enosys(long sysnr, ...)
 {
 	(void)sysnr;
 	errno = ENOSYS;
-	return (long)-1;
+	return (long int)-1;
 }
 
 /*
@@ -197,7 +210,13 @@ int shim_cacheflush(char *addr, int nbytes, int cache)
 #elif defined(__NR_cacheflush) &&	\
       defined(HAVE_SYSCALL)
 	/* potentially incorrect args, needs per-arch fixing */
+#if defined(STRESS_ARCH_M68K)
+	return (int)syscall(__NR_cacheflush, addr, 1 /* cacheline */, cache, nbytes);
+#elif defined(STRESS_ARCH_SH4)
+	return (int)syscall(__NR_cacheflush, addr, nbytes, (cache == ICACHE) ? 0x4 : 0x3);
+#else
 	return (int)syscall(__NR_cacheflush, addr, nbytes, cache);
+#endif
 #else
 	return (int)shim_enosys(0, addr, nbytes, cache);
 #endif
@@ -243,13 +262,13 @@ static int shim_emulate_fallocate(int fd, off_t offset, off_t len)
 	(void)shim_memset(buffer, 0, FALLOCATE_BUF_SIZE);
 	n = len;
 
-	while (stress_continue_flag() && (n > 0)) {
+	while (LIKELY(stress_continue_flag() && (n > 0))) {
 		ssize_t ret;
 		const size_t count = (size_t)STRESS_MINIMUM(n, FALLOCATE_BUF_SIZE);
 
 		ret = write(fd, buffer, count);
-		if (ret >= 0) {
-			n -= ret;
+		if (LIKELY(ret >= 0)) {
+			n -= STRESS_MINIMUM(ret, n);
 		} else {
 			return -1;
 		}
@@ -265,38 +284,56 @@ static int shim_emulate_fallocate(int fd, off_t offset, off_t len)
  */
 int shim_posix_fallocate(int fd, off_t offset, off_t len)
 {
-#if defined(HAVE_POSIX_FALLOCATE)
+#if defined(HAVE_POSIX_FALLOCATE) &&	\
+    !defined(__FreeBSD__) &&		\
+    defined(EINVAL) &&			\
+    defined(EOPNOTSUPP)
 	const off_t chunk_len = (off_t)(1 * MB);
+	static bool emulate = false;
+
+	if (emulate) {
+		errno = 0;
+		if (shim_emulate_fallocate(fd, offset, len) < 0)
+			return errno;
+		return 0;
+	}
 
 	do {
-		const off_t sz = (len > chunk_len) ? chunk_len : len;
 		int ret;
+		const off_t sz = (len > chunk_len) ? chunk_len : len;
 
 		errno = 0;
+		/* posix fallocate returns err in return and not via errno */
 		ret = posix_fallocate(fd, offset, sz);
 		if (ret != 0) {
-			errno = ret;
-			return -1;
+			if ((ret == EINVAL) || (ret == EOPNOTSUPP)) {
+				emulate = true;
+				errno = 0;
+				if (shim_emulate_fallocate(fd, offset, len) < 0)
+					return errno;
+				return 0;
+			}
+			return ret;
 		}
 
 		/*
 		 *  stressor has been signaled to finish, fake
 		 *  an EINTR return
 		 */
-		if (!stress_continue_flag()) {
-			errno = EINTR;
-			return -1;
-		}
+		if (UNLIKELY(!stress_continue_flag()))
+			return EINTR;
 		offset += sz;
 		len -= sz;
 	} while (len > 0);
 
 	return 0;
 #else
-	return shim_emulate_fallocate(fd, offset, len);
+	errno = 0;
+	if (shim_emulate_fallocate(fd, offset, len) < 0)
+		return errno;
+	return 0;
 #endif
 }
-
 
 /*
  * shim_fallocate()
@@ -320,7 +357,8 @@ int shim_fallocate(int fd, int mode, off_t offset, off_t len)
 		if (mode & FALLOC_FL_COLLAPSE_RANGE)
 			return ret;
 #endif
-#if defined(HAVE_SYSCALL)
+#if defined(__NR_fallocate) &&	\
+    defined(HAVE_SYSCALL)
 		ret = (int)syscall(__NR_fallocate, fd, 0, offset, len);
 #else
 		ret = -1;
@@ -419,20 +457,20 @@ int shim_gettid(void)
  *	wrapper for getcpu(2) - get CPU and NUMA node of
  *	calling thread
  */
-long shim_getcpu(
-	unsigned *cpu,
-	unsigned *node,
+long int shim_getcpu(
+	unsigned int *cpu,
+	unsigned int *node,
 	void *tcache)
 {
 #if defined(HAVE_GETCPU) && !defined(STRESS_ARCH_S390)
 	(void)tcache;
-	return (long)getcpu(cpu, node);
+	return (long int)getcpu(cpu, node);
 #elif defined(__NR_getcpu) &&	\
       defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_getcpu, cpu, node, tcache);
+	return (long int)syscall(__NR_getcpu, cpu, node, tcache);
 #else
 	UNEXPECTED
-	return (long)shim_enosys(0, cpu, node, tcache);
+	return (long int)shim_enosys(0, cpu, node, tcache);
 #endif
 }
 
@@ -515,14 +553,14 @@ void shim_flush_icache(void *begin, void *end)
  *	wrapper for Linux kcmp(2) - compare two processes to
  *	see if they share a kernel resource.
  */
-long shim_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsigned long idx2)
+long int shim_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long int idx1, unsigned long int idx2)
 {
 #if defined(__NR_kcmp) &&	\
     defined(HAVE_SYSCALL)
 	errno = 0;
-	return (long)syscall(__NR_kcmp, pid1, pid2, type, idx1, idx2);
+	return (long int)syscall(__NR_kcmp, pid1, pid2, type, idx1, idx2);
 #else
-	return (long)shim_enosys(0, pid1, pid2, type, idx1, idx2);
+	return (long int)shim_enosys(0, pid1, pid2, type, idx1, idx2);
 #endif
 }
 
@@ -578,10 +616,10 @@ int shim_memfd_create(const char *name, unsigned int flags)
  */
 int shim_get_mempolicy(
 	int *mode,
-	unsigned long *nodemask,
-	unsigned long maxnode,
+	unsigned long int *nodemask,
+	unsigned long int maxnode,
 	void *addr,
-	unsigned long flags)
+	unsigned long int flags)
 {
 #if defined(__NR_get_mempolicy) &&	\
     defined(HAVE_SYSCALL)
@@ -598,8 +636,8 @@ int shim_get_mempolicy(
  */
 int shim_set_mempolicy(
 	int mode,
-	unsigned long *nodemask,
-	unsigned long maxnode)
+	unsigned long int *nodemask,
+	unsigned long int maxnode)
 {
 #if defined(__NR_set_mempolicy) &&	\
     defined(HAVE_SYSCALL)
@@ -614,20 +652,20 @@ int shim_set_mempolicy(
  *  shim_mbind()
  *	wrapper for mbind(2) - set memory policy for a memory range
  */
-long shim_mbind(
+long int shim_mbind(
 	void *addr,
-	unsigned long len,
+	unsigned long int len,
 	int mode,
-	const unsigned long *nodemask,
-	unsigned long maxnode,
+	const unsigned long int *nodemask,
+	unsigned long int maxnode,
 	unsigned flags)
 {
 #if defined(__NR_mbind) &&	\
     defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_mbind,
+	return (long int)syscall(__NR_mbind,
 		addr, len, mode, nodemask, maxnode, flags);
 #else
-	return (long)shim_enosys(0, addr, len, mode, nodemask, maxnode, flags);
+	return (long int)shim_enosys(0, addr, len, mode, nodemask, maxnode, flags);
 #endif
 }
 
@@ -635,18 +673,18 @@ long shim_mbind(
  *  shim_migrate_pages()
  *	wrapper for migrate_pages(2) - move all pages in a process to other nodes
  */
-long shim_migrate_pages(
+long int shim_migrate_pages(
 	int pid,
-	unsigned long maxnode,
-	const unsigned long *old_nodes,
-	const unsigned long *new_nodes)
+	unsigned long int maxnode,
+	const unsigned long int *old_nodes,
+	const unsigned long int *new_nodes)
 {
 #if defined(__NR_migrate_pages) &&	\
     defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_migrate_pages,
+	return (long int)syscall(__NR_migrate_pages,
 		pid, maxnode, old_nodes, new_nodes);
 #else
-	return (long)shim_enosys(0, pid, maxnode, old_nodes, new_nodes);
+	return (long int)shim_enosys(0, pid, maxnode, old_nodes, new_nodes);
 #endif
 }
 
@@ -654,9 +692,9 @@ long shim_migrate_pages(
  *  shim_move_pages()
  *	wrapper for move_pages(2) - move pages in a process to other nodes
  */
-long shim_move_pages(
+long int shim_move_pages(
 	int pid,
-	unsigned long count,
+	unsigned long int count,
 	void **pages,
 	const int *nodes,
 	int *status,
@@ -664,10 +702,10 @@ long shim_move_pages(
 {
 #if defined(__NR_move_pages) &&	\
     defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_move_pages, pid, count, pages, nodes,
+	return (long int)syscall(__NR_move_pages, pid, count, pages, nodes,
 		status, flags);
 #else
-	return (long)shim_enosys(0, pid, count, pages, nodes, status, flags);
+	return (long int)shim_enosys(0, pid, count, pages, nodes, status, flags);
 #endif
 }
 
@@ -850,7 +888,7 @@ int shim_nanosleep_uint64(uint64_t nsec)
 		if (nanosleep(&t, &trem) < 0) {
 			if (errno == EINTR) {
 				t = trem;
-				if (stress_continue_flag())
+				if (LIKELY(stress_continue_flag()))
 					continue;
 			} else {
 				return -1;
@@ -873,7 +911,7 @@ int shim_nanosleep_uint64(uint64_t nsec)
 				usec = (useconds_t)(t_left * STRESS_DBL_MICROSECOND);
 				if (usec == 0)
 					return 0;
-				if (stress_continue_flag())
+				if (LIKELY(stress_continue_flag()))
 					continue;
 			} else {
 				return -1;
@@ -942,7 +980,7 @@ char *shim_getlogin(void)
 		return NULL;
 
 	(void)shim_strscpy(pw_name, pw->pw_name, sizeof(pw_name));
-	pw_name[sizeof(pw_name) - 1 ] = '\0';
+	pw_name[sizeof(pw_name) - 1] = '\0';
 
 	return pw_name;
 #endif
@@ -1013,7 +1051,44 @@ int shim_sysfs(int option, ...)
 int shim_madvise(void *addr, size_t length, int advice)
 {
 #if defined(HAVE_MADVISE)
-	return (int)madvise(addr, length, advice);
+	int madvice;
+
+	switch (advice) {
+#if defined(POSIX_MADV_NORMAL) &&	\
+    defined(MADV_NORMAL)
+	case POSIX_MADV_NORMAL:
+		madvice = MADV_NORMAL;
+		break;
+#endif
+#if defined(POSIX_MADV_SEQUENTIAL) &&	\
+    defined(MADV_SEQUENTIAL)
+	case POSIX_MADV_SEQUENTIAL:
+		madvice = MADV_SEQUENTIAL;
+		break;
+#endif
+#if defined(POSIX_MADV_RANDOM) &&	\
+    defined(MADV_RANDOM)
+	case POSIX_MADV_RANDOM:
+		madvice = MADV_RANDOM;
+		break;
+#endif
+#if defined(POSIX_MADV_WILLNEED) &&	\
+    defined(MADV_WILLNEED)
+	case POSIX_MADV_WILLNEED:
+		madvice = MADV_WILLNEED;
+		break;
+#endif
+#if defined(POSIX_MADV_DONTNEED) &&	\
+    defined(MADV_DONTNEED)
+	case POSIX_MADV_DONTNEED:
+		madvice = MADV_DONTNEED;
+		break;
+#endif
+	default:
+		madvice = advice;
+		break;
+	}
+	return (int)madvise(addr, length, madvice);
 #elif defined(__NR_madvise) &&	\
       defined(HAVE_SYSCALL)
 	return (int)syscall(__NR_madvise, addr, length, advice);
@@ -1241,7 +1316,7 @@ int shim_brk(void *addr)
 	intptr_t inc = brkaddr - (intptr_t)addr;
 	const void *newbrk = shim_sbrk(inc);
 
-	if (newbrk == (void *)-1) {
+	if (UNLIKELY(newbrk == (void *)-1)) {
 		if (errno != ENOSYS)
 			errno = ENOMEM;
 		return -1;
@@ -1285,7 +1360,7 @@ ssize_t shim_strscpy(char *dst, const char *src, size_t len)
 {
 	register size_t i;
 
-	if (!len || (len > INT_MAX))
+	if (UNLIKELY(!len || (len > INT_MAX)))
 		return -E2BIG;
 
 	for (i = 0; len; i++, len--) {
@@ -1314,7 +1389,7 @@ size_t shim_strlcat(char *dst, const char *src, size_t len)
 	register const char *s = src;
 	register size_t n = len, tmplen;
 
-	while (n-- && *d != '\0')
+	while (n-- && (*d != '\0'))
 		d++;
 
 	tmplen = d - dst;
@@ -1508,7 +1583,7 @@ pid_t shim_waitpid(pid_t pid, int *wstatus, int options)
 		 *  Retry if EINTR unless we've have 2 mins
 		 *  consecutive EINTRs then give up.
 		 */
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			(void)shim_kill(pid, SIGALRM);
 			if (count > 120)
 				(void)stress_kill_pid(pid);
@@ -1516,8 +1591,8 @@ pid_t shim_waitpid(pid_t pid, int *wstatus, int options)
 		/*
 		 *  Process seems unkillable, report and bail out after 10 mins
 		 */
-		if (count > 600) {
-			pr_dbg("waitpid: SIGALRM on PID %jd has not resulted in "
+		if (UNLIKELY(count > 600)) {
+			pr_dbg("waitpid: SIGALRM on PID %" PRIdMAX" has not resulted in "
 				"process termination after 10 minutes, giving up\n",
 				(intmax_t)pid);
 			break;
@@ -1545,7 +1620,7 @@ pid_t shim_wait(int *wstatus)
 }
 
 /*
- *   shim_wait3(()
+ *   shim_wait3()
  *	wrapper for wait3()
  *
  */
@@ -1562,7 +1637,7 @@ pid_t shim_wait3(int *wstatus, int options, struct rusage *rusage)
 }
 
 /*
- *   shim_wait4(()
+ *   shim_wait4()
  *	wrapper for wait4()
  *
  */
@@ -1767,6 +1842,24 @@ ssize_t shim_getxattr(
 }
 
 /*
+ *  shim_getxattrat
+ *	wrapper for getxattrat (Linux 6.13)
+ */
+ssize_t shim_getxattrat(int dfd, const char *path, unsigned int at_flags,
+		    const char *name, struct shim_xattr_args *args,
+		    size_t size)
+{
+#if defined(HAVE_GETXATTRAT)
+	return (ssize_t)getxattrat(dfd, path, name, at_flags, name, args, size);
+#elif defined(__NR_getxattrat) &&	\
+      defined(HAVE_SYSCALL)
+	return (ssize_t)syscall(__NR_getxattrat, dfd, path, name, at_flags, name, args, size);
+#else
+	return (ssize_t)shim_enosys(0, dfd, path, name, at_flags, name, args, size);
+#endif
+}
+
+/*
  *  shim_listxattr
  *	wrapper for listxattr
  */
@@ -1783,6 +1876,22 @@ ssize_t shim_listxattr(const char *path, char *list, size_t size)
 	return (ssize_t)syscall(__NR_listxattr, path, list, size);
 #else
 	return (ssize_t)shim_enosys(0, path, list, size);
+#endif
+}
+
+/*
+ *  shim_listxattrat
+ *	wrapper for listxattrat
+ */
+ssize_t shim_listxattrat(int dfd, const char *path, unsigned int at_flags, char *list, size_t size)
+{
+#if defined(HAVE_LISTXATTRAT)
+	return listxattrat(dfd, path, at_flags, list, size);
+#elif defined(__NR_listxattrat) &&	\
+      defined(HAVE_SYSCALL)
+	return (ssize_t)syscall(__NR_listxattrat, dfd, path, at_flags, list, size);
+#else
+	return (ssize_t)shim_enosys(0, dfd, path, at_flags, list, size);
 #endif
 }
 
@@ -1823,6 +1932,24 @@ int shim_setxattr(const char *path, const char *name, const void *value, size_t 
 	return (int)syscall(__NR_setxattr, path, name, value, size, flags);
 #else
 	return (int)shim_enosys(0, path, name, value, size, flags);
+#endif
+}
+
+/*
+ *  shim_setxattrat
+ *	wrapper for setxattrat (Linux 6.13)
+ */
+int shim_setxattrat(int dfd, const char *path, unsigned int at_flags,
+		const char *name, const struct shim_xattr_args *args,
+		size_t size)
+{
+#if defined(HAVE_SETXATTRAT)
+	return setxattr(dfd, path, name, at_flags, name, args, size);
+#elif defined(__NR_setxattrat) &&	\
+      defined(HAVE_SYSCALL)
+	return (int)syscall(__NR_setxattrat, dfd, path, name, at_flags, name, args, size);
+#else
+	return (int)shim_enosys(0, dfd, path, name, at_flags, name, args, size);
 #endif
 }
 
@@ -1919,6 +2046,23 @@ int shim_removexattr(const char *path, const char *name)
 }
 
 /*
+ *  shim_removexattrat
+ *	wrapper for removexattrat
+ */
+int shim_removexattrat(int dfd, const char *path, unsigned int at_flags, const char *name)
+{
+#if defined(HAVE_REMOVEXATTRAT)
+	return removexattrat(dfd, path, at_flags, name);
+#elif defined(__NR_removexattrat) &&	\
+      defined(HAVE_SYSCALL)
+	return (int)syscall(__NR_removexattrat, dfd, path, at_flags, name);
+#else
+	return (int)shim_enosys(0, dfd, path, at_flags, name);
+#endif
+}
+
+
+/*
  *  shim_lremovexattr
  *	wrapper for lremovexattr
  */
@@ -1994,7 +2138,7 @@ int shim_reboot(int magic, int magic2, int cmd, void *arg)
 ssize_t shim_process_madvise(
 	int pidfd,
 	const struct iovec *iovec,
-	unsigned long vlen,
+	unsigned long int vlen,
 	int advice,
 	unsigned int flags)
 {
@@ -2193,8 +2337,10 @@ int shim_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 int shim_close_range(unsigned int fd, unsigned int max_fd, unsigned int flags)
 {
-#if defined(__NR_close_range) &&	\
-    defined(HAVE_SYSCALL)
+#if defined(HAVE_CLOSE_RANGE)
+	return close_range(fd, max_fd, flags);
+#elif defined(__NR_close_range) &&	\
+      defined(HAVE_SYSCALL)
 	return (int)syscall(__NR_close_range, fd, max_fd, flags);
 #else
 	return (int)shim_enosys(0, fd, max_fd, flags);
@@ -2232,43 +2378,40 @@ ssize_t shim_readlink(const char *pathname, char *buf, size_t bufsiz)
 
 /*
  *  shim_sgetmask
- *	wrapper for obsolute linux system call sgetmask()
+ *	wrapper for obsolete linux system call sgetmask()
  */
-long shim_sgetmask(void)
+long int shim_sgetmask(void)
 {
 #if defined(__NR_sgetmask) &&	\
     defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_sgetmask);
+	return (long int)syscall(__NR_sgetmask);
 #else
-	return (long)shim_enosys(0);
+	return (long int)shim_enosys(0);
 #endif
 }
 
 /*
  *  shim_ssetmask
- *	wrapper for obsolute linux system call ssetmask()
+ *	wrapper for obsolete linux system call ssetmask()
  */
-long shim_ssetmask(long newmask)
+long int shim_ssetmask(long int newmask)
 {
 #if defined(__NR_ssetmask) &&	\
     defined(HAVE_SYSCALL)
-	return (long)syscall(__NR_ssetmask, newmask);
+	return (long int)syscall(__NR_ssetmask, newmask);
 #else
-	return (long)shim_enosys(0, newmask);
+	return (long int)shim_enosys(0, newmask);
 #endif
 }
 
-/* use praga to avoid stime already declared warning */
-STRESS_PRAGMA_PUSH
-STRESS_PRAGMA_WARN_OFF
 /*
  *  shim_stime()
  *	wrapper for obsolete SVr4 stime system call
  */
 int shim_stime(const time_t *t)
 {
-#if defined(HAVE_STIME)
-#if defined(__minix__)
+#if defined(HAVE_STIME) &&	\
+    defined(__minix__)
 	/*
 	 *  Minix does not provide the prototype for stime
 	 *  and does not use a const time_t * argument
@@ -2277,11 +2420,9 @@ int shim_stime(const time_t *t)
 	time_t *ut = (time_t *)shim_unconstify_ptr(t);
 
 	return stime(ut);
-#else
-	extern int stime(const time_t *t);
-
+#elif defined(HAVE_STIME) &&	\
+      !NEED_GLIBC(2, 31, 0)
 	return stime(t);
-#endif
 #elif defined(__NR_stime) &&	\
       defined(HAVE_SYSCALL)
 	return (int)syscall(__NR_stime, t);
@@ -2289,7 +2430,6 @@ int shim_stime(const time_t *t)
 	return (int)shim_enosys(0, t);
 #endif
 }
-STRESS_PRAGMA_POP
 
 /*
  *  shim_vhangup()
@@ -2311,7 +2451,7 @@ int shim_vhangup(void)
  *  shim_arch_prctl()
  *	wrapper for arch specific prctl system call
  */
-int shim_arch_prctl(int code, unsigned long addr)
+int shim_arch_prctl(int code, unsigned long int addr)
 {
 #if defined(__NR_arch_prctl) && 	\
       defined(__linux__) &&		\
@@ -2363,7 +2503,7 @@ int shim_tkill(int tid, int sig)
  *  shim_memfd_secret()
  *	wrapper for the new memfd_secret system call
  */
-int shim_memfd_secret(unsigned long flags)
+int shim_memfd_secret(unsigned long int flags)
 {
 #if defined(__NR_memfd_secret) &&	\
     defined(HAVE_SYSCALL)
@@ -2409,7 +2549,7 @@ int shim_quotactl_fd(unsigned int fd, unsigned int cmd, int id, void *addr)
  *  shim_modify_ldt()
  *	system call wrapper for modify_ldt()
  */
-int shim_modify_ldt(int func, void *ptr, unsigned long bytecount)
+int shim_modify_ldt(int func, void *ptr, unsigned long int bytecount)
 {
 #if defined(HAVE_MODIFY_LDT) &&	\
     defined(__NR_modify_ldt) &&	\
@@ -2487,17 +2627,17 @@ int shim_unlink(const char *pathname)
  *  shim_unlinkat()
  *	unlinkat, skip operation if --keep-files is enabled
  */
-int shim_unlinkat(int dirfd, const char *pathname, int flags)
+int shim_unlinkat(int dir_fd, const char *pathname, int flags)
 {
 	if (g_opt_flags & OPT_FLAGS_KEEP_FILES)
 		return 0;
 #if defined(HAVE_UNLINKAT)
-	return unlinkat(dirfd, pathname, flags);
+	return unlinkat(dir_fd, pathname, flags);
 #elif defined(__NR_unlinkat) &&	\
       defined(HAVE_SYSCALL)
-	return (int)syscall(__NR_unlinkat, dirfd, pathname, flags);
+	return (int)syscall(__NR_unlinkat, dir_fd, pathname, flags);
 #else
-	return (int)shim_enosys(0, dirfd, pathname, flags);
+	return (int)shim_enosys(0, dir_fd, pathname, flags);
 #endif
 }
 
@@ -2636,17 +2776,17 @@ int shim_kill(pid_t pid, int sig)
 {
 	if (sig == 0)
 		return kill(pid, sig);
-	if (pid == 1) {
+	if (UNLIKELY(pid == 1)) {
 		errno = EPERM;
 		return -1;
 	}
-	if ((pid == -1) && (sig == SIGKILL)) {
+	if (UNLIKELY((pid == -1) && (sig == SIGKILL))) {
 		errno = EINVAL;
 		return -1;
 	}
 	if (geteuid() != 0)
 		return kill(pid, sig);
-	if (pid <= 0) {
+	if (UNLIKELY(pid <= 0)) {
 		errno = EPERM;
 		return -1;
 	}
@@ -2658,10 +2798,10 @@ int shim_kill(pid_t pid, int sig)
  *	wrapper for NUMA system call set_mempolicy_home_node()
  */
 int shim_set_mempolicy_home_node(
-        unsigned long start,
-        unsigned long len,
-        unsigned long home_node,
-        unsigned long flags)
+        unsigned long int start,
+        unsigned long int len,
+        unsigned long int home_node,
+        unsigned long int flags)
 {
 #if defined(__NR_set_mempolicy_home_node)
         return (int)syscall(__NR_set_mempolicy_home_node, start, len, home_node, flags);
@@ -2793,3 +2933,48 @@ unsigned char shim_dirent_type(const char *path, const struct dirent *d)
 	}
 	return SHIM_DT_UNKNOWN;
 }
+
+/*
+ *  shim_mseal()
+ *	shim wrapper for the Linux 5.10 mseal system call
+ */
+int shim_mseal(void *addr, size_t len, unsigned long int flags)
+{
+#if defined(HAVE_MSEAL)
+	return mseal(addr, len, flags);
+#elif defined(__NR_mseal)
+	return (int)syscall(__NR_mseal, addr, len, flags);
+#else
+	return shim_enosys(0, addr, len, flags);
+#endif
+}
+
+/*
+ *  shim_ppoll()
+ *	shim wrapper for ppoll
+ */
+int shim_ppoll(
+	shim_pollfd_t *fds,
+	shim_nfds_t nfds,
+	const struct timespec *tmo_p,
+	const sigset_t *sigmask)
+{
+#if defined(HAVE_PPOLL)
+	return ppoll(fds, nfds, tmo_p, sigmask);
+#elif defined(__NR_ppoll) && defined(_NSIG)
+	struct timespec tval;
+
+	/*
+	 * The kernel will update the timeout, so use a tmp val
+	 * instead
+	 */
+	if (tmo_p != NULL) {
+		tval = *tmo_p;
+		tmo_p = &tval;
+	}
+	return (int)syscall(__NR_ppoll, fds, nfds, tmo_p, sigmask, _NSIG / 8);
+#else
+	return shim_enosys(0, fds, nfds, tmo_p, sigmask);
+#endif
+}
+

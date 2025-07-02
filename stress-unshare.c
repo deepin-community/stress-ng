@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -53,8 +53,8 @@ typedef struct {
     defined(CLONE_SIGHAND)	|| \
     defined(CLONE_VM)
 
-#define UNSHARE(flags, duration, count)	\
-	check_unshare(args, flags, #flags, duration, count)
+#define UNSHARE(flags, duration, count, rc)	\
+	check_unshare(args, flags, #flags, duration, count, rc)
 
 static const int clone_flags[] = {
 #if defined(CLONE_FS)
@@ -103,21 +103,23 @@ static void check_unshare(
 	const int flags,
 	const char *flags_name,
 	double *duration,
-	double *count)
+	double *count,
+	int *rc)
 {
-	int rc;
+	int ret;
 	double t;
 
 	t = stress_time_now();
-	rc = shim_unshare(flags);
-	if ((rc < 0) &&
-            (errno != EPERM) &&
-            (errno != EACCES) &&
-            (errno != EINVAL) &&
-            (errno != ENOSPC)) {
+	ret = shim_unshare(flags);
+	if (UNLIKELY((ret < 0) &&
+		     (errno != EPERM) &&
+		     (errno != EACCES) &&
+		     (errno != EINVAL) &&
+		     (errno != ENOSPC))) {
 		pr_fail("%s: unshare(%s) failed, errno=%d (%s)\n",
 			args->name, flags_name,
 			errno, strerror(errno));
+		*rc = EXIT_FAILURE;
 	} else {
 		(*duration) += stress_time_now() - t;
 		(*count) += 1.0;
@@ -157,16 +159,20 @@ static int stress_unshare(stress_args_t *args)
 	const size_t unshare_info_size = sizeof(stress_unshare_info_t) * MAX_PIDS;
 	stress_unshare_info_t *unshare_info;
 	double total_duration = 0.0, total_count = 0.0, rate;
+	int rc = EXIT_SUCCESS;
 
 	unshare_info = (stress_unshare_info_t *)stress_mmap_populate(NULL,
 				unshare_info_size,
 				PROT_READ | PROT_WRITE,
 				MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (unshare_info == MAP_FAILED) {
-		pr_inf("%s: could not mmap %zu bytes for unshare metrics, skipping stressor\n",
-			args->name, unshare_info_size);
+		pr_inf("%s: failed to mmap %zu bytes for unshare metrics%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, unshare_info_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(unshare_info, unshare_info_size, "unshare-metrics");
 
 	for (i = 0; i < MAX_PIDS; i++) {
 		unshare_info[i].duration = 0.0;
@@ -178,6 +184,8 @@ static int stress_unshare(stress_args_t *args)
 
 	clone_flag_count = stress_flag_permutation(all_flags, &clone_flag_perms);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -187,11 +195,11 @@ static int stress_unshare(stress_args_t *args)
 			unshare_info[i].pid = -1;
 
 		for (n = 0; n < MAX_PIDS; n++) {
-			static size_t index;
+			static size_t idx;
 			int clone_flag = 0;
 			const bool do_flag_perm = stress_mwc1();
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			if (!enough_memory()) {
 				/* memory too low, back off */
@@ -200,10 +208,10 @@ static int stress_unshare(stress_args_t *args)
 			}
 
 			if (do_flag_perm) {
-				clone_flag = clone_flag_perms[index];
-				index++;
-				if (index >= clone_flag_count)
-					index = 0;
+				clone_flag = clone_flag_perms[idx];
+				idx++;
+				if (idx >= clone_flag_count)
+					idx = 0;
 			}
 
 			unshare_info[n].pid = fork();
@@ -223,18 +231,18 @@ static int stress_unshare(stress_args_t *args)
 				stress_set_oom_adjustment(args, true);
 
 				if (do_flag_perm)
-					UNSHARE(clone_flag, duration, count);
+					UNSHARE(clone_flag, duration, count, &rc);
 #if defined(CLONE_FS)
-				UNSHARE(CLONE_FS, duration, count);
+				UNSHARE(CLONE_FS, duration, count, &rc);
 #endif
 #if defined(CLONE_FILES)
-				UNSHARE(CLONE_FILES, duration, count);
+				UNSHARE(CLONE_FILES, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWCGROUP)
-				UNSHARE(CLONE_NEWCGROUP, duration, count);
+				UNSHARE(CLONE_NEWCGROUP, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWIPC)
-				UNSHARE(CLONE_NEWIPC, duration, count);
+				UNSHARE(CLONE_NEWIPC, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWNET)
 				/*
@@ -245,31 +253,31 @@ static int stress_unshare(stress_args_t *args)
 				 *  and don't unshare of root
 				 */
 				if ((n == 0) && (euid != 0))
-					UNSHARE(CLONE_NEWNET, duration, count);
+					UNSHARE(CLONE_NEWNET, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWNS)
-				UNSHARE(CLONE_NEWNS, duration, count);
+				UNSHARE(CLONE_NEWNS, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWPID)
-				UNSHARE(CLONE_NEWPID, duration, count);
+				UNSHARE(CLONE_NEWPID, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWUSER)
-				UNSHARE(CLONE_NEWUSER, duration, count);
+				UNSHARE(CLONE_NEWUSER, duration, count, &rc);
 #endif
 #if defined(CLONE_NEWUTS)
-				UNSHARE(CLONE_NEWUTS, duration, count);
+				UNSHARE(CLONE_NEWUTS, duration, count, &rc);
 #endif
 #if defined(CLONE_SYSVSEM)
-				UNSHARE(CLONE_SYSVSEM, duration, count);
+				UNSHARE(CLONE_SYSVSEM, duration, count, &rc);
 #endif
 #if defined(CLONE_THREAD)
-				UNSHARE(CLONE_THREAD, duration, count);
+				UNSHARE(CLONE_THREAD, duration, count, &rc);
 #endif
 #if defined(CLONE_SIGHAND)
-				UNSHARE(CLONE_SIGHAND, duration, count);
+				UNSHARE(CLONE_SIGHAND, duration, count, &rc);
 #endif
 #if defined(CLONE_VM)
-				UNSHARE(CLONE_VM, duration, count);
+				UNSHARE(CLONE_VM, duration, count, &rc);
 #endif
 				_exit(0);
 			}
@@ -289,7 +297,7 @@ static int stress_unshare(stress_args_t *args)
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (total_count > 0.0) ? total_duration / total_count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per unshare call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	if (clone_flag_perms)
 		free(clone_flag_perms);
@@ -299,16 +307,16 @@ static int stress_unshare(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_unshare_info = {
+const stressor_info_t stress_unshare_info = {
 	.stressor = stress_unshare,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_unshare_info = {
+const stressor_info_t stress_unshare_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without unshare() system call"

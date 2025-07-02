@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,12 +19,16 @@
 #include "stress-ng.h"
 #include "core-clocksource.h"
 
+#include <ctype.h>
+
 #if defined(__linux__)
 static inline void stress_clocksource_tolower(char *str)
 {
-	while (*str) {
-		if (isupper((int)*str))
-			*str = (char)tolower((int)*str);
+	unsigned char ch;
+
+	while ((ch = (unsigned char)*str)) {
+		if (isupper(ch))
+			*str = (char)tolower(ch);
 		str++;
 	}
 }
@@ -34,7 +38,7 @@ static inline void stress_clocksource_tolower(char *str)
  *  stress_clocksource_check()
  *	check the clocksource being used, warn if the less accurate
  *	HPET is being used
- */	
+ */
 void stress_clocksource_check(void)
 {
 #if defined(__linux__)

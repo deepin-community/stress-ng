@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,9 +22,9 @@
 #error ppc64 darn instruction not supported
 #endif
 
-static inline unsigned long rand64(void)
+static inline unsigned long int rand64(void)
 {
-	unsigned long val;
+	unsigned long int val;
 
 	/* Unconditioned raw deliver a raw number */
 	__asm__ __volatile__("darn %0, 0\n" : "=r"(val) :);

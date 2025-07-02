@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-capabilities.h"
 #include "core-killpid.h"
 #include "core-net.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_IF_PACKET_H)
 #include <linux/if_packet.h>
@@ -52,8 +54,6 @@
 
 #include <arpa/inet.h>
 
-#define MIN_RAWPKT_PORT		(1024)
-#define MAX_RAWPKT_PORT		(65535)
 #define DEFAULT_RAWPKT_PORT	(14000)
 
 #if !defined(SOL_UDP)
@@ -84,38 +84,10 @@ static int stress_rawpkt_supported(const char *name)
 	return 0;
 }
 
-/*
- *  stress_set_rawpkt_port()
- *	set port to use
- */
-static int stress_set_port(const char *opt)
-{
-	int port;
-
-	stress_set_net_port("rawpkt-port", opt,
-		MIN_RAWPKT_PORT, MAX_RAWPKT_PORT - STRESS_PROCS_MAX,
-		&port);
-	return stress_set_setting("rawpkt-port", TYPE_ID_INT, &port);
-}
-
-/*
- *  stress_set_rawpkt_rxring()
- *  set RX ring to use
- */
-static int stress_set_rxring(const char *opt)
-{
-	const uint64_t val = stress_get_uint64(opt);
-	int ival;
-
-	stress_check_power_of_2("rawpkt-rxring", val, (uint64_t)1, (uint64_t)16);
-	ival = (int)val;
-	return stress_set_setting("rawpkt-rxring", TYPE_ID_INT, &ival);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_rawpkt_port,	stress_set_port },
-	{ OPT_rawpkt_rxring,	stress_set_rxring },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_rawpkt_port,   "rawpkt-port",   TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	{ OPT_rawpkt_rxring, "rawpkt-rxring", TYPE_ID_INT, 1, 16, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LINUX_UDP_H) &&	\
@@ -443,7 +415,11 @@ static int OPTIMIZE3 stress_rawpkt_server(
 	duration = stress_time_now() - t_start;
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB recv'd per sec",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
+	stress_metrics_set(args, 1, "packets sent",
+		(double)stress_bogo_get(args), STRESS_METRIC_TOTAL);
+	stress_metrics_set(args, 2, "packets received",
+		(double)all_pkts, STRESS_METRIC_TOTAL);
 
 	stress_rawpkt_sockopts(fd);
 #if defined(PACKET_RX_RING) &&	\
@@ -453,8 +429,6 @@ close_fd:
 #endif
 	(void)close(fd);
 die:
-	pr_dbg("%s: %" PRIu64 " packets sent, %" PRIu64 " packets received\n", args->name, stress_bogo_get(args), all_pkts);
-
 	return rc;
 }
 
@@ -472,7 +446,7 @@ static void stress_sock_sigpipe_handler(int signum)
 static int stress_rawpkt(stress_args_t *args)
 {
 	pid_t pid;
-	int rawpkt_port = DEFAULT_RAWPKT_PORT;
+	int reserved_port, rawpkt_port = DEFAULT_RAWPKT_PORT;
 	int fd, rc = EXIT_FAILURE, parent_cpu;
 	struct ifreq hwaddr, ifaddr, idx;
 	int rawpkt_rxring = 0;
@@ -483,7 +457,21 @@ static int stress_rawpkt(stress_args_t *args)
 	(void)stress_get_setting("rawpkt-port", &rawpkt_port);
 	(void)stress_get_setting("rawpkt-rxring", &rawpkt_rxring);
 
+	if ((rawpkt_rxring & (rawpkt_rxring - 1)) != 0) {
+		(void)pr_inf("%s: --rawpkt-rxing value %d is not "
+			"a power of 2, disabling option\n", args->name, rawpkt_rxring);
+		rawpkt_rxring = 0;
+	}
 	rawpkt_port += args->instance;
+	if (rawpkt_port > MAX_PORT)
+		rawpkt_port -= (MAX_PORT - MIN_PORT + 1); /* Wrap round */
+	reserved_port = stress_net_reserve_ports(rawpkt_port, rawpkt_port);
+	if (reserved_port < 0) {
+		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
+			args->name, rawpkt_port);
+		return EXIT_NO_RESOURCE;
+	}
+	rawpkt_port = reserved_port;
 
 	pr_dbg("%s: process [%d] using socket port %d\n",
 		args->name, (int)args->pid, rawpkt_port);
@@ -524,6 +512,8 @@ static int stress_rawpkt(stress_args_t *args)
 	}
 	(void)close(fd);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -531,7 +521,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto finish;
 		}
@@ -551,19 +541,19 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_rawpkt_info = {
+const stressor_info_t stress_rawpkt_info = {
 	.stressor = stress_rawpkt,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_rawpkt_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_rawpkt_info = {
+const stressor_info_t stress_rawpkt_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_rawpkt_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

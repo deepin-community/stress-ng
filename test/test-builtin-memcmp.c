@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,8 +19,8 @@
 
 int main(int argc, char **argv)
 {
-	unsigned long dst;
-	unsigned long src = ~0;
+	unsigned long int dst;
+	unsigned long int src = ~0;
 
 	return __builtin_memcmp(&dst, &src, sizeof(dst));
 }

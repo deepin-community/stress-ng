@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,7 +27,7 @@ int main(void)
 {
 	int fd = 3;
 	struct iovec iov = { 0 };
-	unsigned long nr_segs = 1;
+	unsigned long int nr_segs = 1;
 	unsigned int flags = 0;
 
 	return vmsplice(fd, &iov, nr_segs, flags);

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -87,9 +87,9 @@ static inline int stress_getdents_rand(
 		}
 		j++;
 		if (j >= n)
-			j -= n;
+			j = 0;
 	}
-	pr_fail("%s: getdents: errno=%d (%s)%s\n",
+	pr_fail("%s: getdents failed, errno=%d (%s)%s\n",
 		args->name, -ret, strerror(-ret), stress_get_fs_type(path));
 
 	return ret;
@@ -126,7 +126,7 @@ static int stress_getdents_dir(
 	unsigned int buf_sz;
 	const size_t page_size = args->page_size;
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	fd = open(path, O_RDONLY | O_DIRECTORY);
@@ -150,7 +150,7 @@ static int stress_getdents_dir(
 
 	do {
 		struct shim_linux_dirent *ptr = buf;
-		struct shim_linux_dirent *end;
+		const struct shim_linux_dirent *end;
 		double t;
 
 		t = stress_time_now();
@@ -214,7 +214,7 @@ static int stress_getdents64_dir(
 	unsigned int buf_sz;
 	const size_t page_size = args->page_size;
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	fd = open(path, O_RDONLY | O_DIRECTORY);
@@ -233,7 +233,7 @@ static int stress_getdents64_dir(
 
 	do {
 		struct shim_linux_dirent64 *ptr = (struct shim_linux_dirent64 *)buf;
-		struct shim_linux_dirent64 *end;
+		const struct shim_linux_dirent64 *end;
 		int nread;
 		double t;
 
@@ -287,6 +287,8 @@ static int stress_getdent(stress_args_t *args)
 	const int bad_fd = stress_get_bad_fd();
 	double duration = 0.0, count = 0.0, rate;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -311,23 +313,23 @@ static int stress_getdent(stress_args_t *args)
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per getdents call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_getdent_info = {
+const stressor_info_t stress_getdent_info = {
 	.stressor = stress_getdent,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_getdent_info = {
+const stressor_info_t stress_getdent_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without getdents() or getdents64() support"

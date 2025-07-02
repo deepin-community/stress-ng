@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,15 +19,15 @@
 #ifndef CORE_PTHREAD_H
 #define CORE_PTHREAD_H
 
-#if defined(HAVE_LIB_PTHREAD)
+#if defined(HAVE_PTHREAD_H)
 #include <pthread.h>
 #endif
 
 /* pthread wrapped stress_args_t */
 typedef struct {
 	stress_args_t *args;	/* Stress test args */
-	void *data;			/* Per thread private data */
-	int pthread_ret;		/* Per thread return value */
+	void *data;		/* Per thread private data */
+	int pthread_ret;	/* Per thread return value */
 } stress_pthread_args_t;
 
 /* pthread porting shims, spinlock or fallback to mutex */

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,22 +66,24 @@ static void stress_pageswap_count_paged_out(void *page, const size_t page_size, 
 static void stress_pageswap_unmap(
 	stress_args_t *args,
 	page_info_t **head,
-	double *count)
+	double *count,
+	int *rc)
 {
 	page_info_t *pi = *head;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
 	while (pi) {
 		page_info_t *next = pi->next;
-		size_t size = pi->size;
+		const size_t size = pi->size;
 
 		(void)madvise(pi, size, MADV_PAGEOUT);
 		stress_pageswap_count_paged_out(pi, size, count);
-		if (verify && (pi->self != pi)) {
+		if (UNLIKELY(verify && (pi->self != pi))) {
 			pr_fail("%s: page at %p does not contain expected data\n",
 				args->name, (void *)pi);
+			*rc = EXIT_FAILURE;
 		}
-		(void)munmap(pi, pi->size);
+		(void)munmap((void *)pi, pi->size);
 		pi = next;
 	}
 	*head = NULL;
@@ -100,6 +102,7 @@ static int stress_pageswap_child(stress_args_t *args, void *context)
 	size_t max = 0;
 	page_info_t *head = NULL;
 	double count = 0.0, t, duration, rate;
+	int rc = EXIT_SUCCESS;
 
 	(void)context;
 
@@ -108,14 +111,14 @@ static int stress_pageswap_child(stress_args_t *args, void *context)
 		page_info_t *pi;
 
 		if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size)) {
-			stress_pageswap_unmap(args, &head, &count);
+			stress_pageswap_unmap(args, &head, &count, &rc);
 			max = 0;
 		}
 
 		pi = (page_info_t *)mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-		if (pi == MAP_FAILED) {
-			stress_pageswap_unmap(args, &head, &count);
+		if (UNLIKELY(pi == MAP_FAILED)) {
+			stress_pageswap_unmap(args, &head, &count, &rc);
 			max = 0;
 		} else {
 			page_info_t *oldhead = head;
@@ -129,23 +132,28 @@ static int stress_pageswap_child(stress_args_t *args, void *context)
 			if (oldhead)
 				(void)madvise(oldhead, oldhead->size, MADV_PAGEOUT);
 
-			if (max++ > 65536) {
-				stress_pageswap_unmap(args, &head, &count);
+#if defined(MADV_POPULATE_READ)
+			if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+				(void)madvise(pi, pi->size, MADV_POPULATE_READ);
+#endif
+
+			if (UNLIKELY(max++ > 65536)) {
+				stress_pageswap_unmap(args, &head, &count, &rc);
 				max = 0;
 			}
 			stress_bogo_inc(args);
 		}
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 	duration = stress_time_now() - t;
 
-	stress_pageswap_unmap(args, &head, &count);
+	stress_pageswap_unmap(args, &head, &count, &rc);
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	if (rate > 0.0)
 		stress_metrics_set(args, 0, "millisecs per page swapout",
-			rate * 1000000, STRESS_HARMONIC_MEAN);
+			rate * 1000000, STRESS_METRIC_HARMONIC_MEAN);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -156,27 +164,30 @@ static int stress_pageswap(stress_args_t *args)
 {
 	int rc;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	rc = stress_oomable_child(args, NULL, stress_pageswap_child, STRESS_OOMABLE_DROP_CAP);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return rc;
 }
 
-stressor_info_t stress_pageswap_info = {
+const stressor_info_t stress_pageswap_info = {
 	.stressor = stress_pageswap,
 	.supported = stress_pageswap_supported,
-	.class = CLASS_OS | CLASS_VM,
+	.classifier = CLASS_OS | CLASS_VM,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_pageswap_info = {
+const stressor_info_t stress_pageswap_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_pageswap_supported,
-	.class = CLASS_OS | CLASS_VM,
+	.classifier = CLASS_OS | CLASS_VM,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without madvise() MADV_PAGEOUT defined"

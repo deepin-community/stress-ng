@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -41,6 +41,7 @@ static const stress_help_t help[] = {
     !defined(HAVE_COMPILER_PCC) &&					\
     !defined(HAVE_COMPILER_TCC)
 
+static int stress_regs_success;
 static volatile uint32_t stash32;
 static volatile uint64_t stash64;
 #if defined(HAVE_INT128_T)
@@ -82,6 +83,7 @@ static void regs_check32(
 		pr_fail("%s: register %s was 0x%"
 			PRIx32 ", expecting 0x%" PRIx32 "\n",
 			args->name, reg, expected, value);
+		stress_regs_success = false;
 	}
 }
 
@@ -95,6 +97,7 @@ static void regs_check64(
 		pr_fail("%s: register %s was 0x%"
 			PRIx64 ", expecting 0x%" PRIx64 "\n",
 			args->name, reg, expected, value);
+		stress_regs_success = false;
 	}
 }
 
@@ -716,6 +719,68 @@ do {			\
 }
 #endif
 
+#if defined(STRESS_ARCH_PPC)
+#define STRESS_REGS_HELPER
+/*
+ *  stress_regs_helper(void)
+ *	stress PPC registers
+ *	Notice, r30 should not be used:
+ *	stress-regs.c: error: r30 cannot be used in 'asm' here
+ */
+static void NOINLINE OPTIMIZE0 stress_regs_helper(stress_args_t *args, register uint64_t v)
+{
+	uint32_t v32 = (uint32_t)v;
+	register uint32_t r14 __asm__("r14") = v32;
+	register uint32_t r15 __asm__("r15") = r14 >> 1;
+	register uint32_t r16 __asm__("r16") = r14 << 1;
+	register uint32_t r17 __asm__("r17") = r14 >> 2;
+	register uint32_t r18 __asm__("r18") = r14 << 2;
+	register uint32_t r19 __asm__("r19") = ~r14;
+	register uint32_t r20 __asm__("r20") = ~r15;
+	register uint32_t r21 __asm__("r21") = ~r16;
+	register uint32_t r22 __asm__("r22") = ~r17;
+	register uint32_t r23 __asm__("r23") = ~r18;
+	register uint32_t r24 __asm__("r24") = r14 ^ 0xa5a5a5a5UL;
+	register uint32_t r25 __asm__("r25") = r15 ^ 0xa5a5a5a5UL;
+	register uint32_t r26 __asm__("r26") = r16 ^ 0xa5a5a5a5UL;
+	register uint32_t r27 __asm__("r27") = r17 ^ 0xa5a5a5a5UL;
+	register uint32_t r28 __asm__("r28") = r18 ^ 0xa5a5a5a5UL;
+	register uint32_t r29 __asm__("r29") = r14 ^ 0xa5a5a5a5UL;
+
+#define SHUFFLE_REGS()	\
+do {			\
+	r29 = r14;	\
+	r14 = r15;	\
+	r15 = r16;	\
+	r16 = r17;	\
+	r17 = r18;	\
+	r18 = r19;	\
+	r19 = r20;	\
+	r20 = r21;	\
+	r21 = r22;	\
+	r22 = r23;	\
+	r23 = r24;	\
+	r24 = r25;	\
+	r25 = r26;	\
+	r26 = r27;	\
+	r27 = r28;	\
+	r28 = r29;	\
+} while (0);		\
+
+	SHUFFLE_REGS16();
+
+	stash32 = r28;
+	REGS_CHECK(args, "r28", v32, stash32);
+
+	stash32 = r14 + r15 + r16 + r17 +
+		r18 + r19 + r20 + r21 +
+		r22 + r23 + r24 + r25 +
+		r26 + r27 + r28 + 29;
+
+#undef SHUFFLE_REGS
+}
+#endif
+
 #if defined(STRESS_ARCH_SPARC)
 
 #define STRESS_REGS_HELPER
@@ -1038,8 +1103,11 @@ do {			\
  */
 static int stress_regs(stress_args_t *args)
 {
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 	uint64_t v = stress_mwc64();
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 #if defined(STRESS_ARCH_X86) &&	\
     defined(HAVE_INT128_T)
@@ -1047,34 +1115,35 @@ static int stress_regs(stress_args_t *args)
 	x86_cpu_flags |= stress_cpu_x86_has_mmx() ? CPU_X86_MMX : 0;
 	x86_cpu_flags |= stress_cpu_x86_has_sse() ? CPU_X86_SSE : 0;
 #endif
+	stress_regs_success = true;
 
 	do {
 		int i;
 
-		for (i = 0; stress_continue_flag() & (i < 1000); i++)
+		for (i = 0; LIKELY(stress_continue_flag() & (i < 1000)); i++)
 			stress_regs_helper(args, v);
 		v++;
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while (stress_regs_success && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return stress_regs_success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-stressor_info_t stress_regs_info = {
+const stressor_info_t stress_regs_info = {
 	.stressor = stress_regs,
 	.verify = VERIFY_ALWAYS,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_regs_info = {
+const stressor_info_t stress_regs_info = {
 	.stressor = stress_unimplemented,
 	.verify = VERIFY_ALWAYS,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.help = help,
 	.unimplemented_reason = "built without gcc 8 or higher supporting asm register assignments"
 };

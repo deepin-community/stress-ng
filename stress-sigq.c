@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -46,7 +46,7 @@ static void MLOCKED_TEXT stress_sigqhandler(
 
 static void MLOCKED_TEXT stress_sigq_chld_handler(int sig)
 {
-	if (sig == SIGCHLD) {
+	if (UNLIKELY(sig == SIGCHLD)) {
 		handled_sigchld = true;
 		stress_continue_set_flag(false);
 	}
@@ -94,12 +94,14 @@ static int stress_sigq(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
 	pid = fork();
 	if (pid < 0) {
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		if (stress_redo_fork(args, errno))
 			goto again;
@@ -130,7 +132,7 @@ again:
 
 			if (i++ & 1) {
 				ret = sigwaitinfo(&mask, &info);
-				if (ret < 0)
+				if (UNLIKELY(ret < 0))
 					break;
 			} else {
 				struct timespec timeout;
@@ -139,7 +141,7 @@ again:
 				timeout.tv_nsec = 0;
 
 				ret = sigtimedwait(&mask, &info, &timeout);
-				if (ret < 0) {
+				if (UNLIKELY(ret < 0)) {
 					if (errno == EAGAIN)
 						continue;
 					break;
@@ -153,11 +155,11 @@ again:
 				}
 				break;
 			}
-			if (info.si_signo != SIGUSR1)
+			if (UNLIKELY(info.si_signo != SIGUSR1))
 				break;
 		}
 		pr_dbg("%s: child got termination notice\n", args->name);
-		pr_dbg("%s: exited on PID %jd (instance %" PRIu32 ")\n",
+		pr_dbg("%s: exited on PID %" PRIdMAX " (instance %" PRIu32 ")\n",
 			args->name, (intmax_t)getpid(), args->instance);
 		_exit(rc);
 	} else {
@@ -188,6 +190,14 @@ again:
 
 				/* Exercise invalid signal */
 				(void)shim_rt_sigqueueinfo(pid, 0, &info);
+
+				/*
+				 *  Exercise invalid info, see Linux commit ee17e5d6201c
+				 *  signal: Make siginmask safe when passed a signal of 0
+				 */
+				(void)shim_memset(&info, 0, sizeof(info));
+				info.si_code = 1;
+				(void)shim_rt_sigqueueinfo(pid, 0, &info);
 			}
 #endif
 			stress_bogo_inc(args);
@@ -213,16 +223,16 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_sigq_info = {
+const stressor_info_t stress_sigq_info = {
 	.stressor = stress_sigq,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS | CLASS_IPC,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sigq_info = {
+const stressor_info_t stress_sigq_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS | CLASS_IPC,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sigqueue() or sigwaitinfo() or defined SA_SIGINFO"

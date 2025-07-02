@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "core-attribute.h"
 #include "core-builtin.h"
 #include "core-capabilities.h"
+
+#include <time.h>
 
 static const stress_help_t help[] = {
 	{ NULL,	"time-warp N",		"start N workers checking for timer/clock warping" },
@@ -63,7 +65,7 @@ static int stress_time_warp_gettimeofday(clockid_t clockid, struct timespec *ts)
 
 	(void)clockid;
 	ret = gettimeofday(&tv, NULL);
-	if (ret == 0) {
+	if (LIKELY(ret == 0)) {
 		ts->tv_sec = tv.tv_sec;
 		ts->tv_nsec = tv.tv_usec * 1000;
 	}
@@ -79,7 +81,7 @@ static int stress_time_warp_gettimeofday(clockid_t clockid, struct timespec *ts)
 static int stress_time_warp_time(clockid_t clockid, struct timespec *ts)
 {
 	(void)clockid;
-	if (time(&ts->tv_sec) != (time_t)-1) {
+	if (LIKELY(time(&ts->tv_sec) != (time_t)-1)) {
 		ts->tv_nsec = 0;
 		return 0;
 	}
@@ -100,7 +102,7 @@ static int stress_time_warp_rusage(clockid_t clockid, struct timespec *ts)
 
 	(void)clockid;
 	ret = getrusage(RUSAGE_SELF, &usage);
-	if (ret == 0) {
+	if (LIKELY(ret == 0)) {
 		ts->tv_sec = usage.ru_utime.tv_sec + usage.ru_stime.tv_sec;
 		ts->tv_nsec = (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) * 1000;
 	}
@@ -196,8 +198,10 @@ static int stress_time_warp(stress_args_t *args)
 	size_t i;
 	int ret, rc = EXIT_SUCCESS;
 
-	(void)memset(&stress_times, 0, sizeof(stress_times));
+	(void)shim_memset(&stress_times, 0, sizeof(stress_times));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Get initial times */
@@ -223,14 +227,15 @@ static int stress_time_warp(stress_args_t *args)
 				continue;
 
 			ret = clocks[i].gettime(clocks[i].id, &ts);
-			if (ret == 0) {
+			if (LIKELY(ret == 0)) {
 				stress_times[i].warped +=
 					stress_time_warp_lt(&ts, &stress_times[i].ts_prev);
 				stress_times[i].ts_prev = ts;
-			} else if ((errno != EINVAL) && (errno != ENOSYS)) {
+			} else if (UNLIKELY((errno != EINVAL) && (errno != ENOSYS))) {
 				pr_fail("%s: %s failed, errno=%d (%s)\n",
 					args->name, clocks[i].name, errno, strerror(errno));
 				stress_times[i].failed = true;
+				rc = EXIT_FAILURE;
 			}
 		}
 		stress_bogo_inc(args);
@@ -242,7 +247,7 @@ static int stress_time_warp(stress_args_t *args)
 	 */
 	for (i = 0; i < SIZEOF_ARRAY(clocks); i++) {
 		if (stress_time_warp_lt(&stress_times[i].ts_prev, &stress_times[i].ts_init)) {
-			pr_fail("%s: failed: %30.30s, detected %" PRIu64 " time wrap-around\n",
+			pr_fail("%s: failed, %30.30s, detected %" PRIu64 " time wrap-around\n",
 				args->name, clocks[i].name, stress_times[i].warped);
 			rc = EXIT_FAILURE;
 		}
@@ -254,7 +259,7 @@ static int stress_time_warp(stress_args_t *args)
 	 */
 	for (i = 0; i < SIZEOF_ARRAY(clocks); i++) {
 		if (clocks[i].monotonic && stress_times[i].warped) {
-			pr_fail("%s: failed: %30.30s, detected %" PRIu64 " time warps\n",
+			pr_fail("%s: failed, %30.30s, detected %" PRIu64 " time warps\n",
 				args->name, clocks[i].name, stress_times[i].warped);
 			rc = EXIT_FAILURE;
 		}
@@ -264,16 +269,16 @@ static int stress_time_warp(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_time_warp_info = {
+const stressor_info_t stress_time_warp_info = {
 	.stressor = stress_time_warp,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_time_warp_info = {
+const stressor_info_t stress_time_warp_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without librt or clock_gettime(), gettimeofday(), getrusage() or time() support"

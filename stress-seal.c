@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -72,13 +72,18 @@ static int stress_seal(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buf == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate %zd sized buffer, skipping stressor\n",
-			args->name, page_size);
+		pr_inf_skip("%s: failed to allocate %zu byte buffer%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buf, page_size, "write-buffer");
 	(void)shim_memset(buf, 0xff, page_size);
 	(void)stress_madvise_mergeable(buf, page_size);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -161,8 +166,9 @@ static int stress_seal(stress_args_t *args)
 		if (UNLIKELY(ptr == MAP_FAILED)) {
 			if (errno == ENOMEM)
 				goto next;
-			pr_fail("%s: mmap failed, errno=%d (%s)\n",
-				args->name, errno, strerror(errno));
+			pr_fail("%s: mmap of %jd bytes failed%s, errno=%d (%s)\n",
+				args->name, (intmax_t)sz,
+				stress_get_memfree_str(), errno, strerror(errno));
 			(void)close(fd);
 			goto err;
 		}
@@ -215,16 +221,16 @@ err:
 	return rc;
 }
 
-stressor_info_t stress_seal_info = {
+const stressor_info_t stress_seal_info = {
 	.stressor = stress_seal,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_seal_info = {
+const stressor_info_t stress_seal_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without Linux memfd_create() system call support"

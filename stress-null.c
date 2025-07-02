@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
 #endif
@@ -30,12 +32,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"null-write",	"just exercise /dev/null with writing" },
 	{ NULL,	NULL,		NULL }
 };
-
-static int stress_set_null_write(const char *opt)
-{
-	return stress_set_setting_true("null-write", opt);
-}
-
 
 /*
  *  stress_null
@@ -74,10 +70,12 @@ static int stress_null(stress_args_t *args)
 
 	(void)shim_memset(buffer, 0xff, sizeof(buffer));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (null_write) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: exercising /dev/null with just writes\n", args->name);
 
 		t = stress_time_now();
@@ -100,7 +98,7 @@ static int stress_null(stress_args_t *args)
 		} while (stress_continue(args));
 		duration += stress_time_now() - t;
 	} else {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
                         pr_inf("%s: exercising /dev/null with writes, lseek, "
 				"ioctl, fcntl, fallocate, fdatasync and mmap; for "
 				"just write benchmarking use --null-write\n",
@@ -131,7 +129,7 @@ static int stress_null(stress_args_t *args)
 					bytes += ret;
 				}
 			}
-			if (metrics_count++ > 100)
+			if (UNLIKELY(metrics_count++ > 100))
 				metrics_count = 0;
 
 			VOID_RET(off_t, lseek(fd, (off_t)0, SEEK_SET));
@@ -145,7 +143,7 @@ static int stress_null(stress_args_t *args)
 			VOID_RET(int, shim_fdatasync(fd));
 
 			flag = fcntl(fd, F_GETFL, 0);
-			if (flag >= 0) {
+			if (LIKELY(flag >= 0)) {
 				const int newflag = O_RDWR | ((int)stress_mwc32() & fcntl_mask);
 
 				VOID_RET(int, fcntl(fd, F_SETFL, newflag));
@@ -170,7 +168,7 @@ static int stress_null(stress_args_t *args)
 #endif
 
 #if defined(__linux__)
-			if (mmap_count++ > 500) {
+			if (UNLIKELY(mmap_count++ > 500)) {
 				mmap_count = 0;
 
 				const off_t off = (off_t)stress_mwc64() & ~((off_t)page_size - 1);
@@ -192,20 +190,20 @@ static int stress_null(stress_args_t *args)
 
 	rate = (duration > 0.0) ? (bytes / duration) / (double)MB : 0.0;
 	stress_metrics_set(args, 0, "MB per sec /dev/null write rate",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_null_write,	stress_set_null_write },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_null_write, "null-write", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_null_info = {
+const stressor_info_t stress_null_info = {
 	.stressor = stress_null,
-	.class = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

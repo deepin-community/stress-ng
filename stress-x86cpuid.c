@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -79,7 +79,15 @@ static const stress_cpuid_regs_t ALIGN64 stress_cpuid_regs[] = {
 	{ 0x0000001a, 0x00000000, false },	/* Hybrid Information Enumeration Leaf */
 	{ 0x0000001b, 0x00000000, false },	/* PCONFIG Information Sub-leaf 0 */
 	{ 0x0000001c, 0x00000000, false },	/* Last Branch Records Information Leaf */
+	{ 0x0000001d, 0x00000000, false },	/* Tile Information */
+	{ 0x0000001e, 0x00000000, false },	/* TMUL Information */
+	{ 0x0000001e, 0x00000001, false },	/* TMUL Information, feature flags */
 	{ 0x0000001f, 0x00000000, false },	/* V2 Extended Topology Enumeration Leaf */
+	{ 0x00000024, 0x00000000, false },	/* AVX10 Converged Vector ISA Leaf */
+	{ 0x00000024, 0x00000001, false },	/* Discrete AVX10 Features */
+	{ 0x20000000, 0x00000000, false },	/* Highest Xeon Phi Function Implemented */
+	{ 0x20000001, 0x00000000, false },	/* Xeon Phi Feature Bits */
+	{ 0x40000000, 0x00000000, false },	/* Hypervisor ID string */
 	{ 0x80000000, 0x00000000, false },	/* Extended Function CPUID Information */
 	{ 0x80000001, 0x00000000, false },	/* Extended Processor Signature and Feature Bits */
 	{ 0x80000002, 0x00000000, false },	/* Processor Brand String */
@@ -97,27 +105,31 @@ static const stress_cpuid_regs_t ALIGN64 stress_cpuid_regs[] = {
 	{ 0x8000001d, 0x00000000, false },	/* get cache configuration descriptors */
 	{ 0x8000001e, 0x00000000, false },	/* get APIC/unit/node information */
 	{ 0x8000001f, 0x00000000, false },	/* get SME/SEV information */
+	{ 0x80000021, 0x00000000, false },	/* Extended Feature Identification 2 */
+	{ 0x8fffffff, 0x00000000, false },	/* AMD Easter Egg */
+	{ 0xc0000000, 0x00000000, false },	/* Highest Centaur Extended Function */
+	{ 0xc0000001, 0x00000000, false },	/* Centaur Feature Information */
 };
 
 static void OPTIMIZE3 stress_x86cpuid_reorder_regs(const size_t n, stress_cpuid_regs_t *reordered_cpu_regs)
 {
-	uint8_t ALIGN64 index[SIZEOF_ARRAY(stress_cpuid_regs)];
+	uint8_t ALIGN64 idx[SIZEOF_ARRAY(stress_cpuid_regs)];
 	register size_t i;
 
 	for (i = 0; i < n; i++)
-		index[i] = i;
+		idx[i] = i;
 
 	for (i = 0; i < n; i++) {
 		register const size_t j = stress_mwc8modn((uint8_t)n);
 		register uint8_t tmp;
 
-		tmp = index[i];
-		index[i] = index[j];
-		index[j] = tmp;
+		tmp = idx[i];
+		idx[i] = idx[j];
+		idx[j] = tmp;
 	}
 
 	for (i = 0; i < n; i++)
-		reordered_cpu_regs[i] = stress_cpuid_regs[index[i]];
+		reordered_cpu_regs[i] = stress_cpuid_regs[idx[i]];
 }
 
 /*
@@ -135,7 +147,10 @@ static int stress_x86cpuid(stress_args_t *args)
 
 	stress_cpuid_regs_t ALIGN64 reordered_cpu_regs[SIZEOF_ARRAY(stress_cpuid_regs)];
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	do {
 		double t;
 		register size_t i, j;
@@ -229,22 +244,22 @@ PRAGMA_UNROLL_N(8)
 
 	rate = (count > 0.0) ? (duration / count) : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per cpuid instruction",
-		STRESS_DBL_NANOSECOND * rate, STRESS_HARMONIC_MEAN);
+		STRESS_DBL_NANOSECOND * rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
 
-stressor_info_t stress_x86cpuid_info = {
+const stressor_info_t stress_x86cpuid_info = {
 	.stressor = stress_x86cpuid,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
 
-stressor_info_t stress_x86cpuid_info = {
+const stressor_info_t stress_x86cpuid_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without x86 cpuid instruction support"

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,7 +19,10 @@
 #include "stress-ng.h"
 #include "core-arch.h"
 #include "core-builtin.h"
+#include "core-capabilities.h"
 #include "core-madvise.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_KVM_H)
 #include <linux/kvm.h>
@@ -47,6 +50,47 @@ static const stress_help_t help[] = {
     !defined(__i386__) &&			\
     !defined(__i386)
 
+static int stress_kvm_open(const char *name, const bool report)
+{
+	int kvm_fd;
+
+	if ((kvm_fd = open("/dev/kvm", O_RDWR)) < 0) {
+		switch (errno) {
+		case ENOENT:
+			if (report)
+				pr_inf_skip("%s: /dev/kvm not available, skipping stress test\n",
+					name);
+			break;
+		case EPERM:
+		case EACCES:
+			if (report && !stress_check_capability(SHIM_CAP_SYS_ADMIN))
+				pr_inf_skip("%s stressor will be skipped, "
+					"need to be running with CAP_SYS_ADMIN "
+					"rights for this stressor\n", name);
+			break;
+		default:
+			if (report)
+				pr_fail("%s: open /dev/kvm failed, errno=%d (%s), skipping stress test\n",
+					name, errno, strerror(errno));
+			break;
+		}
+		return -1;
+	}
+	return kvm_fd;
+}
+
+static int stress_kvm_supported(const char *name)
+{
+	int kvm_fd;
+
+	kvm_fd = stress_kvm_open(name, true);
+	if (kvm_fd < 0)
+		return -1;
+
+	(void)close(kvm_fd);
+	return 0;
+}
+
 /*
  *  Minimal x86 kernel, read/increment/write port $80 loop
  */
@@ -69,12 +113,14 @@ static int stress_kvm(stress_args_t *args)
 {
 	bool pr_version = false;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		int kvm_fd, vm_fd, vcpu_fd, version, ret, i;
 		void *vm_mem;
-		size_t vm_mem_size = (stress_mwc16() + 2) * args->page_size;
+		const size_t vm_mem_size = (stress_mwc16() + 2) * args->page_size;
 		ssize_t run_size;
 		struct kvm_userspace_memory_region kvm_mem;
 		struct kvm_sregs sregs;
@@ -83,21 +129,13 @@ static int stress_kvm(stress_args_t *args)
 		bool run_ok = false;
 		uint8_t value = 0;
 
-		if ((kvm_fd = open("/dev/kvm", O_RDWR)) < 0) {
-			if (errno == ENOENT) {
-				if (args->instance == 0)
-					pr_inf_skip("%s: /dev/kvm not available, skipping stress test\n",
-						args->name);
-				return EXIT_NOT_IMPLEMENTED;
-			}
-			pr_fail("%s: open /dev/kvm failed, errno=%d (%s), skipping stress test\n",
-				args->name, errno, strerror(errno));
+		kvm_fd = stress_kvm_open(args->name, stress_instance_zero(args));
+		if (kvm_fd < 0)
 			return EXIT_NOT_IMPLEMENTED;
-		}
 
 #if defined(KVM_GET_API_VERSION)
 		version = ioctl(kvm_fd, KVM_GET_API_VERSION, 0);
-		if ((!pr_version) && (args->instance == 0)) {
+		if ((!pr_version) && (stress_instance_zero(args))) {
 			pr_dbg("%s: KVM kernel API version %d\n", args->name, version);
 			pr_version = true;
 		}
@@ -122,6 +160,7 @@ static int stress_kvm(stress_args_t *args)
 			-1, 0);
 		if (vm_mem == MAP_FAILED)
 			goto tidy_vm_fd;
+		stress_set_vma_anon_name(vm_mem, vm_mem_size, "vm-memory");
 		(void)stress_madvise_mergeable(vm_mem, vm_mem_size);
 
 		(void)shim_memset(&kvm_mem, 0, sizeof(kvm_mem));
@@ -199,12 +238,14 @@ static int stress_kvm(stress_args_t *args)
 		run = (struct kvm_run *)stress_mmap_populate(NULL, (size_t)run_size,
 			PROT_READ | PROT_WRITE, MAP_SHARED, vcpu_fd, 0);
 		if (run == MAP_FAILED) {
-			pr_fail("%s: mmap on vcpu_fd failed, errno=%d (%s)\n",
-				args->name, errno, strerror(errno));
+			pr_fail("%s: mmap on vcpu_fd failed%s, errno=%d (%s)\n",
+				args->name, stress_get_memfree_str(),
+				errno, strerror(errno));
 			goto tidy_vcpu_fd;
 		}
+		stress_set_vma_anon_name(run, (size_t)run_size, "kvm-run");
 
-		for (i = 0; i < 1000 && stress_continue(args); i++) {
+		for (i = 0; LIKELY((i < 1000) && stress_continue(args)); i++) {
 			uint8_t *port;
 
 			ret = ioctl(vcpu_fd, KVM_RUN, 0);
@@ -286,16 +327,17 @@ tidy_kvm_fd:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_kvm_info = {
+const stressor_info_t stress_kvm_info = {
 	.stressor = stress_kvm,
-	.class = CLASS_DEV | CLASS_OS,
+	.classifier = CLASS_DEV | CLASS_OS,
+	.supported = stress_kvm_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_kvm_info = {
+const stressor_info_t stress_kvm_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_DEV | CLASS_OS,
+	.classifier = CLASS_DEV | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built on non-x86-64 without linux/kvm.h"

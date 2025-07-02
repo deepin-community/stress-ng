@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -55,7 +55,8 @@ static int PURE stress_led_dot_filter(const struct dirent *d)
 
 static char *stress_led_orig_trigger(const char *str)
 {
-	char *start, *end, *orig;
+	const char *start, *end;
+	char *orig;
 	size_t len;
 
 	start = strchr(str, '[');
@@ -68,7 +69,7 @@ static char *stress_led_orig_trigger(const char *str)
 	len = 1 + (end - start);
 	if (len < 2)
 		return NULL;
-	orig = calloc(len, sizeof(*orig));
+	orig = (char *)calloc(len, sizeof(*orig));
 	if (!orig)
 		return NULL;
 	(void)shim_strscpy(orig, start, len);
@@ -99,10 +100,10 @@ static void stress_led_trigger(const char *path, const char *trigger)
  */
 static void stress_led_info_free(stress_led_info_t *led_info_list)
 {
-	stress_led_info_t *led_info = led_info_list, *next;
+	stress_led_info_t *led_info = led_info_list;
 
 	while (led_info) {
-		next = led_info->next;
+		stress_led_info_t *next = led_info->next;
 
 		stress_led_brightness(led_info->path, led_info->orig_brightness);
 		stress_led_trigger(led_info->path, led_info->orig_trigger);
@@ -141,7 +142,7 @@ static stress_led_info_t *stress_led_info_get(void)
 	for (i = 0; i < n_devs; i++) {
 		stress_led_info_t *led_info;
 
-		led_info = calloc(1, sizeof(*led_info));
+		led_info = (stress_led_info_t *)calloc(1, sizeof(*led_info));
 		if (led_info) {
 			char led_path[PATH_MAX];
 			char buf[MAX_BUF_SIZE];
@@ -150,11 +151,11 @@ static stress_led_info_t *stress_led_info_get(void)
 
 			(void)snprintf(led_path, sizeof(led_path),
 				"%s/%s", sys_devices, led_list[i]->d_name);
-			led_info->path = strdup(led_path);
+			led_info->path = shim_strdup(led_path);
 			if (!led_info->path)
 				goto led_free_info;
 
-			led_info->name = strdup(led_list[i]->d_name);
+			led_info->name = shim_strdup(led_list[i]->d_name);
 			if (!led_info->name)
 				goto led_free_path;
 
@@ -168,7 +169,7 @@ static stress_led_info_t *stress_led_info_get(void)
 			(void)close(fd);
 			if (len < 0)
 				goto led_free_name;
-			led_info->trigger = strdup(buf);
+			led_info->trigger = shim_strdup(buf);
 			if (!led_info->trigger)
 				goto led_free_name;
 
@@ -229,7 +230,7 @@ static void stress_led_exercise(stress_args_t *args, stress_led_info_t *led_info
 		char *tmp;
 		int delta = 1;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (token[0] == '[')
 			token++;
@@ -258,9 +259,11 @@ static int stress_led(stress_args_t *args)
 	stress_led_info_t *led_info;
 	const bool is_root = stress_check_capability(SHIM_CAP_IS_ROOT);
 
-	if (!is_root && (args->instance == 0))
+	if (!is_root && (stress_instance_zero(args)))
 		pr_inf("%s: unable to set LED settings, need root privilege\n", args->name);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	led_info_list = stress_led_info_get();
@@ -272,7 +275,7 @@ static int stress_led(stress_args_t *args)
 
 	do {
 		for (led_info = led_info_list; led_info; led_info = led_info->next) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_led_exercise(args, led_info);
 			stress_bogo_inc(args);
@@ -285,15 +288,15 @@ static int stress_led(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_led_info = {
+const stressor_info_t stress_led_info = {
 	.stressor = stress_led,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_led_info = {
+const stressor_info_t stress_led_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -58,7 +58,7 @@ VEC_TYPE_T(__uint128_t, u128, 4)
  *  various 64 byte vectors and shuffle masks
  *	s = vector being shuffled
  *	o = vector of original data to sanity check shuffle
- *	mask1 = vector of shuffling posistions
+ *	mask1 = vector of shuffling positions
  *	mask2 = vector to shuffle positions to shuffle back to
  *		original position
  */
@@ -117,37 +117,45 @@ static double stress_vecshuf_all(
 #else
 
 #define STRESS_VEC_BUILTIN_SHUFFLE(tag, elements)		\
-static inline void shim_builtin_shuffle_ ## tag ## _ ## elements(\
+static inline ALWAYS_INLINE void shim_builtin_shuffle_ ## tag ## _ ## elements(\
 	stress_scalar_ ## tag ## _t *dst,			\
 	stress_scalar_ ## tag ## _t *src,			\
 	stress_scalar_ ## tag ## _t *mask)			\
 {								\
 	register int i;						\
 								\
-	for (i = 0; i < elements; i++) 				\
-		dst[i] = src[mask[i]];				\
+PRAGMA_UNROLL_N(elements)					\
+	for (i = 0; i < elements; i++) {			\
+		const stress_scalar_ ## tag ## _t m = mask[i];	\
+		dst[i] = src[m];				\
+	}							\
 }
 
-#define SHIM_SHUFFLE_u8_64(dst, src, mask)	shim_builtin_shuffle_u8_64((void *)&(dst), (void *)&(src), (void *)&(mask))
+#define SHIM_SHUFFLE_u8_64(dst, src, mask)	\
+	shim_builtin_shuffle_u8_64((void *)&(dst), (void *)&(src), (void *)&(mask))
 STRESS_VEC_BUILTIN_SHUFFLE(u8, 64)
 
-#define SHIM_SHUFFLE_u16_32(dst, src, mask)	shim_builtin_shuffle_u16_32((void *)&(dst), (void *)&(src), (void *)&(mask))
+#define SHIM_SHUFFLE_u16_32(dst, src, mask) \
+	shim_builtin_shuffle_u16_32((void *)&(dst), (void *)&(src), (void *)&(mask))
 STRESS_VEC_BUILTIN_SHUFFLE(u16, 32)
 
-#define SHIM_SHUFFLE_u32_16(dst, src, mask)	shim_builtin_shuffle_u32_16((void *)&(dst), (void *)&(src), (void *)&(mask))
+#define SHIM_SHUFFLE_u32_16(dst, src, mask) \
+	shim_builtin_shuffle_u32_16((void *)&(dst), (void *)&(src), (void *)&(mask))
 STRESS_VEC_BUILTIN_SHUFFLE(u32, 16)
 
-#define SHIM_SHUFFLE_u64_8(dst, src, mask)	shim_builtin_shuffle_u64_8((void *)&(dst), (void *)&(src), (void *)&(mask))
+#define SHIM_SHUFFLE_u64_8(dst, src, mask) \
+	shim_builtin_shuffle_u64_8((void *)&(dst), (void *)&(src), (void *)&(mask))
 STRESS_VEC_BUILTIN_SHUFFLE(u64, 8)
 #if defined(HAVE_INT128_T)
 STRESS_VEC_BUILTIN_SHUFFLE(u128, 4)
-#define SHIM_SHUFFLE_u128_4(dst, src, mask)	shim_builtin_shuffle_u128_4((void *)&(dst), (void *)&(src), (void *)&(mask))
+#define SHIM_SHUFFLE_u128_4(dst, src, mask) \
+	shim_builtin_shuffle_u128_4((void *)&(dst), (void *)&(src), (void *)&(mask))
 #endif
 #endif
 
-#define STRESS_VEC_SHUFFLE(tag, elements)				\
-static double TARGET_CLONES OPTIMIZE3 stress_vecshuf_ ## tag ## _ ## elements (	\
-	stress_args_t *args,					\
+#define STRESS_VEC_SHUFFLE(tag, elements, opt)				\
+static double TARGET_CLONES opt stress_vecshuf_ ## tag ## _ ## elements (	\
+	stress_args_t *args,						\
 	stress_vec_data_t *data)					\
 {									\
 	stress_vec_ ## tag ## _ ## elements ## _t *RESTRICT s;		\
@@ -174,33 +182,52 @@ PRAGMA_UNROLL_N(4)							\
 	return t2 - t1;							\
 }
 
-STRESS_VEC_SHUFFLE(u8,   64)
-STRESS_VEC_SHUFFLE(u16,  32)
-STRESS_VEC_SHUFFLE(u32,  16)
-STRESS_VEC_SHUFFLE(u64,   8)
+#if defined(STRESS_ARCH_X86)
+/*
+ *  Force optimization levels 1 for non-64 bit
+ *  shuffles on x86 to workaround gcc/clang
+ *  store-to-load forwarding optimization issue
+ */
+STRESS_VEC_SHUFFLE(u8,   64, OPTIMIZE2)
+STRESS_VEC_SHUFFLE(u16,  32, OPTIMIZE1)
+STRESS_VEC_SHUFFLE(u32,  16, OPTIMIZE1)
+STRESS_VEC_SHUFFLE(u64,   8, OPTIMIZE1)
 #if defined(HAVE_INT128_T)
-STRESS_VEC_SHUFFLE(u128,  4)
+STRESS_VEC_SHUFFLE(u128,  4, OPTIMIZE1)
+#endif
+#else
+STRESS_VEC_SHUFFLE(u8,   64, OPTIMIZE2)
+STRESS_VEC_SHUFFLE(u16,  32, OPTIMIZE2)
+STRESS_VEC_SHUFFLE(u32,  16, OPTIMIZE2)
+STRESS_VEC_SHUFFLE(u64,   8, OPTIMIZE2)
+#if defined(HAVE_INT128_T)
+STRESS_VEC_SHUFFLE(u128,  4, OPTIMIZE2)
+#endif
 #endif
 
 typedef struct {
 	const char *name;
 	const stress_vecshuf_func_t vecshuf_func;
 	const size_t elements;
-	double duration;
-	double ops;
-	double bytes;
 } stress_vecshuf_funcs_t;
 
-static stress_vecshuf_funcs_t stress_vecshuf_funcs[] = {
-	{ "all",	stress_vecshuf_all,     0, 0.0, 0.0, 0.0 },
-	{ "u8x64",	stress_vecshuf_u8_64,  64, 0.0, 0.0, 0.0 },
-	{ "u16x32",	stress_vecshuf_u16_32, 32, 0.0, 0.0, 0.0 },
-	{ "u32x16",	stress_vecshuf_u32_16, 16, 0.0, 0.0, 0.0 },
-	{ "u64x8",	stress_vecshuf_u64_8,   8, 0.0, 0.0, 0.0 },
+typedef struct {
+	stress_metrics_t metrics;
+	double bytes;
+} stress_vecshuf_data_t;
+
+static const stress_vecshuf_funcs_t stress_vecshuf_funcs[] = {
+	{ "all",	stress_vecshuf_all,     0 },
+	{ "u8x64",	stress_vecshuf_u8_64,  64 },
+	{ "u16x32",	stress_vecshuf_u16_32, 32 },
+	{ "u32x16",	stress_vecshuf_u32_16, 16 },
+	{ "u64x8",	stress_vecshuf_u64_8,   8 },
 #if defined(HAVE_INT128_T)
-	{ "u128x4",	stress_vecshuf_u128_4,  4, 0.0, 0.0, 0.0 },
+	{ "u128x4",	stress_vecshuf_u128_4,  4 },
 #endif
 };
+
+static stress_vecshuf_data_t stress_vecshuf_data[SIZEOF_ARRAY(stress_vecshuf_funcs)];
 
 static void stress_vecshuf_call_method(
 	stress_args_t *args,
@@ -208,16 +235,17 @@ static void stress_vecshuf_call_method(
 	const size_t method)
 {
 	double dt, ops, bytes;
-	stress_vecshuf_funcs_t *const func = &stress_vecshuf_funcs[method];
+	const stress_vecshuf_funcs_t *const func = &stress_vecshuf_funcs[method];
+	stress_vecshuf_data_t *vecshuf_data = &stress_vecshuf_data[method];
 
 	dt = func->vecshuf_func(args, data);
-	func->duration += dt;
+	vecshuf_data->metrics.duration += dt;
 
 	ops = (double)(LOOPS_PER_CALL * func->elements) * SHUFFLES_PER_LOOP;
-	func->ops += ops;
+	vecshuf_data->metrics.count += ops;
 
 	bytes = (double)(LOOPS_PER_CALL * VECTOR_SIZE_BYTES) * SHUFFLES_PER_LOOP;
-	func->bytes += bytes;
+	vecshuf_data->bytes += bytes;
 }
 
 static double stress_vecshuf_all(
@@ -230,30 +258,6 @@ static double stress_vecshuf_all(
 		stress_vecshuf_call_method(args, data, i);
 	}
 	return 0.0;
-}
-
-/*
- *  stress_set_vecshuf_method()
- *	set the default vector floating point stress method
- */
-static int stress_set_vecshuf_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_vecshuf_funcs); i++) {
-		if (!strcmp(stress_vecshuf_funcs[i].name, name)) {
-			stress_set_setting("vecshuf-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "vecshuf-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_vecshuf_funcs); i++) {
-		(void)fprintf(stderr, " %s", stress_vecshuf_funcs[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
 }
 
 #define VEC_SET_DATA(type, elements, mwc)			\
@@ -320,18 +324,18 @@ static void stress_vecshuf_set_mask(stress_vec_data_t *data)
 #endif
 }
 
-#define VEC_CHECK(type, elements, fail)				\
-do {								\
-	for (i = 0; i < elements; i++) {			\
-		if (data-> type ## _ ## elements.s.i[i] !=	\
-		    data-> type ## _ ## elements.o.i[i]) {	\
-			pr_fail("%s: shuffling error, in "	\
-				# type "x" # elements		\
-				"vector\n", args->name);	\
-			fail = true;				\
-			break;					\
-		}						\
-	}							\
+#define VEC_CHECK(type, elements, fail)					\
+do {									\
+	for (i = 0; i < elements; i++) {				\
+		if (UNLIKELY(data-> type ## _ ## elements.s.i[i] !=	\
+			     data-> type ## _ ## elements.o.i[i])) {	\
+			pr_fail("%s: shuffling error, in "		\
+				# type "x" # elements			\
+				"vector\n", args->name);		\
+			fail = true;					\
+			break;						\
+		}							\
+	}								\
 } while (0)
 
 static bool stress_vecshuf_check_data(
@@ -348,7 +352,6 @@ static bool stress_vecshuf_check_data(
 #if defined(HAVE_INT128_T)
 	VEC_CHECK(u128, 4, fail);
 #endif
-
 	return fail;
 }
 
@@ -357,6 +360,7 @@ static int stress_vecshuf(stress_args_t *args)
 	stress_vec_data_t *data;
 	size_t vecshuf_method = 0;	/* "all" */
 	size_t i;
+	int rc = EXIT_SUCCESS;
 
 	stress_catch_sigill();
 
@@ -364,30 +368,38 @@ static int stress_vecshuf(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate %zd bytes for vectors, skipping stressor\n",
-			args->name, sizeof(*data));
+		pr_inf_skip("%s: failed to mmap %zu bytes for vectors%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, sizeof(*data),
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(data, sizeof(*data), "vecshuf-data");
 
-	for (i = 1; i < SIZEOF_ARRAY(stress_vecshuf_funcs); i++) {
-		stress_vecshuf_funcs[i].duration = 0.0;
-		stress_vecshuf_funcs[i].ops = 0.0;
-		stress_vecshuf_funcs[i].bytes = 0.0;
+	for (i = 1; i < SIZEOF_ARRAY(stress_vecshuf_data); i++) {
+		stress_vecshuf_data[i].metrics.duration = 0.0;
+		stress_vecshuf_data[i].metrics.count = 0.0;
+		stress_vecshuf_data[i].bytes = 0.0;
 	}
 
 	(void)stress_get_setting("vecshuf-method", &vecshuf_method);
 
 	stress_vecshuf_set_data(data);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		stress_vecshuf_set_mask(data);
 		stress_vecshuf_call_method(args, data, vecshuf_method);
-		stress_vecshuf_check_data(args, data);
+		if (UNLIKELY(stress_vecshuf_check_data(args, data))) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 	} while (stress_continue(args));
 
-
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		double total_duration = 0.0;
 		double inverse_sum_ops = 0.0;
 		double inverse_sum_bytes = 0.0;
@@ -399,13 +411,13 @@ static int stress_vecshuf(stress_args_t *args)
 			args->name, "Method", "MB/sec", "Mshuffles/sec", "% exec time");
 
 		for (i = 1; i < SIZEOF_ARRAY(stress_vecshuf_funcs); i++) {
-			total_duration += stress_vecshuf_funcs[i].duration;
+			total_duration += stress_vecshuf_data[i].metrics.duration;
 		}
 
 		for (i = 1; i < SIZEOF_ARRAY(stress_vecshuf_funcs); i++) {
-			const double ops = stress_vecshuf_funcs[i].ops;
-			const double bytes = stress_vecshuf_funcs[i].bytes;
-			const double duration = stress_vecshuf_funcs[i].duration;
+			const double ops = stress_vecshuf_data[i].metrics.count;
+			const double duration = stress_vecshuf_data[i].metrics.duration;
+			const double bytes = stress_vecshuf_data[i].bytes;
 
 			if ((duration > 0.0) && (ops > 0.0) &&
 			    (bytes > 0.0) && (total_duration > 0.0)) {
@@ -437,42 +449,37 @@ static int stress_vecshuf(stress_args_t *args)
 
 	(void)munmap((void *)data, sizeof(*data));
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-        { OPT_vecshuf_method,	stress_set_vecshuf_method },
+static const char *stress_vecshuf_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_vecshuf_funcs)) ? stress_vecshuf_funcs[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+        { OPT_vecshuf_method, "vecshuf-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_vecshuf_method },
+	END_OPT,
 };
 
-stressor_info_t stress_vecshuf_info = {
+const stressor_info_t stress_vecshuf_info = {
 	.stressor = stress_vecshuf,
-	.class = CLASS_CPU | CLASS_CPU_CACHE,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE | CLASS_VECTOR,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
 
-/*
- *  stress_set_vecshuf_method()
- *	set the default vector floating point stress method, no-op
- */
-static int stress_set_vecshuf_method(const char *name)
-{
-	(void)name;
-
-	fprintf(stderr, "option --vecshuf-method is not implemented, ignoring option '%s'\n", name);
-	return 0;
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-        { OPT_vecshuf_method,	stress_set_vecshuf_method },
+static const stress_opt_t opts[] = {
+        { OPT_vecshuf_method, "vecshuf_method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_unimplemented_method },
+	END_OPT,
 };
 
-stressor_info_t stress_vecshuf_info = {
+const stressor_info_t stress_vecshuf_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU | CLASS_CPU_CACHE,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE | CLASS_VECTOR,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without compiler support for vector shuffling operations"

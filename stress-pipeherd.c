@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,11 +43,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"pipeherd-yield",	"force processes to yield after each write" },
 	{ NULL,	NULL,			NULL }
 };
-
-static int stress_set_pipeherd_yield(const char *opt)
-{
-	return stress_set_setting_true("pipeherd-yield", opt);
-}
 
 static int stress_pipeherd_read_write(stress_args_t *args, const int fd[2], const bool pipeherd_yield)
 {
@@ -95,10 +90,13 @@ static int stress_pipeherd(stress_args_t *args)
 	double t1, t2;
 #endif
 
-	(void)stress_get_setting("pipeherd-yield", &pipeherd_yield);
+	if (!stress_get_setting("pipeherd-yield", &pipeherd_yield)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			pipeherd_yield = true;
+	}
 
 	if (pipe(fd) < 0) {
-		pr_fail("%s: pipe failed: %d (%s)\n",
+		pr_fail("%s: pipe failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -122,7 +120,7 @@ static int stress_pipeherd(stress_args_t *args)
 	data.check = check;
 	sz = write(fd[1], &data, sizeof(data));
 	if (sz < 0) {
-		pr_fail("%s: write to pipe failed: %d (%s)\n",
+		pr_fail("%s: write to pipe failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(fd[0]);
 		(void)close(fd[1]);
@@ -132,6 +130,8 @@ static int stress_pipeherd(stress_args_t *args)
 	for (i = 0; i < PIPE_HERD_MAX; i++)
 		pids[i] = -1;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 #if defined(HAVE_GETRUSAGE) &&	\
@@ -140,7 +140,7 @@ static int stress_pipeherd(stress_args_t *args)
     defined(HAVE_RUSAGE_RU_NVCSW)
 	t1 = stress_time_now();
 #endif
-	for (i = 0; stress_continue(args) && (i < PIPE_HERD_MAX); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < PIPE_HERD_MAX)); i++) {
 		pid_t pid;
 
 		pid = fork();
@@ -186,7 +186,7 @@ static int stress_pipeherd(stress_args_t *args)
     defined(HAVE_RUSAGE_RU_NVCSW)
 	(void)shim_memset(&usage, 0, sizeof(usage));
 	if (shim_getrusage(RUSAGE_CHILDREN, &usage) == 0) {
-		long total = usage.ru_nvcsw + usage.ru_nivcsw;
+		long int total = usage.ru_nvcsw + usage.ru_nivcsw;
 
 		(void)shim_memset(&usage, 0, sizeof(usage));
 		if (getrusage(RUSAGE_SELF, &usage) == 0) {
@@ -197,10 +197,10 @@ static int stress_pipeherd(stress_args_t *args)
 			if (total) {
 				stress_metrics_set(args, 0, "context switches per bogo op",
 					(count > 0) ? ((double)total / (double)count) : 0.0,
-					STRESS_HARMONIC_MEAN);
+					STRESS_METRIC_HARMONIC_MEAN);
 				stress_metrics_set(args, 1, "context switches per sec",
 					(dt > 0.0) ? ((double)total / dt) : 0.0,
-					STRESS_HARMONIC_MEAN);
+					STRESS_METRIC_HARMONIC_MEAN);
 			}
 		}
 	}
@@ -214,15 +214,15 @@ static int stress_pipeherd(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_pipeherd_yield,	stress_set_pipeherd_yield },
-	{ 0,                    NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_pipeherd_yield, "pipeherd-yield", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_pipeherd_info = {
+const stressor_info_t stress_pipeherd_info = {
 	.stressor = stress_pipeherd,
-	.class = CLASS_PIPE_IO | CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_MEMORY | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,7 +22,7 @@
     defined(__sparc_v9__)
 int main(void)
 {
-	unsigned long ver;
+	unsigned long int ver;
 
 	__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
 

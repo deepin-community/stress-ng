@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 
 extern int stress_madvise_random(void *addr, const size_t length);
 extern int stress_madvise_mergeable(void *addr, const size_t length);
+extern int stress_madvise_collapse(void *addr, size_t length);
+extern int stress_madvise_nohugepage(void *addr, const size_t length);
 extern void stress_madvise_pid_all_pages(const pid_t pid, const int advise);
 
 #endif

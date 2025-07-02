@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2022-2024, Red Hat Inc, Dorinda Bassey <dbassey@redhat.com>
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025, Red Hat Inc, Dorinda Bassey <dbassey@redhat.com>
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -47,64 +47,14 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_gpu_devnode(const char *opt)
-{
-	return stress_set_setting("gpu-devnode", TYPE_ID_STR, opt);
-}
-
-static int stress_set_gpu(const char *opt, const char *name, const size_t max)
-{
-	int32_t gpu32;
-	int64_t gpu64;
-
-	gpu64 = (int64_t)stress_get_uint64(opt);
-	stress_check_range(name, (uint64_t)gpu64, 1, max);
-	gpu32 = (int32_t)gpu64;
-	return stress_set_setting(name, TYPE_ID_INT32, &gpu32);
-}
-
-static int stress_set_gpu_frag(const char *opt)
-{
-	return stress_set_gpu(opt, "gpu-frag", INT_MAX);
-}
-
-static int stress_set_gpu_xsize(const char *opt)
-{
-	return stress_set_gpu(opt, "gpu-xsize", INT_MAX);
-}
-
-static int stress_set_gpu_ysize(const char *opt)
-{
-	return stress_set_gpu(opt, "gpu-ysize", INT_MAX);
-}
-
-static int stress_set_gpu_gl(const char *opt, const char *name, const size_t max)
-{
-	int32_t gpu_val;
-
-	gpu_val = stress_get_int32(opt);
-	stress_check_range(name, (uint64_t)gpu_val, 1, max);
-	return stress_set_setting(name, TYPE_ID_INT32, &gpu_val);
-}
-
-static int stress_set_gpu_upload(const char *opt)
-{
-	return stress_set_gpu_gl(opt, "gpu-upload", INT_MAX);
-}
-
-static int stress_set_gpu_size(const char *opt)
-{
-	return stress_set_gpu_gl(opt, "gpu-tex-size", INT_MAX);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_gpu_devnode,	stress_set_gpu_devnode },
-	{ OPT_gpu_frag,		stress_set_gpu_frag },
-	{ OPT_gpu_uploads,	stress_set_gpu_upload },
-	{ OPT_gpu_size,		stress_set_gpu_size },
-	{ OPT_gpu_xsize,	stress_set_gpu_xsize },
-	{ OPT_gpu_ysize,	stress_set_gpu_ysize },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_gpu_devnode, "gpu-devnode",  TYPE_ID_STR,    0, 0,        NULL },
+	{ OPT_gpu_frag,    "gpu-frag",     TYPE_ID_INT32,  1, INT_MAX,  NULL },
+	{ OPT_gpu_upload,  "gpu-upload",   TYPE_ID_INT32,  1, INT_MAX,  NULL },
+	{ OPT_gpu_size,    "gpu-tex-size", TYPE_ID_INT32,  1, INT_MAX,  NULL },
+	{ OPT_gpu_xsize,   "gpu-xsize",    TYPE_ID_UINT32, 1, UINT_MAX, NULL },
+	{ OPT_gpu_ysize,   "gpu-ysize",    TYPE_ID_UINT32, 1, UINT_MAX, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_EGL) &&		\
@@ -120,9 +70,6 @@ static volatile double gpu_freq_sum;
 static volatile uint64_t gpu_freq_count;
 #endif
 
-static volatile bool do_jmp = true;
-static sigjmp_buf jmp_env;
-
 static GLuint program;
 static EGLDisplay display;
 static EGLSurface surface;
@@ -131,6 +78,14 @@ static struct gbm_surface *gs;
 
 static const char default_gpu_devnode[] = "/dev/dri/renderD128";
 static GLubyte *teximage = NULL;
+
+static void stress_gpu_trim_newline(char *str)
+{
+	char *ptr = strrchr(str, '\n');
+
+	if (ptr)
+		*ptr = '\0';
+}
 
 static const char vert_shader[] =
     "attribute vec4 pos;\n"
@@ -181,14 +136,16 @@ static GLuint compile_shader(
 		if (infoLen > 1) {
 			char *infoLog;
 
-			infoLog = malloc((size_t)infoLen);
+			infoLog = (char *)malloc((size_t)infoLen);
 			if (!infoLog) {
-				pr_inf_skip("%s: failed to allocate infoLog, skipping stressor\n", args->name);
+				pr_inf_skip("%s: failed to allocate infoLog%s, skipping stressor\n",
+					args->name, stress_get_memfree_str());
 				glDeleteShader(shader);
 				return 0;
 			}
 			glGetShaderInfoLog(shader, infoLen, NULL, infoLog);
-			pr_inf("%s: failed to compile shader:\n%s\n", args->name, infoLog);
+			stress_gpu_trim_newline(infoLog);
+			pr_inf("%s: failed to compile shader: %s\n", args->name, infoLog);
 			free(infoLog);
 		}
 		glDeleteShader(shader);
@@ -235,14 +192,16 @@ static int load_shaders(stress_args_t *args)
 		if (infoLen > 1) {
 			char *infoLog;
 
-			infoLog = malloc((size_t)infoLen);
+			infoLog = (char *)malloc((size_t)infoLen);
 			if (!infoLog) {
-				pr_inf_skip("%s: failed to allocate infoLog, skipping stressor\n", name);
+				pr_inf_skip("%s: failed to allocate infoLog%s, skipping stressor\n",
+					name, stress_get_memfree_str());
 				glDeleteProgram(program);
 				return EXIT_NO_RESOURCE;
 			}
 			glGetProgramInfoLog(program, infoLen, NULL, infoLog);
-			pr_fail("%s: failed to link shader program:\n%s\n", name, infoLog);
+			stress_gpu_trim_newline(infoLog);
+			pr_fail("%s: failed to link shader program: %s\n", name, infoLog);
 			free(infoLog);
 		}
 		glDeleteProgram(program);
@@ -285,7 +244,7 @@ static int gles2_init(
 	GLint ufrag_n;
 	GLuint apos, acolor;
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: GL_VENDOR: %s\n", args->name, (const char *)glGetString(GL_VENDOR));
 		pr_inf("%s: GL_VERSION: %s\n", args->name, (const char *)glGetString(GL_VERSION));
 		pr_inf("%s: GL_RENDERER: %s\n", args->name, (const char *)glGetString(GL_RENDERER));
@@ -330,9 +289,10 @@ static int gles2_init(
 		glBindTexture(GL_TEXTURE_2D, texobj);
 
 		bytesPerImage = texsize * texsize * 4;
-		teximage = malloc((size_t)bytesPerImage);
+		teximage = (GLubyte *)malloc((size_t)bytesPerImage);
 		if (!teximage) {
-			pr_inf_skip("%s: failed to allocate teximage, skipping stressor\n", args->name);
+			pr_inf_skip("%s: failed to allocate teximage%s, skipping stressor\n",
+				args->name, stress_get_memfree_str());
 			return EXIT_NO_RESOURCE;
 		}
 	}
@@ -343,7 +303,7 @@ static void stress_gpu_run(const GLsizei texsize, const GLsizei uploads)
 {
 	if (texsize > 0) {
 		int i;
-		for (i = 0; stress_continue_flag() && (i < uploads); i++) {
+		for (i = 0; LIKELY(stress_continue_flag() && (i < uploads)); i++) {
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texsize,
 				     texsize, 0, GL_RGBA, GL_UNSIGNED_BYTE,
 				     teximage);
@@ -375,9 +335,10 @@ static int get_config(stress_args_t *args, EGLConfig *config)
 	}
 
 	/* Use calloc to avoid multiplication overflow */
-	configs = calloc((size_t)num_configs, sizeof(EGLConfig));
+	configs = (EGLConfig *)calloc((size_t)num_configs, sizeof(EGLConfig));
 	if (!configs) {
-		pr_inf_skip("%s: EGL: EGL allocation failed, skipping stressor\n", args->name);
+		pr_inf_skip("%s: EGL: EGL allocation failed%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 	if ((eglChooseConfig(display, egl_config_attribs,
@@ -429,7 +390,7 @@ static int egl_init(
 
 	fd = open(gpu_devnode, O_RDWR);
 	if (fd < 0) {
-		pr_inf_skip("%s: couldn't open device '%s': errno=%d (%s), skipping stressor\n",
+		pr_inf_skip("%s: couldn't open device '%s', errno=%d (%s), skipping stressor\n",
 			args->name, gpu_devnode, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
@@ -470,7 +431,8 @@ static int egl_init(
 
 	surface = eglCreatePlatformWindowSurface(display, config, gs, NULL);
 	if (surface == EGL_NO_SURFACE) {
-		pr_inf("%s: EGL: Failed to allocate surface\n", args->name);
+		pr_inf("%s: EGL: Failed to allocate surface%s\n",
+			args->name, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -503,16 +465,6 @@ static int stress_gpu_supported(const char *name)
 	return 0;
 }
 
-static void stress_gpu_alarm_handler(int sig)
-{
-	(void)sig;
-
-	if (do_jmp) {
-		do_jmp = false;
-		siglongjmp(jmp_env, 1);         /* Ugly, bounce back */
-        }
-}
-
 #if defined(HAVE_LIB_PTHREAD)
 /*
  *  stress_gpu_pthread()
@@ -523,10 +475,10 @@ static void stress_gpu_alarm_handler(int sig)
 static void *stress_gpu_pthread(void *arg)
 {
 	stress_args_t *args = (stress_args_t *)arg;
-	uint64_t sleep_usecs = 100000UL * (uint64_t)args->num_instances;
+	uint64_t sleep_usecs = 100000UL * (uint64_t)args->instances;
 	uint64_t start_sleep_usecs = 100000UL * (uint64_t)args->instance;
 
-	shim_usleep(start_sleep_usecs);
+	(void)shim_usleep(start_sleep_usecs);
 	while (stress_continue(args)) {
 		double freq_mhz;
 
@@ -536,7 +488,7 @@ static void *stress_gpu_pthread(void *arg)
 			gpu_freq_sum += freq_mhz;
 			gpu_freq_count++;
 		}
-		shim_usleep(sleep_usecs);
+		(void)shim_usleep(sleep_usecs);
 	}
 	return NULL;
 }
@@ -551,7 +503,6 @@ static int stress_gpu_child(stress_args_t *args, void *context)
 	GLsizei texsize = 4096;
 	GLsizei uploads = 1;
 	const char *gpu_devnode = default_gpu_devnode;
-	struct sigaction old_action;
 	sigset_t set;
 #if defined(HAVE_LIB_PTHREAD)
 	pthread_t pthread;
@@ -567,14 +518,11 @@ static int stress_gpu_child(stress_args_t *args, void *context)
 	 *  in pthread or this process to check if
 	 *  SIGALRM has been sent.
 	 */
-	sigemptyset(&set);
-	sigaddset(&set, SIGALRM);
-	sigprocmask(SIG_BLOCK, &set, NULL);
+	(void)sigemptyset(&set);
+	(void)sigaddset(&set, SIGALRM);
+	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
 	(void)context;
-
-	if (stress_sighandler(args->name, SIGALRM, stress_gpu_alarm_handler, &old_action) < 0)
-		return EXIT_NO_RESOURCE;
 
 	(void)setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
 
@@ -597,15 +545,9 @@ static int stress_gpu_child(stress_args_t *args, void *context)
 	pret = pthread_create(&pthread, NULL, stress_gpu_pthread, (void *)args);
 #endif
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-
-	ret = sigsetjmp(jmp_env, 1);
-	if (ret) {
-		/*
-		 * We return here if SIGALRM jmp'd back
-		 */
-		goto finish;
-	}
 
 	do {
 		stress_gpu_run(texsize, uploads);
@@ -614,7 +556,6 @@ static int stress_gpu_child(stress_args_t *args, void *context)
 		stress_bogo_inc(args);
 	} while (!stress_sigalrm_pending() && stress_continue(args));
 
-finish:
 #if defined(HAVE_LIB_PTHREAD)
 	if (pret == 0) {
 		(void)pthread_cancel(pthread);
@@ -622,12 +563,10 @@ finish:
 
 		rate = (gpu_freq_count > 0) ? gpu_freq_sum / (double)gpu_freq_count : 0.0;
 		if (rate > 0.0)
-			stress_metrics_set(args, 0, "MHz GPU frequency", rate, STRESS_HARMONIC_MEAN);
+			stress_metrics_set(args, 0, "MHz GPU frequency",
+					rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 #endif
-
-	do_jmp = false;
-	(void)stress_sigrestore(args->name, SIGALRM, &old_action);
 
 	ret = EXIT_SUCCESS;
 deinit:
@@ -644,18 +583,18 @@ static int stress_gpu(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_gpu_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_gpu_info = {
+const stressor_info_t stress_gpu_info = {
 	.stressor = stress_gpu,
-	.class = CLASS_GPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_GPU,
+	.opts = opts,
 	.supported = stress_gpu_supported,
 	.help = help
 };
 #else
-stressor_info_t stress_gpu_info = {
+const stressor_info_t stress_gpu_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_GPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_GPU,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without EGL/egl.h, EGL/eglext.h, GLES2/gl2.h or gbm.h"
 };

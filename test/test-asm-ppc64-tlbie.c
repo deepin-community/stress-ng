@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,7 +24,7 @@
 
 static inline void tlbie(void *addr)
 {
-	unsigned long address = (unsigned long)addr;
+	unsigned long int address = (unsigned long int)addr;
 
 	__asm__ __volatile__("tlbie %0, 0" : : "r" (address) : "memory");
 }

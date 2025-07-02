@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,7 @@
 #include "stress-ng.h"
 #include "core-attribute.h"
 #include "core-cpu-cache.h"
+#include "core-helper.h"
 #include "core-mwc.h"
 
 #if defined(HAVE_SYS_AUXV_H)
@@ -30,20 +31,14 @@
 #include <utime.h>
 #endif
 
-#define STRESS_USE_MWC_32
-
 /* MWC random number initial seed */
 #define STRESS_MWC_SEED_W	(521288629UL)
 #define STRESS_MWC_SEED_Z	(362436069UL)
 
 /* Fast random number generator state */
 typedef struct {
-#if defined(STRESS_USE_MWC_32)
 	uint32_t w;
 	uint32_t z;
-#else
-	uint64_t state;
-#endif
 	uint32_t n16;
 	uint32_t saved16;
 	uint32_t n8;
@@ -53,12 +48,8 @@ typedef struct {
 } stress_mwc_t;
 
 static stress_mwc_t mwc = {
-#if defined(STRESS_USE_MWC_32)
 	STRESS_MWC_SEED_W,
 	STRESS_MWC_SEED_Z,
-#else
-	((uint64_t)STRESS_MWC_SEED_W << 32) | (STRESS_MWC_SEED_Z),
-#endif
 	0,
 	0,
 	0,
@@ -122,12 +113,8 @@ void stress_mwc_reseed(void)
 		uint64_t seed;
 
 		if (stress_get_setting("seed", &seed)) {
-#if defined(STRESS_USE_MWC_32)
 			mwc.z = seed >> 32;
 			mwc.w = seed & 0xffffffff;
-#else
-			mwc.state = seed;
-#endif
 			mwc_flush();
 			return;
 		} else {
@@ -136,71 +123,39 @@ void stress_mwc_reseed(void)
 		}
 	}
 	if (g_opt_flags & OPT_FLAGS_NO_RAND_SEED) {
-#if defined(STRESS_USE_MWC_32)
 		mwc.w = STRESS_MWC_SEED_W;
 		mwc.z = STRESS_MWC_SEED_Z;
-#else
-		mwc.state = ((uint64_t)STRESS_MWC_SEED_W << 32) | (STRESS_MWC_SEED_Z);
-#endif
 	} else {
 		struct timeval tv;
 		struct rusage r;
 		double m1, m5, m15;
 		int i, n;
 		const uint64_t aux_rnd = stress_aux_random_seed();
+		const uint64_t id = stress_get_machine_id();
 		const intptr_t p1 = (intptr_t)&mwc;
 		const intptr_t p2 = (intptr_t)&tv;
 
-#if defined(STRESS_USE_MWC_32)
 		mwc.z = aux_rnd >> 32;
 		mwc.w = aux_rnd & 0xffffffff;
-#else
-		mwc.state = aux_rnd;
-#endif
 		if (gettimeofday(&tv, NULL) == 0)
-#if defined(STRESS_USE_MWC_32)
 			mwc.z ^= (uint64_t)tv.tv_sec ^ (uint64_t)tv.tv_usec;
-#else
-			mwc.state ^= (uint64_t)tv.tv_sec ^ (uint64_t)tv.tv_usec;
-#endif
-#if defined(STRESS_USE_MWC_32)
 		mwc.z += ~(p1 - p2);
 		mwc.w += (uint64_t)getpid() ^ (uint64_t)getppid() << 12;
-#else
-		mwc.state += ~(p1 - p2);
-		mwc.state += (uint64_t)getpid() ^ (uint64_t)getppid() << 12;
-#endif
 		if (stress_get_load_avg(&m1, &m5, &m15) == 0) {
-#if defined(STRESS_USE_MWC_32)
 			mwc.z += (uint64_t)(128.0 * (m1 + m15));
 			mwc.w += (uint64_t)(256.0 * (m5));
-#else
-			mwc.state += (128.0 * (m1 + m15));
-			mwc.state += ((uint64_t)(256.0 * (m5))) << 32;
-#endif
 		}
 		if (getrusage(RUSAGE_SELF, &r) == 0) {
-#if defined(STRESS_USE_MWC_32)
 			mwc.z += r.ru_utime.tv_usec;
 			mwc.w += r.ru_utime.tv_sec;
-#else
-			mwc.state += r.ru_utime.tv_usec;
-			mwc.state += (uint64_t)r.ru_utime.tv_sec << 32;
-#endif
 		}
-#if defined(STRESS_USE_MWC_32)
 		mwc.z ^= stress_get_cpu();
 		mwc.w ^= stress_get_phys_mem_size();
-#else
-		mwc.state ^= stress_get_cpu();
-		mwc.state ^= stress_get_phys_mem_size();
-#endif
 
-#if defined(STRESS_USE_MWC_32)
+		mwc.z ^= (uint32_t)(id & 0xffffffffULL);
+		mwc.w ^= (uint32_t)((id >> 32) & 0xffffffffULL);
+
 		n = (int)mwc.z % 1733;
-#else
-		n = (int)(mwc.state & 0xffffffff) % 1733;
-#endif
 		for (i = 0; i < n; i++) {
 			(void)stress_mwc32();
 		}
@@ -214,12 +169,8 @@ void stress_mwc_reseed(void)
  */
 void stress_mwc_set_seed(const uint32_t w, const uint32_t z)
 {
-#if defined(STRESS_USE_MWC_32)
 	mwc.w = w;
 	mwc.z = z;
-#else
-	mwc.state = ((uint64_t)w << 32) | z;
-#endif
 	mwc_flush();
 }
 
@@ -229,13 +180,8 @@ void stress_mwc_set_seed(const uint32_t w, const uint32_t z)
  */
 void stress_mwc_get_seed(uint32_t *w, uint32_t *z)
 {
-#if defined(STRESS_USE_MWC_32)
 	*w = mwc.w;
 	*z = mwc.z;
-#else
-	*w = mwc.state >> 32;
-	*z = mwc.state & 0xffffffff;
-#endif
 }
 
 /*
@@ -248,43 +194,25 @@ void stress_mwc_seed(void)
 }
 
 
-#if defined(STRESS_USE_MWC_32)
 /*
  *  stress_mwc32()
  *      Multiply-with-carry random numbers
  *      fast pseudo random number generator, see
  *      http://www.cse.yorku.ca/~oz/marsaglia-rng.html
  */
-HOT OPTIMIZE3 inline uint32_t stress_mwc32(void)
+inline OPTIMIZE3 uint32_t stress_mwc32(void)
 {
 	mwc.z = 36969 * (mwc.z & 65535) + (mwc.z >> 16);
 	mwc.w = 18000 * (mwc.w & 65535) + (mwc.w >> 16);
 
 	return (mwc.z << 16) + mwc.w;
 }
-#else
-/*
- *  stress_mwc32()
- *      Multiply-with-carry random numbers
- *      fast pseudo random number generator, using 64 bit
- *	multiply
- */
-HOT OPTIMIZE3 uint32_t stress_mwc32(void)
-{
-	register uint32_t c = (mwc.state) >> 32;
-	register uint32_t x = (uint32_t)(mwc.state);
-	register uint32_t r = x ^ c;
-
-	mwc.state = x * ((uint64_t)4294883355UL) + c;
-	return r;
-}
-#endif
 
 /*
  *  stress_mwc64()
  *	get a 64 bit pseudo random number
  */
-HOT OPTIMIZE3 uint64_t stress_mwc64(void)
+uint64_t OPTIMIZE3 stress_mwc64(void)
 {
 	return (((uint64_t)stress_mwc32()) << 32) | stress_mwc32();
 }
@@ -293,7 +221,7 @@ HOT OPTIMIZE3 uint64_t stress_mwc64(void)
  *  stress_mwc16()
  *	get a 16 bit pseudo random number
  */
-HOT OPTIMIZE3 uint16_t stress_mwc16(void)
+uint16_t OPTIMIZE3 stress_mwc16(void)
 {
 	if (LIKELY(mwc.n16)) {
 		mwc.n16--;
@@ -309,7 +237,7 @@ HOT OPTIMIZE3 uint16_t stress_mwc16(void)
  *  stress_mwc8()
  *	get an 8 bit pseudo random number
  */
-HOT OPTIMIZE3 uint8_t stress_mwc8(void)
+uint8_t OPTIMIZE3 stress_mwc8(void)
 {
 	if (LIKELY(mwc.n8)) {
 		mwc.n8--;
@@ -325,7 +253,7 @@ HOT OPTIMIZE3 uint8_t stress_mwc8(void)
  *  stress_mwc1()
  *	get an 1 bit pseudo random number
  */
-HOT OPTIMIZE3 uint8_t stress_mwc1(void)
+uint8_t OPTIMIZE3 stress_mwc1(void)
 {
 	if (LIKELY(mwc.n1)) {
 		mwc.n1--;
@@ -337,31 +265,54 @@ HOT OPTIMIZE3 uint8_t stress_mwc1(void)
 	return mwc.saved1 & 0x1;
 }
 
+#if !defined(HAVE_FAST_MODULO_REDUCTION)
+/*
+ *  stress_mwc8mask()
+ *	generate a mask large enough for 8 bit val
+ */
+static inline ALWAYS_INLINE OPTIMIZE3 uint8_t stress_mwc8mask(const uint8_t val)
+{
+	register uint8_t v = val;
+
+	v |= (v >> 1);
+	v |= (v >> 2);
+	v |= (v >> 4);
+	return v;
+}
+
 /*
  *  stress_mwc8modn()
  *	see https://research.kudelskisecurity.com/2020/07/28/the-definitive-guide-to-modulo-bias-and-how-to-avoid-it/
  *	return 8 bit non-modulo biased value 1..max (inclusive)
- *	where max is most probably not a power of 2
  */
-HOT OPTIMIZE3 uint8_t stress_mwc8modn(const uint8_t max)
+uint8_t OPTIMIZE3 stress_mwc8modn(const uint8_t max)
 {
-	register uint8_t lim, val;
+	register uint8_t mask, val;
 
 	if (UNLIKELY(max < 2))
 		return 0;
-	/*
-	 * -max % max == ((2^8) - max) % max)
-	 *	      == (2^8) % max
-	 * and lim ends up being relatively large
-	 * compared to 2^8, so it's rare we need
-	 * to loop many times to satisfy val < lim
-	 */
-	lim = -max % max;
-	do {
-		val = stress_mwc8();
-	} while (val < lim);
 
-	return val % max;
+	mask = stress_mwc8mask(max);
+	do {
+		val = stress_mwc8() & mask;
+	} while (val >= max);
+
+	return val;
+}
+
+/*
+ *  stress_mwc16mask()
+ *	generate a mask large enough for 16 bit val
+ */
+static inline ALWAYS_INLINE OPTIMIZE3 uint16_t stress_mwc16mask(const uint16_t val)
+{
+	register uint16_t v = val;
+
+	v |= (v >> 1);
+	v |= (v >> 2);
+	v |= (v >> 4);
+	v |= (v >> 8);
+	return v;
 }
 
 /*
@@ -369,25 +320,35 @@ HOT OPTIMIZE3 uint8_t stress_mwc8modn(const uint8_t max)
  *	return 16 bit non-modulo biased value 1..max (inclusive)
  *	where max is most probably not a power of 2
  */
-HOT OPTIMIZE3 uint16_t stress_mwc16modn(const uint16_t max)
+uint16_t OPTIMIZE3 stress_mwc16modn(const uint16_t max)
 {
-	register uint16_t lim, val;
+	register uint16_t mask, val;
 
 	if (UNLIKELY(max < 2))
 		return 0;
-	/*
-	 * -max % max == ((2^16) - max) % max)
-	 *	      == (2^16) % max
-	 * and lim ends up being relatively large
-	 * compared to 2^16, so it's rare we need
-	 * to loop many times to satisfy val < lim
-	 */
-	lim = -max % max;
-	do {
-		val = stress_mwc16();
-	} while (val < lim);
 
-	return val % max;
+	mask = stress_mwc16mask(max);
+	do {
+		val = stress_mwc16() & mask;
+	} while (val >= max);
+
+	return val;
+}
+
+/*
+ *  stress_mwc32mask()
+ *	generate a mask large enough for 32 bit val
+ */
+static inline ALWAYS_INLINE OPTIMIZE3 uint32_t stress_mwc32mask(const uint32_t val)
+{
+	register uint32_t v = val;
+
+	v |= (v >> 1);
+	v |= (v >> 2);
+	v |= (v >> 4);
+	v |= (v >> 8);
+	v |= (v >> 16);
+	return v;
 }
 
 /*
@@ -395,25 +356,39 @@ HOT OPTIMIZE3 uint16_t stress_mwc16modn(const uint16_t max)
  *	return 32 bit non-modulo biased value 1..max (inclusive)
  *	with no non-zero max check
  */
-HOT OPTIMIZE3 uint32_t stress_mwc32modn(const uint32_t max)
+uint32_t OPTIMIZE3 stress_mwc32modn(const uint32_t max)
 {
-	register uint32_t lim, val;
+	register uint32_t mask, val;
 
 	if (UNLIKELY(max < 2))
 		return 0;
-	/*
-	 * -max % max == ((2^32) - max) % max)
-	 *	      == (2^32) % max
-	 * and lim ends up being relatively large
-	 * compared to 2^32, so it's rare we need
-	 * to loop many times to satisfy val < lim
-	 */
-	lim = -max % max;
-	do {
-		val = stress_mwc32();
-	} while (val < lim);
 
-	return val % max;
+	mask = stress_mwc32mask(max);
+	do {
+		val = stress_mwc32() & mask;
+	} while (val >= max);
+
+	return val;
+}
+#endif
+
+#if !defined(HAVE_FAST_MODULO_REDUCTION) ||	\
+    !defined(HAVE_INT128_T)
+/*
+ *  stress_mwc64mask()
+ *	generate a mask large enough for 64 bit val
+ */
+static inline ALWAYS_INLINE OPTIMIZE3 uint64_t stress_mwc64mask(const uint64_t val)
+{
+	register uint64_t v = val;
+
+	v |= (v >> 1);
+	v |= (v >> 2);
+	v |= (v >> 4);
+	v |= (v >> 8);
+	v |= (v >> 16);
+	v |= (v >> 32);
+	return v;
 }
 
 /*
@@ -421,32 +396,27 @@ HOT OPTIMIZE3 uint32_t stress_mwc32modn(const uint32_t max)
  *	return 64 bit non-modulo biased value 1..max (inclusive)
  *	with no non-zero max check
  */
-HOT OPTIMIZE3 uint64_t stress_mwc64modn(const uint64_t max)
+uint64_t OPTIMIZE3 stress_mwc64modn(const uint64_t max)
 {
-	register uint64_t lim, val;
+	register uint64_t mask, val;
 
 	if (UNLIKELY(max < 2))
 		return 0;
-	/*
-	 * -max % max == ((2^64) - max) % max)
-	 *	      == (2^64) % max
-	 * and lim ends up being relatively large
-	 * compared to 2^64, so it's rare we need
-	 * to loop many times to satisfy val < lim
-	 */
-	lim = -max % max;
-	do {
-		val = stress_mwc64();
-	} while (val < lim);
 
-	return val % max;
+	mask = stress_mwc64mask(max);
+	do {
+		val = stress_mwc64() & mask;
+	} while (val >= max);
+
+	return val;
 }
+#endif
 
 /*
  *  stress_rndbuf()
  *	fill buffer with pseudorandom bytes
  */
-HOT OPTIMIZE3 void stress_rndbuf(void *buf, const size_t len)
+OPTIMIZE3 void stress_rndbuf(void *buf, const size_t len)
 {
 	register char *ptr = (char *)buf;
 	register const char *end = ptr + len;
@@ -459,14 +429,14 @@ HOT OPTIMIZE3 void stress_rndbuf(void *buf, const size_t len)
  *  stress_rndstr()
  *	generate pseudorandom string
  */
-HOT OPTIMIZE3 void stress_rndstr(char *str, size_t len)
+OPTIMIZE3 void stress_rndstr(char *str, const size_t len)
 {
 	/*
 	 * base64url alphabet.
 	 * Be careful if expanding this alphabet, some of this function's users
 	 * use it to generate random filenames.
 	 */
-	static const char alphabet[64] =
+	static const char NONSTRING alphabet[64] =
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 		"abcdefghijklmnopqrstuvwxyz"
 		"0123456789-_";
@@ -481,7 +451,6 @@ HOT OPTIMIZE3 void stress_rndstr(char *str, size_t len)
 	ptr_end = str + len - 1;
 	mask = 0xc0000000;
 
-	len--; /* Leave one byte for the terminator. */
 	r = stress_mwc32() | mask;
 	while (LIKELY(ptr < ptr_end)) {
 		/* If we don't have enough random bits in r, get more. */

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,6 +24,8 @@
 #include "core-killpid.h"
 #include "core-net.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_LINUX_SOCKIOS_H)
 #include <linux/sockios.h>
 #else
@@ -44,8 +46,6 @@ UNEXPECTED
 
 #include <netinet/in.h>
 
-#define MIN_UDP_PORT		(1024)
-#define MAX_UDP_PORT		(65535)
 #define DEFAULT_UDP_PORT	(7000)
 
 #define UDP_BUF			(1024)	/* UDP I/O buffer size */
@@ -72,44 +72,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_udp_port(const char *opt)
-{
-	int udp_port;
-
-	stress_set_net_port("udp-port", opt,
-		MIN_UDP_PORT, MAX_UDP_PORT, &udp_port);
-	return stress_set_setting("udp-port", TYPE_ID_INT, &udp_port);
-}
-
-/*
- *  stress_set_udp_domain()
- *	set the udp domain option
- */
-static int stress_set_udp_domain(const char *name)
-{
-	int ret, udp_domain;
-
-	ret = stress_set_net_domain(DOMAIN_INET | DOMAIN_INET6, "udp-domain", name, &udp_domain);
-	stress_set_setting("udp-domain", TYPE_ID_INT, &udp_domain);
-
-	return ret;
-}
-
-static int stress_set_udp_lite(const char *opt)
-{
-	return stress_set_setting_true("udp-lite", opt);
-}
-
-static int stress_set_udp_gro(const char *opt)
-{
-	return stress_set_setting_true("udp-gro", opt);
-}
-
-static int stress_set_udp_if(const char *name)
-{
-	return stress_set_setting("udp-if", TYPE_ID_STR, name);
-}
-
 static int OPTIMIZE3 stress_udp_client(
 	stress_args_t *args,
 	const pid_t mypid,
@@ -132,23 +94,23 @@ static int OPTIMIZE3 stress_udp_client(
 		char ALIGN64 buf[UDP_BUF];
 		pid_t *pidptr = (pid_t *)buf;
 
-		if ((fd = socket(udp_domain, SOCK_DGRAM, udp_proto)) < 0) {
+		if (UNLIKELY((fd = socket(udp_domain, SOCK_DGRAM, udp_proto)) < 0)) {
 			pr_fail("%s: socket failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_NO_RESOURCE;
 			goto child_die;
 		}
 
-		if (stress_set_sockaddr_if(args->name, args->instance, mypid,
+		if (UNLIKELY(stress_set_sockaddr_if(args->name, args->instance, mypid,
 				udp_domain, udp_port, udp_if,
-				&addr, &len, NET_ADDR_ANY) < 0) {
+				&addr, &len, NET_ADDR_ANY) < 0)) {
 			(void)close(fd);
 			rc = EXIT_NO_RESOURCE;
 			goto child_die;
 		}
 #if defined(IPPROTO_UDPLITE) &&	\
     defined(UDPLITE_SEND_CSCOV)
-		if (udp_proto == IPPROTO_UDPLITE) {
+		if (UNLIKELY(udp_proto == IPPROTO_UDPLITE)) {
 			int val = 8;	/* Just the 8 byte header */
 			socklen_t slen;
 
@@ -162,20 +124,14 @@ static int OPTIMIZE3 stress_udp_client(
 			}
 			slen = sizeof(val);
 			(void)getsockopt(fd, SOL_UDPLITE, UDPLITE_SEND_CSCOV, &val, &slen);
-		}
-#endif
-#if defined(IPPROTO_UDPLITE) &&	\
-    defined(UDPLITE_RECV_CSCOV)
-		if (udp_proto == IPPROTO_UDPLITE) {
-			int val;
-			socklen_t slen = sizeof(val);
 
+			slen = sizeof(val);
 			(void)getsockopt(fd, udp_proto, UDPLITE_RECV_CSCOV, &val, &slen);
 		}
 #endif
 
 #if defined(UDP_GRO)
-		if (udp_gro) {
+		if (UNLIKELY(udp_gro)) {
 			int val;
 			socklen_t slen = sizeof(val);
 
@@ -232,6 +188,7 @@ static int OPTIMIZE3 stress_udp_client(
 		{
 			int val, ret;
 			socklen_t slen = sizeof(val);
+
 			ret = getsockopt(fd, udp_proto, UDP_NO_CHECK6_RX, &val, &slen);
 			if (LIKELY(ret == 0)) {
 				slen = sizeof(val);
@@ -472,7 +429,7 @@ static int stress_udp(stress_args_t *args)
 	if ((udp_proto == IPPROTO_UDPLITE) &&
 	    (udp_domain == AF_UNIX)) {
 		udp_proto = 0;
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_inf("%s: disabling UDP-Lite as it is not "
 				"available for UNIX domain UDP\n",
 				args->name);
@@ -480,6 +437,8 @@ static int stress_udp(stress_args_t *args)
 	}
 #endif
 	udp_port += args->instance;
+	if (udp_port > MAX_PORT)
+		udp_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(udp_port, udp_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -505,6 +464,8 @@ static int stress_udp(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -531,19 +492,21 @@ again:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_udp_domain,	stress_set_udp_domain },
-	{ OPT_udp_port,		stress_set_udp_port },
-	{ OPT_udp_lite,		stress_set_udp_lite },
-	{ OPT_udp_gro,		stress_set_udp_gro },
-	{ OPT_udp_if,		stress_set_udp_if },
-	{ 0,			NULL }
+static int udp_domain_mask = DOMAIN_INET | DOMAIN_INET6;
+
+static const stress_opt_t opts[] = {
+	{ OPT_udp_domain, "udp-domain", TYPE_ID_INT_DOMAIN, 0, 0, &udp_domain_mask },
+	{ OPT_udp_port,   "udp-port",   TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	{ OPT_udp_lite,   "udp-lite",   TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_udp_gro,    "upd-gro",    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_udp_if,     "udp-if",     TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_udp_info = {
+const stressor_info_t stress_udp_info = {
 	.stressor = stress_udp,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

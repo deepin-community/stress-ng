@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,7 @@
 #include "stress-ng.h"
 #include "core-cpu.h"
 #include "core-madvise.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 #include "core-target-clones.h"
 
@@ -42,61 +43,20 @@ static const stress_help_t help[] = {
 	{ NULL,	"memfd-fds N",	 "number of memory fds to open per stressors" },
 	{ NULL,	"memfd-madvise", "add random madvise hints to memfd mapped pages" },
 	{ NULL,	"memfd-mlock",	 "attempt to mlock pages into memory" },
+	{ NULL,	"memfd-numa",	 "bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	"memfd-ops N",	 "stop after N memfd bogo operations" },
 	{ NULL,	"memfd-zap-pte", "enable zap pte bug check (slow)" },
 	{ NULL,	NULL,		 NULL }
 };
 
-static int stress_set_memfd_madvise(const char *opt)
-{
-	return stress_set_setting_true("memfd-madvise", opt);
-}
-
-static int stress_set_memfd_mlock(const char *opt)
-{
-	return stress_set_setting_true("memfd-mlock", opt);
-}
-
-static int stress_set_memfd_zap_pte(const char *opt)
-{
-	return stress_set_setting_true("memfd-zap-pte", opt);
-}
-
-/*
- *  stress_set_memfd_bytes
- *	set max size of each memfd size
- */
-static int stress_set_memfd_bytes(const char *opt)
-{
-	size_t memfd_bytes;
-
-	memfd_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("memfd-bytes", memfd_bytes,
-		MIN_MEMFD_BYTES, MAX_MEM_LIMIT);
-	return stress_set_setting("memfd-bytes", TYPE_ID_SIZE_T, &memfd_bytes);
-}
-
-/*
- *  stress_set_memfd_fds()
- *      set number of memfd file descriptors
- */
-static int stress_set_memfd_fds(const char *opt)
-{
-	int32_t memfd_fds;
-
-	memfd_fds = (uint32_t)stress_get_int32(opt);
-	stress_check_range("memfd-fds", memfd_fds,
-		MIN_MEMFD_FDS, MAX_MEMFD_FDS);
-	return stress_set_setting("memfd-fds", TYPE_ID_INT32, &memfd_fds);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_memfd_bytes,	stress_set_memfd_bytes },
-	{ OPT_memfd_fds,	stress_set_memfd_fds },
-	{ OPT_memfd_madvise,	stress_set_memfd_madvise },
-	{ OPT_memfd_mlock,	stress_set_memfd_mlock },
-	{ OPT_memfd_zap_pte,	stress_set_memfd_zap_pte },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_memfd_bytes,   "memfd-bytes",   TYPE_ID_SIZE_T_BYTES_VM, MIN_MEMFD_BYTES, MAX_MEM_LIMIT, NULL },
+	{ OPT_memfd_fds,     "memfd-fds",     TYPE_ID_INT32, MIN_MEMFD_FDS, MAX_MEMFD_FDS, NULL },
+	{ OPT_memfd_madvise, "memfd-madvise", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_memfd_mlock,   "memfd-mlock",   TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_memfd_numa,    "memfd-numa",    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_memfd_zap_pte, "memfd-zap-pte", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT
 };
 
 #if defined(HAVE_MEMFD_CREATE)
@@ -165,39 +125,6 @@ static void stress_memfd_fill_pages_generic(const uint64_t val, void *ptr, const
 	}
 }
 
-#if defined(HAVE_NT_STORE64)
-/*
- *  stress_memfd_fill_pages_nt_store()
- *	fill pages with random uin64_t values using nt_store
- */
-static void stress_memfd_fill_pages_nt_store(const uint64_t val, void *ptr, const size_t size)
-{
-	register uint64_t *u64ptr = (uint64_t *)ptr;
-	register const uint64_t *u64end = uint64_ptr_offset(ptr, size);
-	register uint64_t v = val;
-
-	while (u64ptr < u64end) {
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		stress_nt_store64(u64ptr, v);
-		u64ptr += MEMFD_STRIDE;
-		v++;
-	}
-}
-#endif
-
 #if defined(HAVE_MADVISE) &&	\
     defined(MADV_PAGEOUT)
 /*
@@ -242,7 +169,7 @@ static inline bool stress_memfd_check(
  */
 static int stress_memfd_child(stress_args_t *args, void *context)
 {
-	int *fds;
+	int *fds, rc = EXIT_SUCCESS;
 	register int fd;
 	void **maps;
 	int32_t i;
@@ -254,26 +181,26 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 	double duration = 0.0, count = 0.0, rate;
 	bool memfd_madvise = false;
 	bool memfd_mlock = false;
+	bool memfd_numa = false;
 	bool memfd_zap_pte = false;
-#if defined(HAVE_NT_STORE64)
-	void (*stress_memfd_fill_pages)(uint64_t val, void *ptr, const size_t size) =
-		stress_cpu_x86_has_sse2() ? stress_memfd_fill_pages_nt_store : stress_memfd_fill_pages_generic;
-#else
-	void (*stress_memfd_fill_pages)(uint64_t val, void *ptr, const size_t size) = stress_memfd_fill_pages_generic;
-#endif
 	char filename_rndstr[64], filename_unusual[64], filename_pid[64];
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask = NULL;
+	stress_numa_mask_t *numa_nodes = NULL;
+#endif
 
 	stress_catch_sigill();
 
 	(void)context;
 
-	(void)stress_get_setting("memfd-mlock", &memfd_madvise);
+	(void)stress_get_setting("memfd-madvise", &memfd_madvise);
 	(void)stress_get_setting("memfd-mlock", &memfd_mlock);
+	(void)stress_get_setting("memfd-numa", &memfd_numa);
 	(void)stress_get_setting("memfd-zap-pte", &memfd_zap_pte);
 
 #if !defined(HAVE_MADVISE)
 	if (memfd_madvise) {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_inf("%s: disabling --memfd-madvise, madvise() "
 				"not supported\n", args->name);
 		}
@@ -284,7 +211,7 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 #if !defined(HAVE_MADVISE) ||	\
     !defined(MADV_PAGEOUT)
 	if (memfd_zap_pte) {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_inf("%s: disabling --memfd-zap-pte, madvise() "
 				"with MADV_PAGEOUT not supported\n", args->name);
 		}
@@ -298,7 +225,7 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
 			memfd_bytes = MIN_MEMFD_BYTES;
 	}
-	memfd_bytes /= args->num_instances;
+	memfd_bytes /= args->instances;
 	if (memfd_bytes < MIN_MEMFD_BYTES)
 		memfd_bytes = MIN_MEMFD_BYTES;
 
@@ -308,18 +235,29 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 	if (size < min_size)
 		size = min_size;
 
-	fds = calloc(memfd_fds, sizeof(*fds));
+	fds = (int *)calloc(memfd_fds, sizeof(*fds));
 	if (!fds) {
-		pr_inf("%s: cannot allocate fds buffer: %d (%s)\n",
+		pr_inf("%s: cannot allocate fds buffer, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
-	maps = calloc(memfd_fds, sizeof(*maps));
+	maps = (void **)calloc(memfd_fds, sizeof(*maps));
 	if (!maps) {
-		pr_inf("%s: cannot allocate maps buffer: %d (%s)\n",
+		pr_inf("%s: cannot allocate maps buffer, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		free(fds);
 		return EXIT_NO_RESOURCE;
+	}
+
+	if (memfd_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &numa_nodes, &numa_mask, "--memfd-numa", &memfd_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --memfd-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		memfd_numa = false;
+#endif
 	}
 
 	stress_rndstr(filename_rndstr, sizeof(filename_rndstr));
@@ -328,6 +266,8 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 	(void)snprintf(filename_pid, sizeof(filename_pid),
 		"memfd-%" PRIdMAX "-%" PRIu64, (intmax_t)args->pid, stress_mwc64());
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -370,13 +310,14 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 				case ENOSYS:
 				case EFAULT:
 				default:
-					pr_fail("%s: memfd_create failed: errno=%d (%s)\n",
+					pr_fail("%s: memfd_create failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 					stress_continue_set_flag(false);
+					rc = EXIT_FAILURE;
 					goto memfd_unmap;
 				}
 			}
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto memfd_unmap;
 		}
 
@@ -391,18 +332,19 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 			if (fds[i] < 0)
 				continue;
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			/* Allocate space */
 			ret = ftruncate(fds[i], (off_t)size);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				switch (errno) {
 				case EINTR:
 					break;
 				default:
 					pr_fail("%s: ftruncate failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -411,11 +353,15 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 			 */
 			maps[i] = mmap(NULL, size, PROT_WRITE,
 					MAP_FILE | MAP_SHARED, fds[i], 0);
-			if (maps[i] == MAP_FAILED)
+			if (UNLIKELY(maps[i] == MAP_FAILED))
 				continue;
 			if (memfd_mlock)
 				(void)shim_mlock(maps[i], size);
-			stress_memfd_fill_pages(stress_mwc64(), maps[i], size);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			if (memfd_numa && numa_mask && numa_nodes)
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, maps[i], size, page_size);
+#endif
+			stress_memfd_fill_pages_generic(stress_mwc64(), maps[i], size);
 			if (memfd_madvise) {
 				(void)stress_madvise_random(maps[i], size);
 				(void)stress_madvise_mergeable(maps[i], size);
@@ -437,7 +383,7 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 			 */
 			VOID_RET(ssize_t, shim_fallocate(fds[i], 0, (off_t)size, 0));
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto memfd_unmap;
 		}
 
@@ -448,40 +394,50 @@ static int stress_memfd_child(stress_args_t *args, void *context)
 				continue;
 #if defined(SEEK_SET)
 			if (lseek(fds[i], (off_t)size >> 1, SEEK_SET) < 0) {
-				if ((errno != ENXIO) && (errno != EINVAL))
+				if (UNLIKELY((errno != ENXIO) && (errno != EINVAL))) {
 					pr_fail("%s: lseek SEEK_SET failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 #endif
 #if defined(SEEK_CUR)
 			if (lseek(fds[i], (off_t)0, SEEK_CUR) < 0) {
-				if ((errno != ENXIO) && (errno != EINVAL))
+				if (UNLIKELY((errno != ENXIO) && (errno != EINVAL))) {
 					pr_fail("%s: lseek SEEK_CUR failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 #endif
 #if defined(SEEK_END)
 			if (lseek(fds[i], (off_t)0, SEEK_END) < 0) {
-				if ((errno != ENXIO) && (errno != EINVAL))
+				if (UNLIKELY((errno != ENXIO) && (errno != EINVAL))) {
 					pr_fail("%s: lseek SEEK_END failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 #endif
 #if defined(SEEK_HOLE)
 			if (lseek(fds[i], (off_t)0, SEEK_HOLE) < 0) {
-				if ((errno != ENXIO) && (errno != EINVAL))
+				if (UNLIKELY((errno != ENXIO) && (errno != EINVAL))) {
 					pr_fail("%s: lseek SEEK_HOLE failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 #endif
 #if defined(SEEK_DATA)
 			if (lseek(fds[i], (off_t)0, SEEK_DATA) < 0) {
-				if ((errno != ENXIO) && (errno != EINVAL))
+				if (UNLIKELY((errno != ENXIO) && (errno != EINVAL))) {
 					pr_fail("%s: lseek SEEK_DATA failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 #endif
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto memfd_unmap;
 		}
 
@@ -491,40 +447,44 @@ memfd_unmap:
 				(void)munmap(maps[i], size);
 		}
 #if defined(HAVE_MADVISE) &&	\
-    defined(MADV_PAGEOUT) 
+    defined(MADV_PAGEOUT)
 		if (UNLIKELY(memfd_zap_pte)) {
 			/*
 			 *  Check for zap_pte bug, see Linux commit
 			 *  5abfd71d936a8aefd9f9ccd299dea7a164a5d455
 			 */
-			for (i = 0; stress_continue_flag() && (i < memfd_fds); i++) {
+			for (i = 0; LIKELY(stress_continue_flag() && (i < memfd_fds)); i++) {
 				uint64_t *buf;
 				uint64_t val;
 				const ssize_t test_size = page_size << 1;
 
-				if (ftruncate(fds[i], (off_t)test_size) < 0)
+				if (UNLIKELY(ftruncate(fds[i], (off_t)test_size) < 0))
 					continue;
 				buf = mmap(NULL, test_size, PROT_READ | PROT_WRITE,
 						MAP_PRIVATE, fds[i], 0);
-				if (buf == MAP_FAILED)
+				if (UNLIKELY(buf == MAP_FAILED))
 					continue;
 				if (memfd_mlock)
 					(void)shim_mlock(buf, test_size);
 				val = stress_mwc64();
-				stress_memfd_fill_pages(val, buf, test_size);
+				stress_memfd_fill_pages_generic(val, buf, test_size);
 
-				if (madvise(buf, test_size, MADV_PAGEOUT) < 0)
+				if (UNLIKELY(madvise(buf, test_size, MADV_PAGEOUT) < 0))
 					goto buf_unmap;
-				if (ftruncate(fds[i], (off_t)page_size) < 0)
+				if (UNLIKELY(ftruncate(fds[i], (off_t)page_size) < 0))
 					goto buf_unmap;
-				if (ftruncate(fds[i], (off_t)test_size) < 0)
+				if (UNLIKELY(ftruncate(fds[i], (off_t)test_size) < 0))
 					goto buf_unmap;
-				if (!stress_memfd_check(val, buf, page_size, 1))
+				if (UNLIKELY(!stress_memfd_check(val, buf, page_size, 1))) {
 					pr_fail("%s: unexpected memfd %d data mismatch in first page\n",
 						args->name, fds[i]);
-				if (!stress_memfd_check(0ULL, uint64_ptr_offset(buf, page_size), page_size, 0))
+					rc = EXIT_FAILURE;
+				}
+				if (UNLIKELY(!stress_memfd_check(0ULL, uint64_ptr_offset(buf, page_size), page_size, 0))) {
 					pr_fail("%s: unexpected memfd %d data mismatch in zero'd second page\n",
 						args->name, fds[i]);
+					rc = EXIT_FAILURE;
+				}
 buf_unmap:
 				(void)munmap((void *)buf, test_size);
 				VOID_RET(int, ftruncate(fds[i], 0));
@@ -590,12 +550,18 @@ buf_unmap:
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per memfd_create call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (numa_mask)
+		stress_numa_mask_free(numa_mask);
+	if (numa_nodes)
+		stress_numa_mask_free(numa_nodes);
+#endif
 	free(maps);
 	free(fds);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -607,18 +573,18 @@ static int stress_memfd(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_memfd_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_memfd_info = {
+const stressor_info_t stress_memfd_info = {
 	.stressor = stress_memfd,
-	.class = CLASS_OS | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_memfd_info = {
+const stressor_info_t stress_memfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without memfd_create() system call"

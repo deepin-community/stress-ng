@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-madvise.h"
 #include "core-sort.h"
 
 #define MIN_SHELLSORT_SIZE	(1 * KB)
@@ -34,23 +35,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   NULL }
 };
 
-/*
- *  stress_set_shellsort_size()
- *	set shellsort size
- */
-static int stress_set_shellsort_size(const char *opt)
-{
-	uint64_t shellsort_size;
-
-	shellsort_size = stress_get_uint64(opt);
-	stress_check_range("shellsort-size", shellsort_size,
-		MIN_SHELLSORT_SIZE, MAX_SHELLSORT_SIZE);
-	return stress_set_setting("shellsort-size", TYPE_ID_UINT64, &shellsort_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_shellsort_size,		stress_set_shellsort_size },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_shellsort_size, "shellsort-size", TYPE_ID_UINT64, MIN_SHELLSORT_SIZE, MAX_SHELLSORT_SIZE, NULL },
+	END_OPT,
 };
 
 /*
@@ -96,11 +83,12 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 {
 	uint64_t shellsort_size = DEFAULT_SHELLSORT_SIZE;
 	int32_t *data, *ptr;
-	size_t n;
+	size_t n, data_size;
 	struct sigaction old_action;
 	int ret;
 	double rate;
 	NOCLOBBER double duration = 0.0, count = 0.0, sorted = 0.0;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
 	if (!stress_get_setting("shellsort-size", &shellsort_size)) {
@@ -110,13 +98,20 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 			shellsort_size = MIN_SHELLSORT_SIZE;
 	}
 	n = (size_t)shellsort_size;
+	data_size = n * sizeof(*data);
 
-	if ((data = calloc(n, sizeof(*data))) == NULL) {
-		pr_inf_skip("%s: malloc failed to allocate %zu integers, "
-			"skipping stressor\n", args->name, n);
+	data = (int32_t *)stress_mmap_populate(NULL, data_size,
+				PROT_READ | PROT_WRITE,
+				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	if (data == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu 32 bit integers%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, n, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
-
+	(void)stress_madvise_collapse(data, data_size);
+	stress_set_vma_anon_name(data, data_size, "shellsort-data");
 
 	ret = sigsetjmp(jmp_env, 1);
 	if (ret) {
@@ -133,6 +128,8 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 
 	stress_sort_data_int32_init(data, n);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -152,15 +149,16 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 			register size_t i;
 
 			for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-				if (*ptr > *(ptr + 1)) {
+				if (UNLIKELY(*ptr > *(ptr + 1))) {
 					pr_fail("%s: sort error "
 						"detected, incorrect ordering "
 						"found\n", args->name);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* Reverse sort */
@@ -175,15 +173,16 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 			register size_t i;
 
 			for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-				if (*ptr < *(ptr + 1)) {
+				if (UNLIKELY(*ptr < *(ptr + 1))) {
 					pr_fail("%s: reverse sort "
 						"error detected, incorrect "
 						"ordering found\n", args->name);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* And re-order */
@@ -202,19 +201,17 @@ static int OPTIMIZE3 stress_shellsort(stress_args_t *args)
 			register size_t i;
 
 			for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-				if (*ptr < *(ptr + 1)) {
+				if (UNLIKELY(*ptr < *(ptr + 1))) {
 					pr_fail("%s: reverse sort "
 						"error detected, incorrect "
 						"ordering found\n", args->name);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
 		}
-		if (!stress_continue_flag())
-			break;
-
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	do_jmp = false;
 	(void)stress_sigrestore(args->name, SIGALRM, &old_action);
@@ -222,19 +219,19 @@ tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "shellsort comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "shellsort comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
-	free(data);
+	(void)munmap((void *)data, data_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_shellsort_info = {
+const stressor_info_t stress_shellsort_info = {
 	.stressor = stress_shellsort,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SORT,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

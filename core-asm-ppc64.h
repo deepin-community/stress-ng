@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,8 +19,16 @@
 #ifndef CORE_ASM_PPC64_H
 #define CORE_ASM_PPC64_H
 
-#include "stress-ng.h"
 #include "core-arch.h"
+#include "core-attribute.h"
+
+#if defined(__APPLE__)
+#define REGISTER_PREFIX "r"
+#else
+#define REGISTER_PREFIX ""
+#endif
+
+#define REGISTER(r) REGISTER_PREFIX #r
 
 #if defined(STRESS_ARCH_PPC64)
 
@@ -73,17 +81,62 @@ static inline void ALWAYS_INLINE stress_asm_ppc64_msync(void)
 
 static inline void ALWAYS_INLINE stress_asm_ppc64_yield(void)
 {
-	__asm__ __volatile__("or 27,27,27;\n");
+	__asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
 }
 
 static inline void ALWAYS_INLINE stress_asm_ppc64_mdoio(void)
 {
-	__asm__ __volatile__("or 29,29,29;\n");
+	__asm__ __volatile__("or " REGISTER(29) "," REGISTER(29) "," REGISTER(29) ";\n");
 }
 
 static inline void ALWAYS_INLINE stress_asm_ppc64_mdoom(void)
 {
-	__asm__ __volatile__("or 30,30,30;\n");
+	__asm__ __volatile__("or " REGISTER(30) "," REGISTER(30) "," REGISTER(30) ";\n");
+}
+
+#elif defined(STRESS_ARCH_PPC)
+
+#if defined(HAVE_ASM_PPC_DCBST)
+static inline void ALWAYS_INLINE stress_asm_ppc_dcbst(void *addr)
+{
+	__asm__ __volatile__("dcbst %y0" : : "Z"(*(uint8_t *)addr) : "memory");
+}
+#endif
+
+#if defined(HAVE_ASM_PPC_DCBT)
+static inline void ALWAYS_INLINE stress_asm_ppc_dcbt(void *addr)
+{
+	__asm__ __volatile__("dcbt 0,%0" : : "r"(addr));
+}
+#endif
+
+#if defined(HAVE_ASM_PPC_DCBTST)
+static inline void ALWAYS_INLINE stress_asm_ppc_dcbtst(void *addr)
+{
+	__asm__ __volatile__("dcbtst 0,%0" : : "r"(addr));
+}
+#endif
+
+#if defined(HAVE_ASM_PPC_ICBI)
+static inline void ALWAYS_INLINE stress_asm_ppc_icbi(void *addr)
+{
+	__asm__ __volatile__("icbi %y0" : : "Z"(*(uint8_t *)addr) : "memory");
+}
+#endif
+
+static inline void ALWAYS_INLINE stress_asm_ppc_yield(void)
+{
+	__asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
+}
+
+static inline void ALWAYS_INLINE stress_asm_ppc_mdoio(void)
+{
+	__asm__ __volatile__("or " REGISTER(29) "," REGISTER(29) "," REGISTER(29) ";\n");
+}
+
+static inline void ALWAYS_INLINE stress_asm_ppc_mdoom(void)
+{
+	__asm__ __volatile__("or " REGISTER(30) "," REGISTER(30) "," REGISTER(30) ";\n");
 }
 
 /* #if defined(STRESS_ARCH_PPC64) */

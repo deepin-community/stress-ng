@@ -23,6 +23,9 @@
 #include "core-capabilities.h"
 #include "core-smart.h"
 
+#include <ctype.h>
+#include <sys/ioctl.h>
+
 #if defined(HAVE_SCSI_SG_H)
 #include <scsi/sg.h>
 #endif
@@ -239,7 +242,7 @@ static stress_smart_data_t *stress_smart_data_read(const char *path)
 	stress_smart_data_t *data;
 	size_t i, size, values_size;
 
-	if (!path)
+	if (UNLIKELY(!path))
 		return NULL;
 
 	fd = open(path, O_RDONLY);
@@ -269,7 +272,7 @@ static stress_smart_data_t *stress_smart_data_read(const char *path)
 
 	values_size = i * sizeof(stress_smart_raw_value_t);
 	size = sizeof(stress_smart_data_t) + values_size;
-	data = malloc(size);
+	data = (stress_smart_data_t *)malloc(size);
 	if (!data)
 		return NULL;
 
@@ -369,7 +372,7 @@ static int PURE stress_smart_dev_filter(const struct dirent *d)
 	len = strlen(d->d_name);
 	if (len < 1)		/* Also unlikely */
 		return 0;
-	if (isdigit((int)d->d_name[len - 1]))
+	if (isdigit((unsigned char)d->d_name[len - 1]))
 		return 0;
 
 	return 1;
@@ -422,9 +425,9 @@ static void stress_smart_read_devs(void)
 			data = stress_smart_data_read(path);
 			if (data) {
 				/* Allocate, silently ignore alloc failure */
-				dev = calloc(1, sizeof(*dev));
+				dev = (stress_smart_dev_t *)calloc(1, sizeof(*dev));
 				if (dev) {
-					dev->dev_name = strdup(path);
+					dev->dev_name = shim_strdup(path);
 					dev->data_begin = data;
 					dev->data_end = NULL;
 					dev->next = smart_devs.dev;

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,8 @@
  *
  */
 #include "stress-ng.h"
+
+#include <time.h>
 
 #if defined(HAVE_SYS_AUXV_H)
 #include <sys/auxv.h>
@@ -38,18 +40,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-/*
- *  stress_set_vdso_func()
- *      set the default vdso function
- */
-static int stress_set_vdso_func(const char *name)
-{
-	return stress_set_setting("vdso-func", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_vdso_func,	stress_set_vdso_func },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_vdso_func, "vdso-func", TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_AUXV_H) && \
@@ -239,8 +232,8 @@ static int dl_wrapback(struct dl_phdr_info* info, size_t info_size, void *vdso)
 			ElfW(Word *) hash = NULL;
 			ElfW(Word) j;
 			ElfW(Word) buckets = 0;
-			ElfW(Word *) bucket = NULL;
-			ElfW(Word *) chain = NULL;
+			const ElfW(Word *) bucket = NULL;
+			const ElfW(Word *) chain = NULL;
 			char *strtab = NULL;
 
 			if (!load_offset)
@@ -307,7 +300,7 @@ static int dl_wrapback(struct dl_phdr_info* info, size_t info_size, void *vdso)
 							/*
 							 *  Add to list of wrapable vDSO functions
 							 */
-							vdso_sym = calloc(1, sizeof(*vdso_sym));
+							vdso_sym = (stress_vdso_sym_t *)calloc(1, sizeof(*vdso_sym));
 							if (vdso_sym == NULL)
 								return -1;
 
@@ -424,7 +417,7 @@ static void vdso_sym_list_remove_duplicates(stress_vdso_sym_t **list)
  */
 static int stress_vdso_supported(const char *name)
 {
-	unsigned long vdso = getauxval(AT_SYSINFO_EHDR);
+	unsigned long int vdso = getauxval(AT_SYSINFO_EHDR);
 
 	if (vdso == 0) {
 		pr_inf_skip("%s stressor will be skipped, failed to find vDSO address\n", name);
@@ -493,7 +486,7 @@ static int stress_vdso(stress_args_t *args)
 
 	if (!vdso_sym_list) {
 		/* Should not fail, but worth checking to avoid breakage */
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: could not find any vDSO functions, skipping\n",
 				args->name);
 		return EXIT_NOT_IMPLEMENTED;
@@ -503,7 +496,7 @@ static int stress_vdso(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		char *str;
 
 		str = vdso_sym_list_str();
@@ -517,6 +510,8 @@ static int stress_vdso(stress_args_t *args)
 	for (vdso_sym = vdso_sym_list; vdso_sym; vdso_sym = vdso_sym->next)
 		n_vdso++;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t1 = stress_time_now();
@@ -550,9 +545,9 @@ static int stress_vdso(stress_args_t *args)
 		const double ns = ((dt * (double)STRESS_NANOSECOND) / (double)counter) - overhead_ns;
 
 		stress_metrics_set(args, 0, "nanosecs per call (excluding test overhead)",
-			ns, STRESS_HARMONIC_MEAN);
+			ns, STRESS_METRIC_HARMONIC_MEAN);
 		stress_metrics_set(args, 1, "nanosecs for test overhead",
-			overhead_ns, STRESS_GEOMETRIC_MEAN);
+			overhead_ns, STRESS_METRIC_GEOMETRIC_MEAN);
 	}
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -562,18 +557,18 @@ static int stress_vdso(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_vdso_info = {
+const stressor_info_t stress_vdso_info = {
 	.stressor = stress_vdso,
 	.supported = stress_vdso_supported,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_vdso_info = {
+const stressor_info_t stress_vdso_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without sys/auxv.h, link.h, getauxval() or AT_SYSINFO_EHDR defined"
 };

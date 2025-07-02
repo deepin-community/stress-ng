@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,9 +19,15 @@
  */
 #include "stress-ng.h"
 #include "core-arch.h"
+#include "core-bitops.h"
 #include "core-builtin.h"
+#include "core-capabilities.h"
+#include "core-hash.h"
 #include "core-pthread.h"
 #include "core-put.h"
+
+#include <ctype.h>
+#include <sys/ioctl.h>
 
 #if defined(HAVE_ASM_MTRR_H)
 #include <asm/mtrr.h>
@@ -41,8 +47,13 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
+#define PROCFS_FLAG_READ	(0x01)
+#define PROCFS_FLAG_WRITE	(0x02)
+#define PROCFS_FLAG_TIMEOUT	(0x10)
+#define PROCFS_FLAG_READ_WRITE	(PROCFS_FLAG_READ | PROCFS_FLAG_WRITE)
+
 #if defined(HAVE_LIB_PTHREAD) &&	\
-    defined(__linux__)
+    (defined(__linux__) || defined(__CYGWIN__))
 
 #define PROC_BUF_SZ		(4096)
 #define MAX_PROCFS_THREADS	(4)
@@ -93,9 +104,9 @@ static int stress_dirent_proc_prune(struct dirent **dlist, const int n)
 
 			if (stress_is_dot_filename(dlist[i]->d_name))
 				ignore = true;
-			else if (isdigit((int)dlist[i]->d_name[0])) {
+			else if (isdigit((unsigned char)dlist[i]->d_name[0])) {
 				/* only allow a small numeric files.. */
-				ignore = (digit_count > 1);
+				ignore = (digit_count > 5);
 				digit_count++;
 			}
 
@@ -130,25 +141,26 @@ static int stress_proc_scandir(
 	return n;
 }
 
-static uint32_t path_sum(const char *path)
+/*
+ *  mixup_hash()
+ *	for numerical pids reverse bits to mash order, otherwise
+ *	use fast string hash function
+ */
+static uint32_t mixup_hash(const char *str)
 {
-	const char *ptr = path;
-	register uint32_t sum = mixup;
+	if (isdigit((int)str[0])) {
+		const uint32_t val = atol(str);
 
-	while (*ptr) {
-		sum <<= 1;
-		sum += (uint32_t)*(ptr++);
+		return stress_reverse32(val ^ mixup);
 	}
+	return stress_hash_pjw(str) ^ mixup;
 
-	return sum;
 }
 
 static int mixup_sort(const struct dirent **d1, const struct dirent **d2)
 {
-	uint32_t s1, s2;
-
-	s1 = path_sum((*d1)->d_name);
-	s2 = path_sum((*d2)->d_name);
+	register const uint32_t s1 = mixup_hash((*d1)->d_name);
+	register const uint32_t s2 = mixup_hash((*d2)->d_name);
 
 	if (s1 == s2)
 		return 0;
@@ -162,7 +174,8 @@ static int mixup_sort(const struct dirent **d1, const struct dirent **d2)
  */
 static void stress_proc_self_mem(stress_args_t *args, const int fd)
 {
-	uint8_t *page, *buf, rnd = stress_mwc8();
+	uint8_t *page, *buf;
+	const uint8_t rnd = stress_mwc8();
 	const size_t page_size = stress_get_page_size();
 	off_t offset;
 
@@ -176,12 +189,13 @@ static void stress_proc_self_mem(stress_args_t *args, const int fd)
 		free(buf);
 		return;
 	}
+	stress_set_vma_anon_name(page, page_size, "proc-self-mem");
 	offset = (off_t)(uintptr_t)page;
 
 	(void)shim_memset(page, rnd, page_size);
 	if (lseek(fd, offset, SEEK_SET) == offset) {
 		ssize_t ret;
-		size_t mem_offset = stress_mwc32modn((uint32_t)page_size);
+		const size_t mem_offset = stress_mwc32modn((uint32_t)page_size);
 
 		ret = read(fd, buf, page_size);
 		if ((ret == (ssize_t)page_size) &&
@@ -191,7 +205,7 @@ static void stress_proc_self_mem(stress_args_t *args, const int fd)
 		}
 	}
 
-	(void)munmap(page, page_size);
+	(void)munmap((void *)page, page_size);
 	free(buf);
 }
 
@@ -235,7 +249,7 @@ static void stress_proc_pci(stress_args_t *args, const int fd)
 
 #endif
 
-static stress_proc_info_t stress_proc_info[] = {
+static const stress_proc_info_t stress_proc_info[] = {
 	{ "/proc/self/mem",		stress_proc_self_mem },
 #if defined(HAVE_ASM_MTRR_H) &&		\
     defined(HAVE_MTRR_GENTRY) &&	\
@@ -268,13 +282,11 @@ static inline void stress_proc_rw(
 
 	while ((loops == -1) || (loops > 0)) {
 		double t_start;
-		bool timeout = false;
 		uint8_t *ptr;
 		struct stat statbuf;
-		bool writeable = true;
 		size_t len;
 		ssize_t i;
-		bool skip_fifo = true;
+		int procfs_flag = PROCFS_FLAG_READ_WRITE;
 
 		ret = shim_pthread_spin_lock(&lock);
 		if (ret)
@@ -282,16 +294,16 @@ static inline void stress_proc_rw(
 		(void)shim_strscpy(path, proc_path, sizeof(path));
 		(void)shim_pthread_spin_unlock(&lock);
 
-		if (!*path || !stress_continue_flag())
+redo:
+		if (UNLIKELY(!*path || !stress_continue_flag()))
 			break;
 
 		if (!strncmp(path, "/proc/self", 10))
-			writeable = false;
-		if (!strncmp(path, "/proc", 5) && isdigit(path[5]))
-			writeable = false;
+			procfs_flag &= ~PROCFS_FLAG_WRITE;
+		if (!strncmp(path, "/proc/", 6) && isdigit((unsigned char)path[6]))
+			procfs_flag &= ~PROCFS_FLAG_WRITE;
 
 		t_start = stress_time_now();
-
 		if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
 			return;
 
@@ -308,16 +320,57 @@ static inline void stress_proc_rw(
 		}
 
 		/*
-		 *  fstat the file
+		 *  fstat the file, skip char and block devices
 		 */
+#if defined(S_IFMT)
 		ret = shim_fstat(fd, &statbuf);
 		if (ret == 0) {
-#if defined(S_IFMT) &&	\
-    defined(S_IFIFO)
-			if ((statbuf.st_mode & S_IFMT) != S_IFIFO)
-				skip_fifo = false;
+			char linkpath[PATH_MAX + 1];
+
+			switch (statbuf.st_mode & S_IFMT) {
+#if defined(S_IFLNK)
+			case S_IFLNK:
+				/* should never get here */
+				ret = shim_readlink(path, linkpath, sizeof(linkpath) - 1);
+				(void)close(fd);
+				if (ret < 0)
+					return;
+				linkpath[ret] = '\0';
+				(void)shim_strscpy(path, linkpath, sizeof(path));
+				goto redo;
 #endif
+#if defined(S_IFIFO)
+			case S_IFIFO:
+				/* Avoid reading/writing pipes */
+				procfs_flag &= ~PROCFS_FLAG_READ_WRITE;
+				break;
+#endif
+#if defined(S_IFCHR)
+			case S_IFCHR:
+				/*
+				 *  Reading from char devices such as tty devices steals
+				 *  user input so avoid using these
+				 */
+				procfs_flag &= ~PROCFS_FLAG_READ_WRITE;
+				break;
+#endif
+#if defined(S_IFBLK)
+			case S_IFBLK:
+				/* Avoid reading/writing block devices */
+				procfs_flag &= ~PROCFS_FLAG_READ_WRITE;
+				break;
+#endif
+#if defined(S_IFSOCK)
+			case S_IFSOCK:
+				/* Avoid reading/writing sockets */
+				procfs_flag &= ~PROCFS_FLAG_READ_WRITE;
+				break;
+#endif
+			default:
+				break;
+			}
 		}
+#endif
 
 #if defined(__linux__)
 		/*
@@ -354,81 +407,83 @@ static inline void stress_proc_rw(
 		/*
 		 *  Multiple randomly sized reads
 		 */
-		for (i = 0; i < 4096 * PROC_BUF_SZ; i++) {
-			const ssize_t sz = 1 + stress_mwc32modn((uint32_t)sizeof(buffer));
+		if (procfs_flag & PROCFS_FLAG_READ) {
+			for (i = 0; i < 4096 * PROC_BUF_SZ; i++) {
+				const ssize_t sz = 1 + stress_mwc32modn((uint32_t)sizeof(buffer));
 
-			if (!stress_continue_flag())
-				break;
-			ret = read(fd, buffer, (size_t)sz);
-			if (ret < 0)
-				break;
-			if (ret < sz)
-				break;
-			i += sz;
+				if (UNLIKELY(!stress_continue_flag()))
+					break;
+				ret = read(fd, buffer, (size_t)sz);
+				if (ret < 0)
+					break;
+				if (ret < sz)
+					break;
+				i += sz;
 
+				if ((stress_time_now() - t_start) > threshold)
+					goto timeout_close;
+			}
+			(void)close(fd);
+
+			/* Multiple 1 char sized reads */
+			if (procfs_flag & PROCFS_FLAG_READ) {
+				if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
+					return;
+				for (i = 0; ; i++) {
+					if (UNLIKELY(!stress_continue_flag()))
+						break;
+					if (((i & 0x0f) == 0) && ((stress_time_now() - t_start) > threshold))
+						goto timeout_close;
+					ret = read(fd, buffer, 1);
+					if (ret < 1)
+						break;
+				}
+				(void)close(fd);
+			}
+
+			if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
+				return;
 			if ((stress_time_now() - t_start) > threshold)
 				goto timeout_close;
-		}
-		(void)close(fd);
+			/*
+			 *  Zero sized reads
+			 */
+			ret = read(fd, buffer, 0);
+			if (ret < 0)
+				goto err;
+			/*
+			 *  Broken offset reads, see Linux commit
+			 *  3bfa7e141b0bbb818b25e0daafb65aee92e49ac4
+			 *  "fs/seq_file.c: seq_read(): add info message
+			 *  about buggy .next functions"
+			 */
+			pos = lseek(fd, 0, SEEK_SET);
+			if (pos < 0)
+				goto mmap_test;
+			(void)shim_memset(buffer, 0, sizeof(buffer));
+			ret = read(fd, buffer, sizeof(buffer));
+			if (ret < 0)
+				goto mmap_test;
+			if (ret < (ssize_t)(sizeof(buffer) >> 1)) {
+				char *bptr;
 
-		/* Multiple 1 char sized reads */
-		if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
-			return;
-		for (i = 0; ; i++) {
-			if (!stress_continue_flag())
-				break;
-			if (((i & 0x0f) == 0) && ((stress_time_now() - t_start) > threshold))
-				goto timeout_close;
-			ret = read(fd, buffer, 1);
-			if (ret < 1)
-				break;
-		}
-		(void)close(fd);
+				for (bptr = buffer; *bptr && (*bptr != '\n'); bptr++)
+					;
+				if (*bptr == '\n') {
+					const off_t offset = 2 + (bptr - buffer);
 
-		if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
-			return;
-		if ((stress_time_now() - t_start) > threshold)
-			goto timeout_close;
-		/*
-		 *  Zero sized reads
-		 */
-		ret = read(fd, buffer, 0);
-		if (ret < 0)
-			goto err;
-		/*
-		 *  Broken offset reads, see Linux commit
-		 *  3bfa7e141b0bbb818b25e0daafb65aee92e49ac4
-		 *  "fs/seq_file.c: seq_read(): add info message
-		 *  about buggy .next functions"
-		 */
-		pos = lseek(fd, 0, SEEK_SET);
-		if (pos < 0)
-			goto mmap_test;
-		(void)shim_memset(buffer, 0, sizeof(buffer));
-		ret = read(fd, buffer, sizeof(buffer));
-		if (ret < 0)
-			goto mmap_test;
-		if (ret < (ssize_t)(sizeof(buffer) >> 1)) {
-			char *bptr;
-
-			for (bptr = buffer; *bptr && (*bptr != '\n'); bptr++)
-				;
-			if (*bptr == '\n') {
-				const off_t offset = 2 + (bptr - buffer);
-
-				pos = lseek(fd, offset, SEEK_SET);
-				if (pos == offset) {
-					/* Causes incorrect 2nd read */
-					VOID_RET(ssize_t, read(fd, buffer, sizeof(buffer)));
+					pos = lseek(fd, offset, SEEK_SET);
+					if (pos == offset) {
+						/* Causes incorrect 2nd read */
+						VOID_RET(ssize_t, read(fd, buffer, sizeof(buffer)));
+					}
 				}
 			}
-		}
 
-		/*
-		 *  exercise 13 x 5 byte reads backwards through procfs file to
-		 *  ensure we perform some weird misaligned non-word sized reads
-		 */
-		if (!skip_fifo) {
+			/*
+			 *  exercise 13 x 5 byte reads backwards through procfs file to
+			 *  ensure we perform some weird misaligned non-word sized reads
+			 */
 			off_t dec;
 
 			pos = lseek(fd, 0, SEEK_END);
@@ -452,22 +507,24 @@ static inline void stress_proc_rw(
 		}
 
 mmap_test:
-		/*
-		 *  mmap it
-		 */
-		ptr = mmap(NULL, page_size, PROT_READ,
+		if (procfs_flag & PROCFS_FLAG_READ) {
+			/*
+			 *  mmap it
+			 */
+			ptr = (uint8_t *)mmap(NULL, page_size, PROT_READ,
 #if defined(MAP_POPULATE)
-			MAP_POPULATE |
+				MAP_POPULATE |
 #endif
-			MAP_SHARED | MAP_ANONYMOUS,
-			fd, 0);
-		if (ptr != MAP_FAILED) {
-			stress_uint8_put(*ptr);
-			(void)munmap(ptr, page_size);
-		}
+				MAP_SHARED | MAP_ANONYMOUS,
+				fd, 0);
+			if (ptr != MAP_FAILED) {
+				stress_uint8_put(*ptr);
+				(void)munmap((void *)ptr, page_size);
+			}
 
-		if ((stress_time_now() - t_start) > threshold)
-			goto timeout_close;
+			if ((stress_time_now() - t_start) > threshold)
+				goto timeout_close;
+		}
 
 #if defined(FIONREAD)
 		{
@@ -482,7 +539,8 @@ mmap_test:
 			goto timeout_close;
 #endif
 
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 		{
 			struct pollfd fds[1];
 
@@ -512,37 +570,39 @@ mmap_test:
 			fds[0].events = POLLIN;
 			fds[0].revents = 0;
 
-			VOID_RET(int, ppoll(fds, 1, &ts, &sigmask));
+			VOID_RET(int, shim_ppoll(fds, 1, &ts, &sigmask));
 		}
 #endif
 
-		/*
-		 *  Seek and read
-		 */
-		pos = lseek(fd, 0, SEEK_SET);
-		if (pos == (off_t)-1)
-			goto err;
-		pos = lseek(fd, 1, SEEK_CUR);
-		if (pos == (off_t)-1)
-			goto err;
-		pos = lseek(fd, 0, SEEK_END);
-		if (pos == (off_t)-1)
-			goto err;
-		pos = lseek(fd, 1, SEEK_SET);
-		if (pos == (off_t)-1)
+		if (procfs_flag & PROCFS_FLAG_READ) {
+			/*
+			 *  Seek and read
+			 */
+			pos = lseek(fd, 0, SEEK_SET);
+			if (pos == (off_t)-1)
+				goto err;
+			pos = lseek(fd, 1, SEEK_CUR);
+			if (pos == (off_t)-1)
+				goto err;
+			pos = lseek(fd, 0, SEEK_END);
+			if (pos == (off_t)-1)
+				goto err;
+			pos = lseek(fd, 1, SEEK_SET);
+			if (pos == (off_t)-1)
 			goto err;
 
-		if ((stress_time_now() - t_start) > threshold)
-			goto timeout_close;
+			if ((stress_time_now() - t_start) > threshold)
+				goto timeout_close;
 
-		VOID_RET(ssize_t, read(fd, buffer, 1));
+			VOID_RET(ssize_t, read(fd, buffer, 1));
+		}
 err:
 		if ((stress_time_now() - t_start) > threshold)
 			goto timeout_close;
 
 		(void)close(fd);
 
-		if (writeable && ctxt->writeable) {
+		if ((procfs_flag & PROCFS_FLAG_WRITE) && ctxt->writeable) {
 			/*
 			 *  Zero sized writes
 			 */
@@ -580,7 +640,7 @@ err:
 		}
 next:
 		if (loops > 0) {
-			if (timeout)
+			if (procfs_flag & PROCFS_FLAG_TIMEOUT)
 				break;
 			loops--;
 		}
@@ -588,7 +648,7 @@ next:
 
 timeout_close:
 		(void)close(fd);
-		timeout = true;
+		procfs_flag |= PROCFS_FLAG_TIMEOUT;
 		goto next;
 	}
 }
@@ -600,7 +660,6 @@ timeout_close:
  */
 static void *stress_proc_rw_thread(void *ctxt_ptr)
 {
-	static void *nowt = NULL;
 	const stress_ctxt_t *ctxt = (stress_ctxt_t *)ctxt_ptr;
 
 	/*
@@ -616,7 +675,7 @@ static void *stress_proc_rw_thread(void *ctxt_ptr)
 			break;
 	}
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -636,12 +695,22 @@ static void stress_proc_dir(
 	int i, n, ret;
 	char tmp[PATH_MAX];
 
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return;
 
 	/* Don't want to go too deep */
 	if (depth > 20)
 		return;
+
+#if defined(__CYGWIN__)
+	/*
+	 * Cygwin maps the Windows registry to /proc/registry{,32,64}
+	 * (>1M entries, >50K entries on depth 2) and the path names of the
+	 * NTDLL layer to /proc/sys, ignore both for now
+	 */
+	if (!strncmp(path, "/proc/registry", 14) || !strcmp(path, "/proc/sys"))
+		return;
+#endif
 
 	mixup = stress_mwc32();
 	dlist = NULL;
@@ -652,7 +721,7 @@ static void stress_proc_dir(
 	}
 
 	/* Non-directories files first */
-	for (i = 0; (i < n) && stress_continue_flag(); i++) {
+	for (i = 0; LIKELY((i < n) && stress_continue_flag()); i++) {
 		struct dirent *d = dlist[i];
 		unsigned char type;
 
@@ -684,7 +753,7 @@ static void stress_proc_dir(
 	}
 
 	/* Now recurse on directories */
-	for (i = 0; (i < n) && stress_continue_flag(); i++) {
+	for (i = 0; LIKELY((i < n) && stress_continue_flag()); i++) {
 		struct dirent *d = dlist[i];
 
 		if (d && (shim_dirent_type(path, d) == SHIM_DT_DIR)) {
@@ -713,6 +782,7 @@ static char *stress_random_pid(void)
 
 	(void)shim_strscpy(path, "/proc/self", sizeof(path));
 
+	mixup = stress_mwc32();
 	n = stress_proc_scandir("/proc", &dlist, NULL, mixup_sort);
 	if (!n) {
 		stress_dirent_list_free(dlist, n);
@@ -723,14 +793,14 @@ static char *stress_random_pid(void)
 	 *  try 32 random probes before giving up
 	 */
 	for (i = 0, j = 0; i < 32; i++) {
-		char *name;
+		const char *name;
 
 		j += (size_t)stress_mwc32();
 		j %= (size_t)n;
 
 		name = dlist[j]->d_name;
 
-		if (isdigit(name[0])) {
+		if (isdigit((unsigned char)name[0])) {
 			(void)stress_mk_filename(path, sizeof(path), "/proc", name);
 			break;
 		}
@@ -746,7 +816,7 @@ static char *stress_random_pid(void)
  */
 static int stress_procfs_no_entries(stress_args_t *args)
 {
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf_skip("%s: no /proc entries found, skipping stressor\n", args->name);
 	return EXIT_NO_RESOURCE;
 }
@@ -763,7 +833,7 @@ static int stress_procfs(stress_args_t *args)
 	stress_ctxt_t ctxt;
 	struct dirent **dlist = NULL;
 
-	n = stress_proc_scandir("/proc", &dlist, NULL, alphasort);
+	n = stress_proc_scandir("/proc", &dlist, NULL, mixup_sort);
 	if (n <= 0)
 		return stress_procfs_no_entries(args);
 
@@ -772,7 +842,7 @@ static int stress_procfs(stress_args_t *args)
 	(void)shim_strscpy(proc_path, "/proc/self", sizeof(proc_path));
 
 	ctxt.args = args;
-	ctxt.writeable = (geteuid() != 0);
+	ctxt.writeable = !stress_check_capability(SHIM_CAP_IS_ROOT);
 
 	rc = shim_pthread_spin_init(&lock, PTHREAD_PROCESS_PRIVATE);
 	if (rc) {
@@ -788,17 +858,19 @@ static int stress_procfs(stress_args_t *args)
 				stress_proc_rw_thread, &ctxt);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		size_t j = args->instance % (size_t)n;
+		size_t j = stress_mwc32() % n;
 
 		for (i = 0; i < n; i++) {
 			char procfspath[PATH_MAX];
-			const struct dirent *d = dlist[i];
+			const struct dirent *d = dlist[j];
 			unsigned char type;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			stress_mk_filename(procfspath, sizeof(procfspath), "/proc", d->d_name);
@@ -815,11 +887,11 @@ static int stress_procfs(stress_args_t *args)
 				stress_proc_dir(&ctxt, procfspath, true, 0);
 			}
 
-			j = (j + args->num_instances) % (size_t)n;
+			j = (j + args->instance + 1) % n;
 			stress_bogo_inc(args);
 		}
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		stress_proc_dir(&ctxt, stress_random_pid(), true, 0);
@@ -850,15 +922,15 @@ static int stress_procfs(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_procfs_info = {
+const stressor_info_t stress_procfs_info = {
 	.stressor = stress_procfs,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_procfs_info = {
+const stressor_info_t stress_procfs_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "built without librt or only supported on Linux"
 };

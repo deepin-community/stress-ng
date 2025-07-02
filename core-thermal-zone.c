@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,7 +18,10 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-thermal-zone.h"
+
+#include <ctype.h>
 
 #if defined(STRESS_THERMAL_ZONES)
 
@@ -84,7 +87,7 @@ static void stress_tz_insert(stress_tz_info_t **tz_info_list, stress_tz_info_t *
 int stress_tz_init(stress_tz_info_t **tz_info_list)
 {
 	DIR *dir;
-        struct dirent *entry;
+	const struct dirent *entry;
 	stress_tz_info_t *tz_info;
 	size_t i;
 
@@ -105,7 +108,7 @@ int stress_tz_init(stress_tz_info_t **tz_info_list)
 		if (i >= STRESS_THERMAL_ZONES_MAX)
 			break;
 
-		if ((tz_info = calloc(1, sizeof(*tz_info))) == NULL) {
+		if ((tz_info = (stress_tz_info_t *)calloc(1, sizeof(*tz_info))) == NULL) {
 			pr_err("cannot allocate thermal information\n");
 			(void)closedir(dir);
 			return -1;
@@ -114,7 +117,7 @@ int stress_tz_init(stress_tz_info_t **tz_info_list)
 			"/sys/class/thermal/%s/type",
 			entry->d_name);
 
-		tz_info->path = strdup(entry->d_name);
+		tz_info->path = shim_strdup(entry->d_name);
 		if (!tz_info->path) {
 			free(tz_info);
 			(void)closedir(dir);
@@ -127,7 +130,7 @@ int stress_tz_init(stress_tz_info_t **tz_info_list)
 			if (fgets(type, sizeof(type), fp) != NULL) {
 				type[strcspn(type, "\n")] = '\0';
 				stress_tz_type_fix(type);
-				tz_info->type = strdup(type);
+				tz_info->type = shim_strdup(type);
 				tz_info->type_instance = stress_tz_type_instance(*tz_info_list, type);
 			}
 			(void)fclose(fp);
@@ -247,7 +250,7 @@ void stress_tz_dump(FILE *yaml, stress_stressor_t *stressors_list)
 		/*
 		 *  Allocate array, populate with tz_info and sort
 		 */
-		tz_infos = calloc(n, sizeof(*tz_infos));
+		tz_infos = (stress_tz_info_t **)calloc(n, sizeof(*tz_infos));
 		if (!tz_infos) {
 			pr_inf("thermal zones: cannot allocate memory to sort zones\n");
 			return;
@@ -263,7 +266,7 @@ void stress_tz_dump(FILE *yaml, stress_stressor_t *stressors_list)
 
 			tz_info = tz_infos[i];
 
-			for (j = 0; j < ss->num_instances; j++) {
+			for (j = 0; j < ss->instances; j++) {
 				const uint64_t temp =
 					ss->stats[j]->tz.tz_stat[tz_info->index].temperature;
 				/* Avoid crazy temperatures. e.g. > 250 C */
@@ -275,31 +278,26 @@ void stress_tz_dump(FILE *yaml, stress_stressor_t *stressors_list)
 
 			if (total) {
 				const double temp = (count > 0) ? ((double)total / count) / 1000.0 : 0.0;
-				char munged[64];
+				char tmp[64], *type;
 
-				(void)stress_munge_underscore(munged, ss->stressor->name, sizeof(munged));
 				if (!dumped_heading) {
+					const char *name = ss->stressor->name;
+
 					dumped_heading = true;
-					pr_inf("%s:\n", munged);
-					pr_yaml(yaml, "    - stressor: %s\n",
-						munged);
+					pr_inf("%s:\n", name);
+					pr_yaml(yaml, "    - stressor: %s\n", name);
 				}
 
 				if (stress_tz_type_instance(g_shared->tz_info, tz_info->type) <= 1) {
-					pr_inf("%20s %7.2f C (%.2f K)\n",
-						tz_info->type, temp, temp + 273.15);
-					pr_yaml(yaml, "      %s: %7.2f\n",
-						tz_info->type, temp);
+					type = tz_info->type;
 				} else {
-					pr_inf("%20s%d %7.2f C (%.2f K)\n",
+					(void)snprintf(tmp, sizeof(tmp), "%s%" PRIu32,
 						tz_info->type,
-						tz_info->type_instance,
-						temp, temp + 273.15);
-					pr_yaml(yaml, "      %s%d: %7.2f\n",
-						tz_info->type,
-						tz_info->type_instance,
-						temp);
+						tz_info->type_instance);
+					type = tmp;
 				}
+				pr_inf(" %-20s %7.2f C (%.2f K)\n", type, temp, temp + 273.15);
+				pr_yaml(yaml, "      %s: %7.2f\n", type, temp);
 				no_tz_stats = false;
 				print_nl = true;
 			}

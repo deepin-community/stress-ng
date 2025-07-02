@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,6 +24,7 @@
 #include "core-madvise.h"
 #include "core-mincore.h"
 #include "core-out-of-memory.h"
+#include "core-pragma.h"
 
 #if defined(HAVE_LINUX_MEMPOLICY_H)
 #include <linux/mempolicy.h>
@@ -76,7 +77,7 @@ static const stress_help_t help[] = {
 
 #define KEY_GET_RETRIES		(40)
 #define BITS_PER_BYTE		(8)
-#define NUMA_LONG_BITS		(sizeof(unsigned long) * BITS_PER_BYTE)
+#define NUMA_LONG_BITS		(sizeof(unsigned long int) * BITS_PER_BYTE)
 #if !defined(MPOL_F_ADDR)
 #define MPOL_F_ADDR		(1 << 1)
 #endif
@@ -127,60 +128,37 @@ static const int shm_flags[] = {
 };
 #endif
 
-static int stress_set_shm_sysv_mlock(const char *opt)
-{
-	return stress_set_setting_true("shm-sysv-mlock", opt);
-}
-
-static int stress_set_shm_sysv_bytes(const char *opt)
-{
-	size_t shm_sysv_bytes;
-
-	shm_sysv_bytes = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range_bytes("shm-sysv-bytes", shm_sysv_bytes,
-		MIN_SHM_SYSV_BYTES, MAX_MEM_LIMIT);
-	return stress_set_setting("shm-sysv-bytes", TYPE_ID_SIZE_T, &shm_sysv_bytes);
-}
-
-static int stress_set_shm_sysv_segments(const char *opt)
-{
-	size_t shm_sysv_segments;
-
-	shm_sysv_segments = (size_t)stress_get_uint64(opt);
-	stress_check_range("shm-sysv-segs", shm_sysv_segments,
-		MIN_SHM_SYSV_SEGMENTS, MAX_SHM_SYSV_SEGMENTS);
-	return stress_set_setting("shm-sysv-segs", TYPE_ID_SIZE_T, &shm_sysv_segments);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_shm_sysv_bytes,		stress_set_shm_sysv_bytes },
-	{ OPT_shm_sysv_mlock,		stress_set_shm_sysv_mlock },
-	{ OPT_shm_sysv_segments,	stress_set_shm_sysv_segments },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_shm_sysv_bytes, "shm-sysv-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_SHM_SYSV_BYTES, MAX_MEM_LIMIT, NULL },
+	{ OPT_shm_sysv_mlock, "shm-sysv-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_shm_sysv_segs,  "shm-sysv-segs",  TYPE_ID_SIZE_T, MIN_SHM_SYSV_SEGMENTS, MAX_SHM_SYSV_SEGMENTS, NULL },
+	END_OPT,
 };
 
-#if defined(HAVE_SHM_SYSV)
+#if defined(HAVE_SYS_IPC_H) &&	\
+    defined(HAVE_SYS_SHM_H) &&	\
+    defined(HAVE_SHM_SYSV)
 
 static void stress_shm_metrics(
 	stress_args_t *args,
 	const double duration,
 	const double count,
-	const char *syscall,
-	const int index)
+	const char *syscall_name,
+	const int idx)
 {
 	char buffer[40];
 	const double rate = (count > 0.0) ? (duration / count) : 0.0;
 
-	(void)snprintf(buffer, sizeof(buffer), "nanosecs per %s call", syscall);
-	stress_metrics_set(args, index, buffer,
-		STRESS_DBL_NANOSECOND * rate, STRESS_HARMONIC_MEAN);
+	(void)snprintf(buffer, sizeof(buffer), "nanosecs per %s call", syscall_name);
+	stress_metrics_set(args, idx, buffer,
+		STRESS_DBL_NANOSECOND * rate, STRESS_METRIC_HARMONIC_MEAN);
 }
 
 /*
  *  stress_shm_sysv_check()
  *	simple check if shared memory is sane
  */
-static int stress_shm_sysv_check(
+static int OPTIMIZE3 stress_shm_sysv_check(
 	uint8_t *buf,
 	const size_t sz,
 	const size_t page_size)
@@ -188,12 +166,14 @@ static int stress_shm_sysv_check(
 	uint8_t *ptr, val;
 	const uint8_t *end = buf + sz;
 
+PRAGMA_UNROLL_N(4)
 	for (val = 0, ptr = buf; ptr < end; ptr += page_size, val++) {
 		*ptr = val;
 	}
 
+PRAGMA_UNROLL_N(4)
 	for (val = 0, ptr = buf; ptr < end; ptr += page_size, val++) {
-		if (*ptr != val)
+		if (UNLIKELY(*ptr != val))
 			return -1;
 
 	}
@@ -215,12 +195,12 @@ static void exercise_shmat(
 
 	/* Exercise shmat syscall on invalid shm_id */
 	addr = shmat(-1, NULL, 0);
-	if (addr != (void *)-1)
+	if (UNLIKELY(addr != (void *)-1))
 		(void)shmdt(addr);
 
 	/* Exercise shmat syscall on invalid flags */
 	addr = shmat(shm_id, NULL, ~0);
-	if (addr != (void *)-1)
+	if (UNLIKELY(addr != (void *)-1))
 		(void)shmdt(addr);
 
 	/* Exercise valid shmat with all possible values of flags */
@@ -250,7 +230,8 @@ static void exercise_shmat(
 		addr = shmat(shm_id, addr, SHM_REMAP);
 		if (addr != (void *)-1) {
 			/* Exercise remap onto itself */
-			void *remap = shmat(shm_id, addr, SHM_REMAP | SHM_RDONLY);
+			const void *remap = shmat(shm_id, addr, SHM_REMAP | SHM_RDONLY);
+
 			if (remap != (void *)-1)
 				(void)shmdt(remap);
 			if (addr != remap)
@@ -267,7 +248,7 @@ static void exercise_shmat(
 #if defined(SHM_RND)
 	addr = mmap(NULL, sz, PROT_READ,
 		    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-	if (addr != MAP_FAILED) {
+	if (LIKELY(addr != MAP_FAILED)) {
 		(void)munmap(addr, sz);
 		addr = shmat(shm_id, addr, SHM_RND);
 		if (addr != (void *)-1)
@@ -280,9 +261,8 @@ static void exercise_shmat(
 	/* Exercise shmat with SHM_REMAP flag on NULL address */
 #if defined(SHM_REMAP)
 	addr = shmat(shm_id, NULL, SHM_REMAP);
-	if (addr != (void *)-1) {
+	if (addr != (void *)-1)
 		(void)shmdt(addr);
-	}
 #else
 	UNEXPECTED
 #endif
@@ -375,7 +355,7 @@ static void exercise_shmctl(const size_t sz, stress_args_t *args)
 		int ret;
 
 		ret = shmctl(shm_id, IPC_STAT, &buf);
-		if ((ret >= 0) && (errno == 0))
+		if (UNLIKELY((ret >= 0) && (errno == 0)))
 			pr_fail("%s: shmctl IPC_STAT unexpectedly succeeded on non-existent shared "
 				"memory segment, errno=%d (%s)\n", args->name, errno, strerror(errno));
 	}
@@ -409,7 +389,7 @@ static void exercise_shmget(const size_t sz, const char *name)
 		 * existing shared memory segment and IPC_EXCL flag
 		 */
 		shm_id2 = shmget(key, sz, IPC_CREAT | IPC_EXCL);
-		if ((shm_id2 >= 0) && (errno == 0)) {
+		if (UNLIKELY((shm_id2 >= 0) && (errno == 0))) {
 			pr_fail("%s: shmget IPC_CREAT unexpectedly succeeded and re-created "
 				"shared memory segment even with IPC_EXCL flag "
 				"specified, errno=%d (%s)\n", name, errno, strerror(errno));
@@ -421,7 +401,7 @@ static void exercise_shmget(const size_t sz, const char *name)
 		 * existing shared memory segment but of greater size
 		 */
 		shm_id2 = shmget(key, sz + (1024 * 1024), IPC_CREAT);
-		if ((shm_id2 >= 0) && (errno == 0)) {
+		if (UNLIKELY((shm_id2 >= 0) && (errno == 0))) {
 			pr_fail("%s: shmget IPC_CREAT unexpectedly succeeded and again "
 				"created shared memory segment with a greater "
 				"size, errno=%d (%s)\n", name, errno, strerror(errno));
@@ -434,7 +414,7 @@ static void exercise_shmget(const size_t sz, const char *name)
     /* Exercise shmget on invalid sizes argument*/
 #if defined(SHMMIN)
 	shm_id = shmget(key, SHMMIN - 1, IPC_CREAT);
-	if ((SHMMIN > 0) && (shm_id >= 0)) {
+	if (UNLIKELY((SHMMIN > 0) && (shm_id >= 0))) {
 		pr_fail("%s: shmget IPC_CREAT unexpectedly succeeded on invalid value of"
 			"size argument, errno=%d (%s)\n", name, errno, strerror(errno));
 		(void)shmctl(shm_id, IPC_RMID, NULL);
@@ -445,7 +425,7 @@ static void exercise_shmget(const size_t sz, const char *name)
 
 #if defined(SHMMAX)
 	shm_id = shmget(key, SHMMAX + 1, IPC_CREAT);
-	if ((SHMMAX < ~(size_t)0) && (shm_id >= 0)) {
+	if (UNLIKELY((SHMMAX < ~(size_t)0) && (shm_id >= 0))) {
 		pr_fail("%s: shmget IPC_CREAT unexpectedly succeeded on invalid value of"
 			"size argument, errno=%d (%s)\n", name, errno, strerror(errno));
 		(void)shmctl(shm_id, IPC_RMID, NULL);
@@ -462,7 +442,7 @@ static void exercise_shmget(const size_t sz, const char *name)
 				shmmax++;
 				if (shmmax > 0) {
 					shm_id = shmget(key, shmmax, IPC_CREAT);
-					if (shm_id >= 0) {
+					if (UNLIKELY(shm_id >= 0)) {
 						pr_fail("%s: shmget IPC_CREAT unexpectedly succeeded on "
 							"invalid value %zu of size argument, errno=%d (%s)\n",
 							name, shmmax, errno, strerror(errno));
@@ -490,7 +470,7 @@ static void exercise_shmget(const size_t sz, const char *name)
 #endif
 
 	shm_id = shmget(key, sz, IPC_EXCL);
-	if ((shm_id >= 0) && (errno == 0)) {
+	if (UNLIKELY((shm_id >= 0) && (errno == 0))) {
 		pr_fail("%s: shmget IPC_RMID unexpectedly succeeded on non-existent shared "
 			"memory segment, errno=%d (%s)\n", name, errno, strerror(errno));
 		(void)shmctl(shm_id, IPC_RMID, NULL);
@@ -602,17 +582,17 @@ static int stress_shm_sysv_child(
 	int rc = EXIT_SUCCESS;
 	bool ok = true;
 	int mask = ~0;
-	uint32_t instances = args->num_instances;
+	uint32_t instances = args->instances;
 	const size_t buffer_size = (page_size / sizeof(uint64_t)) + 1;
 	uint64_t *buffer;
 	double shmget_duration = 0.0, shmget_count = 0.0;
 	double shmat_duration = 0.0, shmat_count = 0.0;
 	double shmdt_duration = 0.0, shmdt_count = 0.0;
 
-	buffer = calloc(buffer_size, sizeof(*buffer));
+	buffer = (uint64_t *)calloc(buffer_size, sizeof(*buffer));
 	if (!buffer) {
-		pr_inf_skip("%s: cannot allocate %zu sized buffer, skipping stressor\n",
-			args->name, buffer_size);
+		pr_inf_skip("%s: faild to allocate %zu byte buffer%s, skipping stressor\n",
+			args->name, buffer_size, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -651,7 +631,7 @@ static int stress_shm_sysv_child(
 				sz = shmall;
 			if ((freemem > page_size) && sz > freemem)
 				sz = freemem;
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto reap;
 
 			for (count = 0; count < KEY_GET_RETRIES; count++) {
@@ -667,7 +647,7 @@ static int stress_shm_sysv_child(
 					size_t j;
 					unique = true;
 
-					if (!stress_continue_flag())
+					if (UNLIKELY(!stress_continue_flag()))
 						goto reap;
 
 					/* Get a unique random key */
@@ -678,7 +658,7 @@ static int stress_shm_sysv_child(
 							break;
 						}
 					}
-					if (!stress_continue_flag())
+					if (UNLIKELY(!stress_continue_flag()))
 						goto reap;
 				} while (!unique);
 
@@ -686,7 +666,7 @@ static int stress_shm_sysv_child(
 				shm_id = shmget(key, sz,
 					IPC_CREAT | IPC_EXCL |
 					S_IRUSR | S_IWUSR | rnd_flag);
-				if (shm_id >= 0) {
+				if (LIKELY(shm_id >= 0)) {
 					shmget_duration += stress_time_now() - t;
 					shmget_count += 1.0;
 					break;
@@ -705,7 +685,7 @@ static int stress_shm_sysv_child(
 					sz = sz / 2;
 				}
 			}
-			if (shm_id < 0) {
+			if (UNLIKELY(shm_id < 0)) {
 				/* Run out of shm segments, just reap and die */
 				if (errno == ENOSPC) {
 					pr_inf_skip("%s: shmget ran out of free space, "
@@ -730,8 +710,8 @@ static int stress_shm_sysv_child(
 			/* Inform parent of the new shm ID */
 			msg.index = (int)i;
 			msg.shm_id = shm_id;
-			if (write(fd, &msg, sizeof(msg)) < 0) {
-				pr_err("%s: write failed: errno=%d: (%s)\n",
+			if (UNLIKELY(write(fd, &msg, sizeof(msg)) < 0)) {
+				pr_err("%s: write failed, errno=%d: (%s)\n",
 					args->name, errno, strerror(errno));
 				rc = EXIT_FAILURE;
 				goto reap;
@@ -739,7 +719,7 @@ static int stress_shm_sysv_child(
 
 			t = stress_time_now();
 			addr = shmat(shm_id, NULL, 0);
-			if (addr == (char *) -1) {
+			if (UNLIKELY(addr == (char *)-1)) {
 				ok = false;
 				pr_fail("%s: shmat on NULL address failed on id %d, (key=%d, size=%zd), errno=%d (%s)\n",
 					args->name, shm_id, (int)key, sz, errno, strerror(errno));
@@ -754,18 +734,18 @@ static int stress_shm_sysv_child(
 			shm_ids[i] = shm_id;
 			keys[i] = key;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
 			(void)stress_mincore_touch_pages(addr, sz);
 			(void)shim_msync(addr, sz, stress_mwc1() ? MS_ASYNC : MS_SYNC);
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
 			(void)stress_madvise_random(addr, sz);
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
-			if (stress_shm_sysv_check(addr, sz, page_size) < 0) {
+			if (UNLIKELY(stress_shm_sysv_check(addr, sz, page_size) < 0)) {
 				ok = false;
 				pr_fail("%s: memory check failed\n", args->name);
 				rc = EXIT_FAILURE;
@@ -789,7 +769,7 @@ static int stress_shm_sysv_child(
 			{
 				struct shmid_ds ds;
 
-				if (shmctl(shm_id, IPC_STAT, &ds) < 0)
+				if (UNLIKELY(shmctl(shm_id, IPC_STAT, &ds) < 0))
 					pr_fail("%s: shmctl IPC_STAT failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 #if defined(SHM_SET)
@@ -807,7 +787,7 @@ static int stress_shm_sysv_child(
 			{
 				struct shminfo s;
 
-				if (shmctl(shm_id, IPC_INFO, (struct shmid_ds *)&s) < 0)
+				if (UNLIKELY(shmctl(shm_id, IPC_INFO, (struct shmid_ds *)&s) < 0))
 					pr_fail("%s: shmctl IPC_INFO failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 			}
@@ -819,7 +799,7 @@ static int stress_shm_sysv_child(
 			{
 				struct shm_info s;
 
-				if (shmctl(shm_id, SHM_INFO, (struct shmid_ds *)&s) < 0)
+				if (UNLIKELY(shmctl(shm_id, SHM_INFO, (struct shmid_ds *)&s) < 0))
 					pr_fail("%s: shmctl SHM_INFO failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 			}
@@ -841,7 +821,7 @@ static int stress_shm_sysv_child(
     defined(__NR_set_mempolicy)
 			{
 				int ret, mode;
-				unsigned long node_mask[NUMA_LONG_BITS];
+				unsigned long int node_mask[NUMA_LONG_BITS];
 
 				ret = shim_get_mempolicy(&mode, node_mask, 1,
 					addrs[i], MPOL_F_ADDR);
@@ -887,7 +867,7 @@ reap:
 				double t;
 
 				t = stress_time_now();
-				if (shmdt(addrs[i]) < 0) {
+				if (UNLIKELY(shmdt(addrs[i]) < 0)) {
 					pr_fail("%s: shmdt failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 				} else {
@@ -897,7 +877,7 @@ reap:
 			}
 			if (shm_ids[i] >= 0) {
 				if (shmctl(shm_ids[i], IPC_RMID, NULL) < 0) {
-					if ((errno != EIDRM) && (errno != EINVAL)) {
+					if (UNLIKELY((errno != EIDRM) && (errno != EINVAL))) {
 						pr_fail("%s: shmctl IPC_RMID failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
 					}
@@ -907,8 +887,8 @@ reap:
 			/* Inform parent shm ID is now free */
 			msg.index = (int)i;
 			msg.shm_id = -1;
-			if (write(fd, &msg, sizeof(msg)) < 0) {
-				pr_dbg("%s: write failed: errno=%d: (%s)\n",
+			if (UNLIKELY(write(fd, &msg, sizeof(msg)) < 0)) {
+				pr_dbg("%s: write failed, errno=%d: (%s)\n",
 					args->name, errno, strerror(errno));
 				ok = false;
 			}
@@ -928,7 +908,7 @@ reap:
 	msg.index = -1;
 	msg.shm_id = -1;
 	if (write(fd, &msg, sizeof(msg)) < 0) {
-		pr_err("%s: write failed: errno=%d: (%s)\n",
+		pr_err("%s: write failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		rc = EXIT_FAILURE;
 	}
@@ -956,19 +936,25 @@ static int stress_shm_sysv(stress_args_t *args)
 	bool retry = true;
 	bool shm_sysv_mlock = false;
 	uint32_t restarts = 0;
-	size_t shm_sysv_bytes = DEFAULT_SHM_SYSV_BYTES;
+	size_t shm_sysv_bytes, shm_sysv_bytes_total = DEFAULT_SHM_SYSV_BYTES;
 	size_t shm_sysv_segments = DEFAULT_SHM_SYSV_SEGMENTS;
 
-	(void)stress_get_setting("shm-sysv-mlock", &shm_sysv_mlock);
-
-	if (!stress_get_setting("shm-sysv-bytes", &shm_sysv_bytes)) {
-		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			shm_sysv_bytes = MAX_SHM_SYSV_BYTES;
-		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			shm_sysv_bytes = MIN_SHM_SYSV_BYTES;
+	if (!stress_get_setting("shm-sysv-mlock", &shm_sysv_mlock)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			shm_sysv_mlock = true;
 	}
+
+	if (!stress_get_setting("shm-sysv-bytes", &shm_sysv_bytes_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			shm_sysv_bytes_total = MAX_SHM_SYSV_BYTES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			shm_sysv_bytes_total = MIN_SHM_SYSV_BYTES;
+	}
+	shm_sysv_bytes = shm_sysv_bytes_total / args->instances;
 	if (shm_sysv_bytes < page_size)
 		shm_sysv_bytes = page_size;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, shm_sysv_bytes, shm_sysv_bytes * args->instances);
 
 	if (!stress_get_setting("shm-sysv-segs", &shm_sysv_segments)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
@@ -976,15 +962,17 @@ static int stress_shm_sysv(stress_args_t *args)
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
 			shm_sysv_segments = MIN_SHM_SYSV_SEGMENTS;
 	}
-	shm_sysv_segments /= args->num_instances;
+	shm_sysv_segments /= args->instances;
 	if (shm_sysv_segments < 1)
 		shm_sysv_segments = 1;
 
 	orig_sz = sz = shm_sysv_bytes & ~(page_size - 1);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	while (stress_continue_flag() && retry) {
+	while (LIKELY(stress_continue_flag() && retry)) {
 		if (pipe(pipefds) < 0) {
 			pr_fail("%s: pipe failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -996,7 +984,7 @@ fork_again:
 			/* Can't fork, retry? */
 			if (errno == EAGAIN)
 				goto fork_again;
-			pr_err("%s: fork failed: errno=%d: (%s)\n",
+			pr_err("%s: fork failed, errno=%d: (%s)\n",
 				args->name, errno, strerror(errno));
 			(void)close(pipefds[0]);
 			(void)close(pipefds[1]);
@@ -1055,9 +1043,9 @@ fork_again:
 				if ((WTERMSIG(status) == SIGKILL) ||
 				    (WTERMSIG(status) == SIGBUS)) {
 					stress_log_system_mem_info();
-					pr_dbg("%s: assuming killed by OOM killer, "
+					pr_dbg("%s: assuming PID %" PRIdMAX " killed by OOM killer, "
 						"restarting again (instance %d)\n",
-						args->name, args->instance);
+						args->name, (intmax_t)pid, args->instance);
 					restarts++;
 				}
 			}
@@ -1084,9 +1072,13 @@ fork_again:
 			 * Nicing the child may OOM it first as this
 			 * doubles the OOM score
 			 */
-			if (nice(5) < 0)
-				pr_dbg("%s: nice of child failed, "
-					"(instance %d)\n", args->name, args->instance);
+			errno = 0;
+			VOID_RET(int, nice(5));
+			if (errno != 0)
+				pr_dbg("%s: nice of child failed, errno=%d (%s) "
+					"(instance %d)\n", args->name,
+					errno, strerror(errno),
+					args->instance);
 
 			(void)close(pipefds[0]);
 			rc = stress_shm_sysv_child(args, pipefds[1], sz, page_size, shm_sysv_segments, shm_sysv_mlock);
@@ -1106,18 +1098,18 @@ fork_again:
 	return rc;
 }
 
-stressor_info_t stress_shm_sysv_info = {
+const stressor_info_t stress_shm_sysv_info = {
 	.stressor = stress_shm_sysv,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_shm_sysv_info = {
+const stressor_info_t stress_shm_sysv_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without System V shared memory shmat() shmdt() system calls"

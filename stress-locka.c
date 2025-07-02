@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -67,7 +67,7 @@ static stress_locka_info_t *stress_locka_info_new(void)
 		locka_infos.free = new->next;
 		new->next = NULL;
 	} else {
-		new = calloc(1, sizeof(*new));
+		new = (stress_locka_info_t *)calloc(1, sizeof(*new));
 		if (!new)
 			return NULL;
 	}
@@ -138,7 +138,7 @@ static int stress_locka_unlock(stress_args_t *args, const int fd)
 	struct flock f;
 
 	/* Pop one off list */
-	if (!locka_infos.head)
+	if (UNLIKELY(!locka_infos.head))
 		return 0;
 
 	f.l_type = F_UNLCK;
@@ -149,7 +149,7 @@ static int stress_locka_unlock(stress_args_t *args, const int fd)
 
 	stress_locka_info_head_remove();
 
-	if (fcntl(fd, F_SETLK, &f) < 0) {
+	if (UNLIKELY(fcntl(fd, F_SETLK, &f) < 0)) {
 		pr_fail("%s: fcntl F_SETLK failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return -1;
@@ -175,7 +175,7 @@ static int stress_locka_contention(
 		struct flock f;
 
 		if (locka_infos.length >= LOCK_MAX)
-			if (stress_locka_unlock(args, fd) < 0)
+			if (UNLIKELY(stress_locka_unlock(args, fd) < 0))
 				return -1;
 
 		len = (stress_mwc16() + 1) & 0xfff;
@@ -187,17 +187,18 @@ static int stress_locka_contention(
 		f.l_len = len;
 		f.l_pid = args->pid;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		rc = fcntl(fd, F_GETLK, &f);
-		if (rc < 0)
+		if (UNLIKELY(rc < 0))
 			continue;
 
 		/* Locked OK, add to lock list */
 
 		locka_info = stress_locka_info_new();
-		if (!locka_info) {
-			pr_err("%s: calloc failed, out of memory\n", args->name);
+		if (UNLIKELY(!locka_info)) {
+			pr_err("%s: calloc failed, out of memory%s\n",
+				args->name, stress_get_memfree_str());
 			return -1;
 		}
 		locka_info->offset = offset;
@@ -263,7 +264,7 @@ static int stress_locka(stress_args_t *args)
 	}
 	for (offset = 0; offset < LOCK_FILE_SIZE; offset += sizeof(buffer)) {
 redo:
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			ret = EXIT_SUCCESS;
 			goto tidy;
 		}
@@ -278,6 +279,8 @@ redo:
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -285,7 +288,7 @@ again:
 	if (cpid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto tidy;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -317,16 +320,16 @@ tidy:
 
 	return ret;
 }
-stressor_info_t stress_locka_info = {
+const stressor_info_t stress_locka_info = {
 	.stressor = stress_locka,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_locka_info = {
+const stressor_info_t stress_locka_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without fcntl() F_GETLK, F_SETLK, F_SETLKW, F_WRLCK or F_UNLCK commands"

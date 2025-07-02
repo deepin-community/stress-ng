@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,10 @@
 #include "core-arch.h"
 #include "core-pragma.h"
 
+#define MIN_REMAP_PAGES		(1)
+#define MAX_REMAP_PAGES		(0x80000000ULL)
+#define DEFAULT_REMAP_PAGES	(512)		/* Must be a power of 2 */
+
 static const stress_help_t help[] = {
 	{ NULL,	"remap N",		"start N workers exercising page remappings" },
 	{ NULL,	"remap-mlock",		"attempt to mlock pages into memory" },
@@ -29,35 +33,14 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_remap_mlock(const char *opt)
-{
-	return stress_set_setting_true("remap-mlock", opt);
-}
-
-static int stress_set_remap_pages(const char *opt)
-{
-        size_t remap_pages;
-
-        remap_pages = (size_t)stress_get_uint64(opt);
-        stress_check_range("remap-pages", (uint64_t)remap_pages, 1, 0x80000000);
-
-	if ((remap_pages & (remap_pages - 1)) != 0) {
-		(void)fprintf(stderr, "Value for option --remap-pages %zu must be a power of 2\n", remap_pages);
-                longjmp(g_error_env, 1);
-	}
-        return stress_set_setting("remap-pages", TYPE_ID_SIZE_T, &remap_pages);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_remap_mlock,	stress_set_remap_mlock },
-	{ OPT_remap_pages,	stress_set_remap_pages },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_remap_mlock, "remap-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_remap_pages, "remap-pages", TYPE_ID_SIZE_T, MIN_REMAP_PAGES, MAX_REMAP_PAGES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_REMAP_FILE_PAGES) &&	\
     !defined(STRESS_ARCH_SPARC)
-
-#define N_PAGES		(512)		/* Must be a power of 2 */
 
 typedef uint16_t stress_mapdata_t;
 
@@ -78,7 +61,7 @@ static inline void *stress_get_umapped_addr(const size_t sz)
  *  check_order()
  *	check page order
  */
-static void OPTIMIZE3 check_order(
+static bool OPTIMIZE3 check_order(
 	stress_args_t *args,
 	const size_t stride,
 	const stress_mapdata_t *data,
@@ -87,17 +70,15 @@ static void OPTIMIZE3 check_order(
 	const char *ordering)
 {
 	size_t i;
-	bool failed;
 
-	for (failed = false, i = 0; i < remap_pages; i++) {
-		if (data[i * stride] != order[i]) {
-			failed = true;
-			break;
+	for (i = 0; i < remap_pages; i++) {
+		if (UNLIKELY(data[i * stride] != order[i])) {
+			pr_fail("%s: remap %s order pages failed\n",
+				args->name, ordering);
+			return true;
 		}
 	}
-	if (failed)
-		pr_fail("%s: remap %s order pages failed\n",
-			args->name, ordering);
+	return false;
 }
 
 /*
@@ -162,7 +143,7 @@ static int stress_remap(stress_args_t *args)
 {
 	stress_mapdata_t *data;
 	size_t *order;
-	size_t remap_pages = N_PAGES;
+	size_t remap_pages = DEFAULT_REMAP_PAGES;
 	uint8_t *unmapped, *mapped;
 	const size_t page_size = args->page_size;
 	const size_t stride = page_size / sizeof(*data);
@@ -172,19 +153,30 @@ static int stress_remap(stress_args_t *args)
 	int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("remap-mlock", &remap_mlock);
-	(void)stress_get_setting("remap-pages", &remap_pages);
+	if (!stress_get_setting("remap-pages", &remap_pages)) {
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			remap_pages = MIN_REMAP_PAGES;
+	}
+
+	if ((remap_pages & (remap_pages - 1)) != 0) {
+		(void)pr_inf("%s: value for option --remap-pages %zu must be a power of 2, falling back to using default %d\n",
+			args->name, remap_pages, DEFAULT_REMAP_PAGES);
+		remap_pages = DEFAULT_REMAP_PAGES;
+	}
 
 	data_size = remap_pages * page_size;
 	data = (stress_mapdata_t *)stress_mmap_populate(NULL, data_size,
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_inf_skip("%s: mmap failed to allocate %zu bytes "
-			"(%zu pages), errno=%d (%s), skipping stressor\n",
+		pr_inf_skip("%s: failed to mmap %zu bytes "
+			"(%zu pages)%s, errno=%d (%s), skipping stressor\n",
 			args->name, data_size, remap_pages,
+			stress_get_memfree_str(),
 			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(data, data_size, "remap-pages");
 	if (remap_mlock)
 		(void)shim_mlock(data, data_size);
 
@@ -193,12 +185,13 @@ static int stress_remap(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (order == MAP_FAILED) {
-		pr_inf_skip("%s: mmap failed to allocate %zu bytes, errno=%d (%s), "
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), "
 			"skipping stressor\n", args->name, order_size,
-			errno, strerror(errno));
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)munmap((void *)data, data_size);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(order, order_size, "remap-ordering");
 	if (remap_mlock)
 		(void)shim_mlock(order, order_size);
 
@@ -210,6 +203,7 @@ static int stress_remap(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (mapped != MAP_FAILED) {
+		stress_set_vma_anon_name(mapped, mapped_size, "mapped-data");
 		if (remap_mlock)
 			(void)shim_mlock(mapped, mapped_size);
 		/*
@@ -230,6 +224,8 @@ static int stress_remap(stress_args_t *args)
 		mapped = NULL;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -241,7 +237,10 @@ static int stress_remap(stress_args_t *args)
 			rc = EXIT_NO_RESOURCE;
 			break;
 		}
-		check_order(args, stride, data, remap_pages, order, "reverse");
+		if (UNLIKELY(check_order(args, stride, data, remap_pages, order, "reverse"))) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		/* random order pages */
 PRAGMA_UNROLL_N(4)
@@ -260,7 +259,10 @@ PRAGMA_UNROLL_N(4)
 			rc = EXIT_NO_RESOURCE;
 			break;
 		}
-		check_order(args, stride, data, remap_pages, order, "random");
+		if (UNLIKELY(check_order(args, stride, data, remap_pages, order, "random"))) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		/* all mapped to 1 page */
 PRAGMA_UNROLL_N(4)
@@ -270,7 +272,10 @@ PRAGMA_UNROLL_N(4)
 			rc = EXIT_NO_RESOURCE;
 			break;
 		}
-		check_order(args, stride, data, remap_pages, order, "all-to-1");
+		if (UNLIKELY(check_order(args, stride, data, remap_pages, order, "all-to-1"))) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		/* reorder pages back again */
 PRAGMA_UNROLL_N(4)
@@ -280,7 +285,10 @@ PRAGMA_UNROLL_N(4)
 			rc = EXIT_NO_RESOURCE;
 			break;
 		}
-		check_order(args, stride, data, remap_pages, order, "forward");
+		if (UNLIKELY(check_order(args, stride, data, remap_pages, order, "forward"))) {
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		/*
 		 *  exercise some illegal remapping calls
@@ -310,7 +318,7 @@ PRAGMA_UNROLL_N(4)
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per page remap",
-		rate * 1000000000, STRESS_HARMONIC_MEAN);
+		rate * 1000000000, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)order, order_size);
 	(void)munmap((void *)data, data_size);
@@ -322,18 +330,18 @@ PRAGMA_UNROLL_N(4)
 	return rc;
 }
 
-stressor_info_t stress_remap_info = {
+const stressor_info_t stress_remap_info = {
 	.stressor = stress_remap,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
+	.classifier = CLASS_MEMORY | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_remap_info = {
+const stressor_info_t stress_remap_info = {
 	.stressor = stress_unimplemented,
-	.opt_set_funcs = opt_set_funcs,
-	.class = CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
+	.classifier = CLASS_MEMORY | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without remap_file_pages() or unsupported for SPARC Linux"

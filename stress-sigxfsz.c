@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -81,6 +81,8 @@ static int stress_sigxfsz(stress_args_t *args)
 	}
 	(void)unlink(filename);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t_start = stress_time_now();
@@ -89,7 +91,7 @@ static int stress_sigxfsz(stress_args_t *args)
 
 		limit.rlim_cur = stress_mwc32modn(max_sz);
 		if (setrlimit(RLIMIT_FSIZE, &limit) < 0) {
-			if (errno == EINVAL) {
+			if (LIKELY(errno == EINVAL)) {
 				max_sz >>= 1;
 				if (max_sz > 512)
 					continue;
@@ -102,7 +104,7 @@ static int stress_sigxfsz(stress_args_t *args)
 #if defined(HAVE_PWRITE)
 		wret = pwrite(fd, buffer, sizeof(buffer), (off_t)limit.rlim_cur);
 #else
-		if (lseek(fd, (off_t)limit.rlim_cur, SEEK_SET) < 0) {
+		if (UNLIKELY(lseek(fd, (off_t)limit.rlim_cur, SEEK_SET) < 0)) {
 			pr_inf("%s: seek to start of file failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -116,7 +118,7 @@ static int stress_sigxfsz(stress_args_t *args)
 	t_delta = stress_time_now() - t_start;
 	rate = (t_delta > 0.0) ? (double)async_sigs / t_delta : 0.0;
 	stress_metrics_set(args, 0, "SIGXFSZ signals per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	/*  And ignore IO signals from now on */
 	VOID_RET(int, stress_sighandler(args->name, SIGXFSZ, SIG_IGN, NULL));
@@ -130,16 +132,16 @@ tidy_dir:
 	return rc;
 }
 
-stressor_info_t stress_sigxfsz_info = {
+const stressor_info_t stress_sigxfsz_info = {
 	.stressor = stress_sigxfsz,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sigxfsz_info = {
+const stressor_info_t stress_sigxfsz_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without SIGXFSZ or RLIMIT_FSIZE"

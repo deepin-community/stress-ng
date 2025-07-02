@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -265,7 +265,7 @@ static void stress_landlock_many(
 	(void)shim_memset(&ruleset_attr, 0, sizeof(ruleset_attr));
 	ruleset_attr.handled_access_fs = ctxt->mask;
 	ruleset_fd = shim_landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
-	if (ruleset_fd < 0) {
+	if (UNLIKELY(ruleset_fd < 0)) {
 		if (errno != ENOSYS)
 			pr_inf("%s: landlock_create_ruleset failed, errno=%d (%s), handled_access_fs = 0x%" PRIx64 "\n",
 				args->name, errno, strerror(errno), (uint64_t)ruleset_attr.handled_access_fs);
@@ -277,11 +277,11 @@ static void stress_landlock_many(
 		char newpath[PATH_MAX], resolved[PATH_MAX];
 
 		if (strcmp(path, "/"))
-			(void)snprintf(newpath, sizeof(newpath), "%s/%s", path, namelist[i]->d_name);
+			(void)stress_mk_filename(newpath, sizeof(newpath), path, namelist[i]->d_name);
 		else
-			(void)snprintf(newpath, sizeof(newpath), "/%s", namelist[i]->d_name);
+			(void)stress_mk_filename(newpath, sizeof(newpath), "", namelist[i]->d_name);
 
-		if (realpath(newpath, resolved) == NULL)
+		if (UNLIKELY(realpath(newpath, resolved) == NULL))
 			goto next;
 
 		if (strcmp(newpath, resolved) == 0) {
@@ -293,16 +293,15 @@ static void stress_landlock_many(
 				(void)shim_memset(&path_beneath, 0, sizeof(path_beneath));
 				path_beneath.allowed_access = SHIM_LANDLOCK_ACCESS_FS_READ_FILE;
 				path_beneath.parent_fd = open(resolved, O_PATH | O_NONBLOCK);
-				if (path_beneath.parent_fd < 0)
+				if (UNLIKELY(path_beneath.parent_fd < 0))
 					goto close_ruleset;
 				ret = shim_landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &path_beneath, 0);
 				(void)close(path_beneath.parent_fd);
-				if (ret < 0) {
+				if (UNLIKELY(ret < 0))
 					goto close_ruleset;
-				}
 				break;
 			case SHIM_DT_DIR:
-				if (depth < 30)
+				if (LIKELY(depth < 30))
 					stress_landlock_many(args, ctxt, resolved, depth + 1);
 				break;
 			default:
@@ -327,13 +326,13 @@ static uint64_t stress_landlock_get_access_mask(void)
 
 	(void)shim_memset(&ruleset_attr, 0, sizeof(ruleset_attr));
 	for (mask = 0, i = 0; i < 64; i++) {
-		int ruleset_fd;
-
 		(void)shim_memset(&ruleset_attr, 0, sizeof(ruleset_attr));
 		ruleset_attr.handled_access_fs = 1UL << i;
 		if ((ruleset_attr.handled_access_fs & SHIM_LANDLOCK_ACCESS_ALL)) {
+			int ruleset_fd;
+
 			ruleset_fd = shim_landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
-			if (ruleset_fd >= 0) {
+			if (LIKELY(ruleset_fd >= 0)) {
 				mask = (mask | (1UL << i)) & SHIM_LANDLOCK_ACCESS_ALL;
 				(void)close(ruleset_fd);
 
@@ -360,7 +359,7 @@ static int stress_landlock_flag(stress_args_t *args, stress_landlock_ctxt_t *ctx
 
 	/* Create empty test file */
 	fd = open(ctxt->filename, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR);
-	if (fd > -1)
+	if (LIKELY(fd > -1))
 		(void)close(fd);
 
 	/* Exercise fetch of ruleset API version, ignore return */
@@ -369,7 +368,7 @@ static int stress_landlock_flag(stress_args_t *args, stress_landlock_ctxt_t *ctx
 	(void)shim_memset(&ruleset_attr, 0, sizeof(ruleset_attr));
 	ruleset_attr.handled_access_fs = ctxt->mask;
 	ruleset_fd = shim_landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
-	if (ruleset_fd < 0) {
+	if (UNLIKELY(ruleset_fd < 0)) {
 		pr_inf("%s: landlock_create_ruleset failed, errno=%d (%s), handled_access_fs = 0x%" PRIx64 "\n",
 			args->name, errno, strerror(errno), (uint64_t)ruleset_attr.handled_access_fs);
 		return 0;
@@ -378,18 +377,18 @@ static int stress_landlock_flag(stress_args_t *args, stress_landlock_ctxt_t *ctx
 	(void)shim_memset(&path_beneath, 0, sizeof(path_beneath));
 	path_beneath.allowed_access = ctxt->flag;
 	path_beneath.parent_fd = open(ctxt->path, O_PATH);
-	if (path_beneath.parent_fd < 0)
+	if (UNLIKELY(path_beneath.parent_fd < 0))
 		goto close_ruleset;
 	ret = shim_landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &path_beneath, 0);
-	if (ret < 0)
+	if (UNLIKELY(ret < 0))
 		goto close_parent;
 
 	ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-	if (ret < 0)
+	if (UNLIKELY(ret < 0))
 		goto close_parent;
 
 	ret = shim_landlock_restrict_self(ruleset_fd, 0);
-	if (ret < 0) {
+	if (UNLIKELY(ret < 0)) {
 		pr_inf("%s: landlock_restrict_self failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		goto close_parent;
@@ -440,8 +439,8 @@ again:
 	} else {
 		if (shim_waitpid(pid, &status, 0) < 0) {
 			if (errno != EINTR) {
-				pr_err("%s: waitpid errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_err("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 			} else {
 				/* Probably an SIGARLM, force kill & reap */
 				(void)stress_kill_pid_wait(pid, NULL);
@@ -513,6 +512,8 @@ again:
 		_exit(0);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -555,17 +556,17 @@ err:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_landlock_info = {
+const stressor_info_t stress_landlock_info = {
 	.stressor = stress_landlock,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.supported = stress_landlock_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_landlock_info = {
+const stressor_info_t stress_landlock_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "linux/landlock.h or __NR_landlock* syscall macros"

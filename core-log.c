@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,8 +18,12 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-log.h"
 #include "core-syslog.h"
+
+#include <stdarg.h>
+#include <time.h>
 
 #if defined(HAVE_SYSLOG_H)
 #include <syslog.h>
@@ -61,7 +65,7 @@ static void pr_log_write_buf_fd(const int fd, const char *buf, const size_t buf_
 		ssize_t ret;
 
 		ret = write(fd, ptr, n);
-		if (ret <= 0)
+		if (UNLIKELY(ret <= 0))
 			break;
 		n -= ret;
 		ptr += ret;
@@ -95,9 +99,9 @@ static void pr_log_write(const char *buf, const size_t buf_len)
 {
 	const bool buffer_messages = !(g_opt_flags & OPT_FLAGS_LOG_LOCKLESS);
 
-	if (buffer_messages && pr_msg_buf.pid == getpid()) {
+	if (buffer_messages && (pr_msg_buf.pid == getpid())) {
 		if (!pr_msg_buf.buf) {
-			pr_msg_buf.buf = strdup(buf);
+			pr_msg_buf.buf = shim_strdup(buf);
 			if (!pr_msg_buf.buf) {
 				pr_log_write_buf(buf, buf_len);
 				return;
@@ -107,7 +111,7 @@ static void pr_log_write(const char *buf, const size_t buf_len)
 			const size_t len = strlen(pr_msg_buf.buf);
 
 			new_buf = realloc(pr_msg_buf.buf, len + buf_len + 1);
-			if (!new_buf) {
+			if (UNLIKELY(!new_buf)) {
 				pr_log_write_buf(pr_msg_buf.buf, strlen(pr_msg_buf.buf));
 				free(pr_msg_buf.buf);
 				pr_msg_buf.buf = NULL;
@@ -204,7 +208,7 @@ void pr_openlog(const char *filename)
 	log_fd = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
 	if (log_fd < 0) {
 		log_fd = -1;
-		pr_err("Cannot open log file %s, errno=%d (%s)\n", filename, errno, strerror(errno));
+		pr_err("cannot open log file %s, errno=%d (%s)\n", filename, errno, strerror(errno));
 		return;
 	}
 }
@@ -233,24 +237,25 @@ static int pr_msg(
 		if (gettimeofday(&tv, NULL) < 0) {
 			strncpy(ts, empty_ts, sizeof(ts));
 		} else {
+#if defined(HAVE_LOCALTIME_R)
 			time_t t = tv.tv_sec;
-			struct tm *tm;
+			struct tm tm;
 
-			tm = localtime(&t);
-			if (tm) {
-				(void)snprintf(ts, sizeof(ts), "%2.2d:%2.2d:%2.2d.%2.2ld ",
-					tm->tm_hour, tm->tm_min, tm->tm_sec,
-					(long)tv.tv_usec / 10000);
-			} else {
-				strncpy(ts, empty_ts, sizeof(ts));
-			}
+			(void)localtime_r(&t, &tm);
+
+			(void)snprintf(ts, sizeof(ts), "%2.2d:%2.2d:%2.2d.%2.2ld ",
+				tm.tm_hour, tm.tm_min, tm.tm_sec,
+				(long int)tv.tv_usec / 10000);
+#else
+			strncpy(ts, empty_ts, sizeof(ts));
+#endif
 		}
 	} else {
 		*ts = '\0';
 	}
 
 	if ((flag & (OPT_FLAGS_PR_FAIL | OPT_FLAGS_PR_WARN)) || (g_opt_flags & flag)) {
-		char buf[4096];
+		char buf[8192];
 		const char *type = "";
 
 		if (flag & OPT_FLAGS_PR_ERROR)
@@ -289,9 +294,9 @@ static int pr_msg(
 					abort_msg_emitted = true;
 					stress_continue_set_flag(false);
 
-					(void)snprintf(buf, sizeof(buf), "info: %d failures "
-						"reached, aborting stress "
-						"process\n", ABORT_FAILURES);
+					(void)snprintf(buf, sizeof(buf), "%s: %s%s [%" PRIdMAX "] "
+						"info: %d failures reached, aborting stress process\n",
+						g_app_name, ts, type, (intmax_t)pid, ABORT_FAILURES);
 					len = strlen(buf);
 					pr_log_write(buf, len);
 				}

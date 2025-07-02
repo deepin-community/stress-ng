@@ -1,6 +1,6 @@
 /*
  * Copyright (C)      2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-attribute.h"
 #include "core-out-of-memory.h"
+
+#include <ctype.h>
 
 typedef struct {
 	stress_args_t *args;	/* stress-ng arguments */
@@ -43,7 +45,9 @@ static const stress_help_t help[] = {
 static inline size_t PURE stress_munmap_log2(size_t n)
 {
 #if defined(HAVE_BUILTIN_CLZLL)
-	return (8 * sizeof(n)) - __builtin_clzll(n) - 1;
+	long long int lln = (long long int)n;
+
+	return (8 * sizeof(lln)) - __builtin_clzll(lln) - 1;
 #else
 	register size_t l2;
 
@@ -78,7 +82,8 @@ static void stress_munmap_range(
 	stress_args_t *args,
 	void *start,
 	void *end,
-	munmap_context_t *ctxt)
+	munmap_context_t *ctxt,
+	int *rc)
 {
 	const size_t page_shift = ctxt->page_shift;
 	const size_t page_size = args->page_size;
@@ -87,7 +92,7 @@ static void stress_munmap_range(
 	const size_t stride = stress_munmap_stride(n_pages + stress_mwc8());
 	size_t i, j;
 
-	for (i = 0, j = 0; stress_continue(args) && (i < n_pages); i++) {
+	for (i = 0, j = 0; LIKELY(stress_continue(args) && (i < n_pages)); i++) {
 		const size_t offset = j << page_shift;
 		void *addr = ((uint8_t *)start) + offset;
 		double t;
@@ -100,10 +105,10 @@ static void stress_munmap_range(
 			ctxt->count += 1.0;
 			stress_bogo_inc(args);
 
-			if ((shim_mincore(addr, page_size, vec) == 0) &&
-			    (vec[0] != 0)) {
+			if (UNLIKELY((shim_mincore(addr, page_size, vec) == 0) && (vec[0] != 0))) {
 				pr_fail("%s: unmapped page %p still resident in memory\n",
 					args->name, addr);
+				*rc = EXIT_FAILURE;
 			}
 		}
 		j += stride;
@@ -131,12 +136,14 @@ static void NORETURN MLOCKED_TEXT stress_munmap_sig_handler(int num)
 static int stress_munmap_child(stress_args_t *args, void *context)
 {
 	FILE *fp;
-	char path[PATH_MAX];
+	char path[4096];
 	char buf[4096], prot[5];
 	const pid_t pid = getpid();
 	munmap_context_t *ctxt = (munmap_context_t *)context;
 	void *start, *end, *offset;
-	int major, minor, n;
+	int n;
+	unsigned int major, minor;
+	int rc = EXIT_SUCCESS;
 	uint64_t inode;
 
 	VOID_RET(int, stress_sighandler(args->name, SIGSEGV, stress_munmap_sig_handler, NULL));
@@ -147,7 +154,8 @@ static int stress_munmap_child(stress_args_t *args, void *context)
 	if (!fp)
 		return EXIT_NO_RESOURCE;
 #if defined(HAVE_MADVISE) &&	\
-    defined(MADV_DONTDUMP)
+    (defined(MADV_DONTDUMP) || 	\
+     defined(MADV_PAGEOUT))
 	/*
 	 *  Vainly attempt to reduce any potential core dump size
 	 */
@@ -155,21 +163,33 @@ static int stress_munmap_child(stress_args_t *args, void *context)
 		size_t size;
 
 		*path = '\0';
-		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %s\n",
+		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %4095s\n",
 			&start, &end, prot, &offset, &major, &minor,
 			&inode, path);
 		if (n < 7)
 			continue;	/* bad sscanf data */
-		if (start >= end)
+		if (UNLIKELY(start >= end))
 			continue;	/* invalid address range */
 		size = (uintptr_t)end - (uintptr_t)start;
+#if defined(MADV_DONTDUMP)
 		(void)madvise(start, size, MADV_DONTDUMP);
+#endif
+#if defined(MADV_PAGEOUT)
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			(void)madvise(start, size, MADV_PAGEOUT);
+#endif
+
 	}
-	(void)rewind(fp);
+	errno = 0;
+	rewind(fp);
+	if (UNLIKELY(errno < 0)) {
+		(void)fclose(fp);
+		return EXIT_NO_RESOURCE;
+	}
 #endif
 	while (stress_continue(args) && fgets(buf, sizeof(buf), fp)) {
 		*path = '\0';
-		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %s\n",
+		n = sscanf(buf, "%p-%p %4s %p %x:%x %" PRIu64 " %4095s\n",
 			&start, &end, prot, &offset, &major, &minor,
 			&inode, path);
 		/*
@@ -178,9 +198,9 @@ static int stress_munmap_child(stress_args_t *args, void *context)
 		 */
 		if (n < 7)
 			continue;	/* bad sscanf data */
-		if (start >= end)
+		if (UNLIKELY(start >= end))
 			continue;	/* invalid address range */
-		if (start == context)
+		if (UNLIKELY(start == context))
 			continue;	/* don't want to unmap shared context */
 		if (((const void *)args >= start) && ((const void *)args < end))
 			continue;	/* don't want to unmap shard args */
@@ -198,14 +218,14 @@ static int stress_munmap_child(stress_args_t *args, void *context)
 			continue;	/* don't unmap non-readable pages */
 		if (prot[2] == 'x')
 			continue;	/* don't unmap executable pages */
-		stress_munmap_range(args, start, end, ctxt);
+		stress_munmap_range(args, start, end, ctxt, &rc);
 	}
 	(void)fclose(fp);
 
-	if (stress_continue(args))
+	if (LIKELY(stress_continue(args)))
 		stress_bogo_inc(args);	/* bump per stressor */
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 static inline void stress_munmap_clean_path(char *path)
@@ -231,13 +251,14 @@ static int stress_munmap(stress_args_t *args)
 	double rate;
 	char exec_path[PATH_MAX];
 
-	ctxt = mmap(NULL, sizeof(*ctxt), PROT_READ | PROT_WRITE,
+	ctxt = (munmap_context_t *)mmap(NULL, sizeof(*ctxt), PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (ctxt == MAP_FAILED) {
 		pr_inf_skip("%s: skipping stressor, cannot mmap context buffer, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(ctxt, sizeof(*ctxt), "context");
 	ctxt->duration = 0.0;
 	ctxt->count = 0.0;
 	ctxt->args = args;
@@ -251,7 +272,10 @@ static int stress_munmap(stress_args_t *args)
 	}
 	stress_munmap_clean_path(ctxt->exec_path);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	while (stress_continue(args)) {
 		VOID_RET(int, stress_oomable_child(args, (void *)ctxt, stress_munmap_child, STRESS_OOMABLE_QUIET));
 	}
@@ -259,24 +283,24 @@ static int stress_munmap(stress_args_t *args)
 
 	rate = ctxt->count > 0.0 ? ctxt->duration / ctxt->count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per page mmap()",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)ctxt, sizeof(*ctxt));
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_munmap_info = {
+const stressor_info_t stress_munmap_info = {
 	.stressor = stress_munmap,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
-stressor_info_t stress_munmap_info = {
+const stressor_info_t stress_munmap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
         .help = help,
 	.unimplemented_reason = "only supported on Linux"

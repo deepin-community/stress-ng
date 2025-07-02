@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -37,6 +37,7 @@ static const stress_help_t help[] = {
 	{ NULL,	"sem-sysv N",		"start N workers doing System V semaphore operations" },
 	{ NULL,	"sem-sysv-ops N",	"stop after N System V sem bogo operations" },
 	{ NULL,	"sem-sysv-procs N",	"number of processes to start per worker" },
+	{ NULL, "sem-sysv-setall",	"exercise semctl SETALL (will alter the processes' semaphore set)"},
 	{ NULL,	NULL,			NULL }
 };
 
@@ -45,24 +46,15 @@ static const stress_help_t help[] = {
 typedef union stress_semun {
 	int              val;	/* Value for SETVAL */
 	struct semid_ds *buf;	/* Buffer for IPC_STAT, IPC_SET */		/* cppcheck-suppress unusedStructMember */
-	unsigned short  *array;	/* Array for GETALL, SETALL */			/* cppcheck-suppress unusedStructMember */
+	unsigned short int *array;	/* Array for GETALL, SETALL */		/* cppcheck-suppress unusedStructMember */
 	struct seminfo  *__buf;	/* Buffer for IPC_INFO (Linux-specific) */	/* cppcheck-suppress unusedStructMember */
 } stress_semun_t;
 #endif
 
-static int stress_set_semaphore_sysv_procs(const char *opt)
-{
-	uint64_t semaphore_sysv_procs;
-
-	semaphore_sysv_procs = stress_get_uint64(opt);
-	stress_check_range("sem-sysv-procs", semaphore_sysv_procs,
-		MIN_SEM_SYSV_PROCS, MAX_SEM_SYSV_PROCS);
-	return stress_set_setting("sem-sysv-procs", TYPE_ID_UINT64, &semaphore_sysv_procs);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sem_sysv_procs,	stress_set_semaphore_sysv_procs },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_sem_sysv_procs,  "sem-sysv-procs",  TYPE_ID_UINT64, MIN_SEM_SYSV_PROCS, MAX_SEM_SYSV_PROCS, NULL },
+	{ OPT_sem_sysv_setall, "sem-sysv-setall", TYPE_ID_BOOL, 0, 1, 0 },
+	END_OPT,
 };
 
 #if defined(HAVE_SEM_SYSV) &&	\
@@ -71,9 +63,11 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
  *  stress_semaphore_sysv_init()
  *	initialise a System V semaphore
  */
-static void stress_semaphore_sysv_init(void)
+static void stress_semaphore_sysv_init(const uint32_t instances)
 {
 	int count = 0, sem_id;
+
+	(void)instances;
 
 	/* Exercise invalid nsems, EINVAL */
 	sem_id = semget((key_t)stress_mwc16(), -1, IPC_CREAT | S_IRUSR | S_IWUSR);
@@ -150,7 +144,7 @@ static void stress_semaphore_sysv_get_procinfo(bool *get_procinfo)
 		char buffer[1024];
 
 		ret = read(fd, buffer, sizeof(buffer));
-		if (ret <= 0)
+		if (UNLIKELY(ret <= 0))
 			break;
 	}
 	(void)close(fd);
@@ -161,7 +155,9 @@ static void stress_semaphore_sysv_get_procinfo(bool *get_procinfo)
  *  stress_semaphore_sysv_thrash()
  *	exercise the semaphore
  */
-static int OPTIMIZE3 stress_semaphore_sysv_thrash(stress_args_t *args)
+static int OPTIMIZE3 stress_semaphore_sysv_thrash(
+	stress_args_t *args,
+	const bool semaphore_sysv_setall)
 {
 	const int sem_id = g_shared->sem_sysv.sem_id;
 	int rc = EXIT_SUCCESS;
@@ -228,7 +224,7 @@ static int OPTIMIZE3 stress_semaphore_sysv_thrash(stress_args_t *args)
 				timeout.tv_sec = 1;
 				timeout.tv_nsec = 0;
 				ret = semtimedop(sem_id, &semwait, 1, &timeout);
-				if ((ret < 0) && ((errno == ENOSYS) || (errno == EINVAL))) {
+				if (UNLIKELY((ret < 0) && ((errno == ENOSYS) || (errno == EINVAL)))) {
 					got_semtimedop = false;
 					ret = semop(sem_id, &semwait, 1);
 				}
@@ -289,17 +285,17 @@ timed_out:
 			nsems = ds.sem_nsems;
 			if (nsems < 64)
 				nsems = 64;
-			s.array = calloc(nsems, sizeof(*s.array));
+			s.array = (unsigned short int *)calloc(nsems, sizeof(*s.array));
 			if (s.array) {
 				VOID_RET(int, semctl(sem_id, 2, GETALL, s));
-#if defined(SETALL) && 0
+#if defined(SETALL)
 				/*
 				 *  SETALL across the semaphores will clobber the state
 				 *  and cause waits on semaphores because of the unlocked
 				 *  state change. Currently this is disabled.
 				 */
-				if (ret == 0)
-					ret = semctl(sem_id, 2, SETALL, s);
+				if ((ret == 0) && (semaphore_sysv_setall))
+					VOID_RET(int, semctl(sem_id, 2, SETALL, s));
 #endif
 				free(s.array);
 			}
@@ -495,7 +491,7 @@ timed_out:
 		{
 			struct sembuf semwait;
 
-			semwait.sem_num = (unsigned short)-1;
+			semwait.sem_num = (unsigned short int)-1;
 			semwait.sem_op = -1;
 			semwait.sem_flg = SEM_UNDO;
 
@@ -521,24 +517,30 @@ timed_out:
  *  semaphore_sysv_spawn()
  *	spawn a process
  */
-static pid_t semaphore_sysv_spawn(stress_args_t *args)
+static pid_t semaphore_sysv_spawn(
+	stress_args_t *args,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid,
+	const bool semaphore_sysv_setall)
 {
-	pid_t pid;
-
 again:
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
 		return -1;
-	}
-	if (pid == 0) {
+	} else if (s_pid->pid == 0) {
+		s_pid->pid = getpid();
+		stress_sync_start_wait_s_pid(s_pid);
+
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
 
-		_exit(stress_semaphore_sysv_thrash(args));
+		_exit(stress_semaphore_sysv_thrash(args, semaphore_sysv_setall));
+	} else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
 
 /*
@@ -547,10 +549,11 @@ again:
  */
 static int stress_sem_sysv(stress_args_t *args)
 {
-	pid_t pids[MAX_SEM_SYSV_PROCS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	uint64_t i;
 	uint64_t semaphore_sysv_procs = DEFAULT_SEM_SYSV_PROCS;
 	int rc = EXIT_SUCCESS;
+	bool semaphore_sysv_setall = false;
 
 	if (stress_sigchld_set_handler(args) < 0)
 		return EXIT_NO_RESOURCE;
@@ -566,44 +569,57 @@ static int stress_sem_sysv(stress_args_t *args)
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
 			semaphore_sysv_procs = MIN_SEM_SYSV_PROCS;
 	}
-
+	(void)stress_get_setting("sem-sysv-setall", &semaphore_sysv_setall);
 
 	if (stress_sighandler(args->name, SIGCHLD, stress_sighandler_nop, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+	s_pids = stress_sync_s_pids_mmap(MAX_SEM_SYSV_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, MAX_SEM_SYSV_PROCS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
 
-	(void)shim_memset(pids, 0, sizeof(pids));
 	for (i = 0; i < semaphore_sysv_procs; i++) {
-		pids[i] = semaphore_sysv_spawn(args);
-		if (!stress_continue_flag() || pids[i] < 0)
+		stress_sync_start_init(&s_pids[i]);
+
+		if (semaphore_sysv_spawn(args, &s_pids_head, &s_pids[i], semaphore_sysv_setall) < 0)
+			goto reap;
+		if (UNLIKELY(!stress_continue_flag()))
 			goto reap;
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Wait for termination */
 	while (stress_continue(args))
 		pause();
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	stress_kill_and_wait_many(args, pids, semaphore_sysv_procs, SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, semaphore_sysv_procs, SIGALRM, true);
+	stress_sync_s_pids_munmap(s_pids, MAX_SEM_SYSV_PROCS);
 
 	return rc;
 }
 
-stressor_info_t stress_sem_sysv_info = {
+const stressor_info_t stress_sem_sysv_info = {
 	.stressor = stress_sem_sysv,
 	.init = stress_semaphore_sysv_init,
 	.deinit = stress_semaphore_sysv_deinit,
-	.class = CLASS_OS | CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_SCHEDULER | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sem_sysv_info = {
+const stressor_info_t stress_sem_sysv_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_SCHEDULER | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/sem.h"

@@ -8,12 +8,12 @@ stress-ng will stress test a computer system in various selectable ways. It
 was designed to exercise various physical subsystems of a computer as well as
 the various operating system kernel interfaces. Stress-ng features:
 
-  * 320+ stress tests
-  * 80+ CPU specific stress tests that exercise floating point, integer,
+  * 360+ stress tests
+  * 100+ CPU specific stress tests that exercise floating point, integer,
     bit manipulation and control flow
-  * 20+ virtual memory stress tests
-  * 40+ file system stress tests
-  * 30+ memory/CPU cache stress tests
+  * 60+ virtual memory stress tests
+  * 80+ file system stress tests
+  * 50+ memory/CPU cache stress tests
   * portable: builds on Linux (Debian, Devuan, RHEL, Fedora, Centos, Slackware
     OpenSUSE, Ubuntu, etc..), Solaris, FreeBSD, NetBSD, OpenBSD, DragonFlyBSD,
     Minix, Android, MacOS X, Serenity OS, GNU/Hurd, Haiku, Windows Subsystem
@@ -37,16 +37,6 @@ Running stress-ng with root privileges will adjust out of memory settings on
 Linux systems to make the stressors unkillable in low memory situations, so use
 this judiciously. With the appropriate privilege, stress-ng can allow the ionice
 class and ionice levels to be adjusted, again, this should be used with care.
-
-## Tarballs
-
-Tarballs of each version of stress-ng can be downloaded using the URL:
-
-https://github.com/ColinIanKing/stress-ng/tarball/version
-
-where version is the relevant version number, for example:
-
-https://github.com/ColinIanKing/stress-ng/tarball/V0.13.05
 
 ## Running latest stress-ng snapshot in a container
 
@@ -80,147 +70,24 @@ build: (note libattr is not required for more recent disto releases).
 
 Debian, Ubuntu:
 
-  * gcc
-  * g++
-  * libacl1-dev
-  * libaio-dev
-  * libapparmor-dev
-  * libatomic1
-  * libattr1-dev
-  * libbsd-dev
-  * libcap-dev
-  * libeigen3-dev
-  * libgbm-dev
-  * libgcrypt-dev
-  * libglvnd-dev
-  * libipsec-mb-dev
-  * libjpeg-dev
-  * libjudy-dev
-  * libkeyutils-dev
-  * libkmod-dev
-  * libmd-dev
-  * libmpfr-dev
-  * libsctp-dev
-  * libxxhash-dev
-  * zlib1g-dev
+  * gcc g++ libacl1-dev libaio-dev libapparmor-dev libatomic1 libattr1-dev libbsd-dev libcap-dev libeigen3-dev libgbm-dev libcrypt-dev libglvnd-dev libipsec-mb-dev libjpeg-dev libjudy-dev libkeyutils-dev libkmod-dev libmd-dev libmpfr-dev libsctp-dev libxxhash-dev zlib1g-dev
 
 RHEL, Fedora, Centos:
 
-  * gcc
-  * g++
-  * eigen3-devel
-  * Judy-devel
-  * keyutils-libs-devel
-  * kmod-devel
-  * libacl-devel
-  * libaio-devel
-  * libatomic
-  * libattr-devel
-  * libbsd-devel
-  * libcap-devel
-  * libgbm-devel
-  * libgcrypt-devel
-  * libglvnd-core-devel
-  * libglvnd-devel
-  * libjpeg-devel
-  * libmd-devel
-  * mpfr-devel
-  * libX11-devel
-  * libXau-devel
-  * libxcb-devel
-  * lksctp-tools-devel
-  * xorg-x11-proto-devel
-  * xxhash-devel
-  * zlib-devel
+  * gcc g++ eigen3-devel Judy-devel keyutils-libs-devel kmod-devel libacl-devel libaio-devel libatomic libattr-devel libbsd-devel libcap-devel libgbm-devel libcrypt-devel libglvnd-core-devel libglvnd-devel libjpeg-devel libmd-devel mpfr-devel libX11-devel libXau-devel libxcb-devel lksctp-tools-devel xorg-x11-proto-devel xxhash-devel zlib-devel
 
 RHEL, Fedora, Centos (static builds):
 
-  * gcc
-  * g++
-  * eigen3-devel
-  * glibc-static
-  * Judy-devel
-  * keyutils-libs-devel
-  * libacl-devel
-  * libaio-devel
-  * libatomic-static
-  * libattr-devel
-  * libbsd-devel
-  * libcap-devel
-  * libgbm-devel
-  * libgcrypt-devel
-  * libglvnd-core-devel
-  * libglvnd-devel
-  * libjpeg-devel
-  * libmd-devel
-  * libX11-devel
-  * libXau-devel
-  * libxcb-devel
-  * lksctp-tools-devel
-  * mpfr-devel
-  * xorg-x11-proto-devel
-  * xxhash-devel
-  * zlib-devel
+  * gcc g++ eigen3-devel glibc-static Judy-devel keyutils-libs-devel libacl-devel libaio-devel libatomic-static libattr-devel libbsd-devel libcap-devel libgbm-devel libcrypt-devel libglvnd-core-devel libglvnd-devel libjpeg-devel libmd-devel libX11-devel libXau-devel libxcb-devel lksctp-tools-devel mpfr-devel xorg-x11-proto-devel xxhash-devel zlib-devel
 
 SUSE:
-  * gcc
-  * gcc-c++
-  * eigen3-devel
-  * keyutils-devel
-  * libaio-devel
-  * libapparmor-devel
-  * libatomic1
-  * libattr-devel
-  * libbsd-devel
-  * libcap-devel
-  * libgbm-devel
-  * libglvnd-devel
-  * libjpeg-turbo
-  * libkmod-devel
-  * libmd-devel
-  * libseccomp-devel
-  * lksctp-tools-devel
-  * mpfr-devel
-  * xxhash-devel
-  * zlib-devel
+  * gcc gcc-c++ eigen3-devel keyutils-devel libaio-devel libapparmor-devel libatomic1 libattr-devel libbsd-devel libcap-devel libgbm-devel libglvnd-devel libjpeg-turbo libkmod-devel libmd-devel libseccomp-devel lksctp-tools-devel mpfr-devel xxhash-devel zlib-devel
 
 ClearLinux:
-  * devpkg-acl
-  * devpkg-eigen
-  * devpkg-Judy
-  * devpkg-kmod
-  * devpkg-attr
-  * devpkg-libbsd
-  * devpkg-libgcrypt
-  * devpkg-libjpeg-turbo
-  * devpkg-libsctp
-  * devpkg-mesa
+  * devpkg-acl devpkg-eigen devpkg-Judy devpkg-kmod devpkg-attr devpkg-libbsd devpkg-libjpeg-turbo devpkg-libsctp devpkg-mesa
 
 Alpine Linux:
-  * build-base
-  * eigen-dev
-  * jpeg-dev
-  * judy-dev
-  * keyutils-dev
-  * kmod-dev
-  * libacl-dev
-  * libaio-dev
-  * libatomic
-  * libattr
-  * libbsd-dev
-  * libcap-dev
-  * libgcrypt-dev
-  * libmd-dev
-  * libseccomp-dev
-  * lksctp-tools-dev
-  * mesa-dev
-  * mpfr-dev
-  * xxhash-dev
-  * zlib-dev
-
-Snaps:
-  * stress-ng is not intended to be snap'd with snapcraft. Doing so is strictly
-    against the wishes of the project maintainer and main developer.
+  * build-base eigen-dev jpeg-dev judy-dev keyutils-dev kmod-dev libacl-dev libaio-dev libatomic libattr libbsd-dev libcap-dev libmd-dev libseccomp-dev lksctp-tools-dev mesa-dev mpfr-dev xxhash-dev zlib-dev
 
 NOTE: the build will try to detect build dependencies and will build an image
 with functionality disabled if the support libraries are not installed.
@@ -238,94 +105,150 @@ make -j are supported.
 
 To build on BSD systems, one requires gcc and GNU make:
 ```
-        CC=gcc gmake clean
-	CC=gcc gmake
+    CC=gcc gmake clean
+    CC=gcc gmake
 ```
 
 To build on OS X systems, just use:
 ```
-	make clean
-	make -j
+    make clean
+    make -j
 ```
 
 To build on MINIX, gmake and clang are required:
 ```
-	CC=clang gmake clean
-	CC=clang gmake
+    CC=clang gmake clean
+    CC=clang gmake
 ```
 
 To build on SunOS, one requires GCC and GNU make, build using:
 ```
-	CC=gcc gmake clean
-	CC=gcc gmake
+    CC=gcc gmake clean
+    CC=gcc gmake
 ```
 
 To build on Dilos, one requires GCC and GNU make, build using:
 ```
-	CC=gcc gmake clean
-	CC=gcc gmake
+    CC=gcc gmake clean
+    CC=gcc gmake
 ```
 
-To build on Haiku Alpha 4:
+To build on Haiku R1/beta5:
 ```
-	make clean
-	make
+    # GCC
+    make clean
+    make
+    # Clang
+    CC=clang make clean
+    CC=clang make
 ```
 
 To build a static image (example, for Android), use:
 ```
-	make clean
-	STATIC=1 make
-```
+# path to Android NDK
+# get NDK from https://developer.android.com/ndk/downloads
+    export NDK=$HOME/android-ndk-r27c
+    export PATH=$PATH:$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+    export TARGET=aarch64-linux-android
+    # Define Android API level
+    export API=27
+    export CC=$TARGET$API-clang
 
-To build with full warnings enabled:
-```
-	make clean
-	PEDANTIC=1 make
+    make clean
+    STATIC=1 make
 ```
 
 To build with the Tiny C compiler:
 ```
-	make clean
-	CC=tcc make
+    make clean
+    CC=tcc make
 ```
 
 To build  with the PCC portable C compiler use:
 ```
-	make clean
-	CC=pcc make
+    make clean
+    CC=pcc make
 ```
 
 To build with the musl C library:
 ```
-	make clean
-	CC=musl-gcc
+    make clean
+    CC=musl-gcc
 ```
 
 To build with the Intel C compiler icc use:
 ```
-	make clean
-	CC=icc make
+    make clean
+    CC=icc make
 ```
 
 To build with the Intel C compiler icx use:
 ```
-	make clean
-	CC=icx make
+    make clean
+    CC=icx make
 ```
 
 To perform a cross-compilation using gcc, use a static build, specify
 the toolchain (both CC and CXX). For example, a mips64 cross build:
 
 ```
-	make clean
-	STATIC=1 CC=mips64-linux-gnuabi64-gcc CXX=mips64-linux-gnuabi64-g++ make -j $(nproc)
+    make clean
+    STATIC=1 CC=mips64-linux-gnuabi64-gcc CXX=mips64-linux-gnuabi64-g++ make -j $(nproc)
 ```
 
-To build with debug (-g) enabled use:
+To perform a cross-compile for qnx, for example, a aarch64 qnx cross build:
+
 ```
-	make clean
-	DEBUG=1 make
+    make clean
+    CC=aarch64-unknown-nto-qnx7.1.0-gcc CXX=aarch64-unknown-nto-qnx7.1.0-g++ STATIC=1 make
+```
+
+To generate a PDF version of the manual (requires ps2pdf to be installed)
+```
+    make pdf
+```
+
+Build option: DEBUG, build with debug (-g) enabled:
+```
+    make clean
+    DEBUG=1 make
+```
+
+Build option: LTO, Link Time Optimization (~1-2% performance improvement on compute stressors):
+```
+    make clean
+    LTO=1 make
+```
+
+Build option: PEDANTIC, enable pedantic build flags:
+```
+    make clean
+    PEDANTIC=1 make
+```
+
+Build option: GARBAGE_COLLECT, warn of unused code:
+```
+    make clean
+    GARBAGE_COLLECT=1 make
+```
+
+Build option: UNEXPECTED=1, warn of unexpected #ifdef'd out code:
+```
+    make clean
+    UNEXPECTED=1 make
+```
+
+Build option: SOURCE_DATE_EPOCH=seconds since epoch, add build date
+```
+    make clean
+    SOURCE_DATE_EPOCH=1750685870 make
+```
+
+Build option: EXTRA_BUILDINFO=1, add CFLAGS, CXXFLAGS and LDFLAGS to --buildinfo option
+NOTE: This can lead to build information being leaked and is not recommended for any distro releases.
+```
+    make clean
+    EXTRA_BUILDINFO=1 make -j 10
 ```
 
 ## Contributing to stress-ng:
@@ -397,14 +320,61 @@ stress-ng: info:  [1171584] vdso               9.88 nanoseconds per call (averag
 
 Generate and measure branch misses using perf metrics:
 ```
-sudo stress-ng --branch 1 --perf -t 10 --stdout | grep Branch
+sudo stress-ng --branch 1 --perf -t 10 | grep Branch
 stress-ng: info:  [1171714]                604,703,327 Branch Instructions            53.30 M/sec
 stress-ng: info:  [1171714]                598,760,234 Branch Misses                  52.77 M/sec (99.02%)
 ```
 
+Run permutations of I/O stressors on a ZFS file system, excluding the rawdev stressor with kernel log error checking:
+```
+stress-ng --class io --permute 0 -x rawdev -t 1m --vmstat 1 --klog-check  --temp-path /zfs-pool/test
+```
+
+x86 only: measure power using the RAPL interfaces on 8 concurrent 3D matrix stressors with verification enabled.
+Note that reading RAPL requires root permission.
+
+```
+sudo stress-ng --matrix-3d 8 --matrix-3d-size 512 --rapl -t 10 --verify
+stress-ng: info:  [4563] setting to a 10 secs run per stressor
+stress-ng: info:  [4563] dispatching hogs: 8 matrix-3d
+stress-ng: info:  [4563] matrix-3d:
+stress-ng: info:  [4563]  core                     6.11 W
+stress-ng: info:  [4563]  dram                     2.71 W
+stress-ng: info:  [4563]  pkg-0                    8.20 W
+stress-ng: info:  [4563]  psys                    16.90 W
+stress-ng: info:  [4563]  uncore                   0.06 W
+stress-ng: info:  [4563] skipped: 0
+stress-ng: info:  [4563] passed: 8: matrix-3d (8)
+stress-ng: info:  [4563] failed: 0
+stress-ng: info:  [4563] metrics untrustworthy: 0
+stress-ng: info:  [4563] successful run completed in 11.38 secs
+```
+
+Measure C-state residency:
+
+```
+stress-ng --intmath 0 -t 1m --c-states
+stress-ng: info:  [6998] setting to a 1 min run per stressor
+stress-ng: info:  [6998] dispatching hogs: 8 intmath
+stress-ng: info:  [6998] intmath:
+stress-ng: info:  [6998]  C0     99.98%
+stress-ng: info:  [6998]  C1      0.00%
+stress-ng: info:  [6998]  C1E     0.01%
+stress-ng: info:  [6998]  C3      0.00%
+stress-ng: info:  [6998]  C6      0.01%
+stress-ng: info:  [6998]  C7s     0.00%
+stress-ng: info:  [6998]  C8      0.00%
+stress-ng: info:  [6998]  POLL    0.00%
+stress-ng: info:  [6998] skipped: 0
+stress-ng: info:  [6998] passed: 8: intmath (8)
+stress-ng: info:  [6998] failed: 0
+stress-ng: info:  [6998] metrics untrustworthy: 0
+stress-ng: info:  [6998] successful run completed in 1 min
+```
+
 ## Bugs and regressions found with stress-ng
 
-stress-ng has found Kernel and QEMU bugs/regressions and appropriate fixes have been landed to address these issues:
+stress-ng has found various Kernel, QEMU bugs/regressions, and libc bugs; appropriate fixes have been landed to address these issues:
 
 2015:
 * [KEYS: ensure we free the assoc array edit if edit is valid](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=ca4da5dd1f99fe9c59f1709fb43e818b18ad20e0)
@@ -494,6 +464,60 @@ stress-ng has found Kernel and QEMU bugs/regressions and appropriate fixes have 
 * [bcachefs: Clear btree_node_just_written() when node reused or evicted](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=0b438c5bfaebda3fdf6edc35d9572d4e2f66aef1)
 * [tracing: Fix incomplete locking when disabling buffered events](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=7fed14f7ac9cf5e38c693836fe4a874720141845)
 * [mm: migrate: fix getting incorrect page mapping during page migration](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=d1adb25df7111de83b64655a80b5a135adbded61)
+* [mm: mmap: map MAP_STACK to VM_NOHUGEPAGE](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=c4608d1bf7c6536d1a3d233eb21e50678681564e)
+
+2024:
+* [fs: improve dump_mapping() robustness](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=8b3d838139bcd1e552f1899191f734264ce2a1a5)
+* [tracing: Ensure visibility when inserting an element into tracing_map](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=2b44760609e9eaafc9d234a6883d042fc21132a7)
+* [connector/cn_proc: revert "connector: Fix proc_event_num_listeners count not cleared"](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=8929f95b2b587791a7dcd04cc91520194a76d3a6)
+* [powerpc/pseries: fix accuracy of stolen time](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=cbecc9fcbbec60136b0180ba0609c829afed5c81)
+* [OpenBSD: libm: segfault in sincosl](https://marc.info/?l=openbsd-bugs&m=171453603728385&w=2)
+* [opening and closing /dev/dri/card0 in a QEMU KVM instance will shutdown system, 6.10.0-rc6+](https://bugzilla.kernel.org/show_bug.cgi?id=219007)
+* [uprobes: prevent mutex_lock() under rcu_read_lock()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=699646734ab51bf5b1cd4a7a30c20074f6e74f6e)
+* [system lock up with RT kernel on amd64](https://bugs.launchpad.net/ubuntu-realtime/+bug/2068900)
+* [WARNING: CPU: 17 PID: 118273 at kernel/sched/deadline.c:794 setup_new_dl_entity+0x12c/0x1e8](https://bugs.launchpad.net/ubuntu-realtime/+bug/2068720)
+* [kernel oops in pick_next_task_fair in 6.8.1-1002-realtime kernel](https://bugs.launchpad.net/ubuntu-realtime/+bug/2068615)
+* [kernel oops in aafs_create in 6.8.1-1002-realtime kernel](https://bugs.launchpad.net/ubuntu-realtime/+bug/2068602)
+* [mm: optimize the redundant loop](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=cf3f9a593dab87a032d2b6a6fb205e7f3de4f0a1)
+* [MultiVM - L2 guest(s) running stress-ng getting stuck at booting after triggering crash](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2077722)
+* [powerpc/qspinlock: Fix deadlock in MCS queue](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=734ad0af3609464f8f93e00b6c0de1e112f44559)
+* [kernel regression with ext4 and ea_inode mount flags and exercising xattrs](https://bugs.launchpad.net/linux/+bug/2080853)
+* [sched_ext: TASK_DEAD tasks must be switched into SCX on ops_enable](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=a8532fac7b5d27b8d62008a89593dccb6f9786ef)
+* [sched/deadline: Fix task_struct reference leak](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=b58652db66c910c2245f5bee7deca41c12d707b9)
+* [sched_ext: Split the global DSQ per NUMA node](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=b7b3b2dbae73b412c2d24b3d0ebf1110991e4510)
+* [calling getcpu with misaligned address causes kernel panic](https://bugzilla.kernel.org/show_bug.cgi?id=219339)
+* [cygwin: pread/pwrite: prevent EBADF error after fork()](https://sourceware.org/pipermail/cygwin-patches/2024q3/012793.html)
+* [cygwin 3.5.4-1: signal handling destroys 'long double' values](https://sourceware.org/pipermail/cygwin/2024-October/256503.html)
+* [cygwin: timer_delete: Fix return value](https://sourceware.org/pipermail/cygwin-patches/2024q4/012803.html)
+* [cygwin: change pthread_sigqueue() to accept thread id](https://cygwin.com/git/?p=newlib-cygwin.git;a=commit;h=1e8c92e21d386d2e4a29fa92e8258979ff19ae6b)
+* [security/keys: fix slab-out-of-bounds in key_task_permission](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?4a74da044ec9ec8679e6beccc4306b936b62873f)
+* [sched_ext: Don't hold scx_tasks_lock for too long](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?b07996c7abac0fe3f70bf74b0b3f76eb7852ef5a)
+* [sched/numa: Fix the potential null pointer dereference in task_numa_work()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?9c70b2a33cd2aa6a5a59c5523ef053bd42265209)
+* [reiserfs panic using fsize stressor](https://bugzilla.kernel.org/show_bug.cgi?id=219497)
+* [soft-lockups: mm/page_alloc: add cond_resched in __drain_all_pages()](https://lore.kernel.org/linux-mm/3b000941-b1b6-befa-4ec9-2bff63d557c1@google.com/T/)]
+* [can: m_can: fix missed interrupts with m_can_pci](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=743375f8deee360b0e902074bab99b0c9368d42f)
+* [sched/deadline: Fix warning in migrate_enable for boosted tasks](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=0664e2c311b9fa43b33e3e81429cd0c2d7f9c638)
+* [iomap: elide flush from partial eof zero range](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=fde4c4c3ec1c1590eb09f97f9525fa7dd8df8343)
+* [opening /dev/snapshot twice causes oops](https://bugzilla.kernel.org/show_bug.cgi?id=219975)
+* [Cygwin: cygwin 3.5.4-1: lockf() aborts on overlap and does not fail on overflow](https://cygwin.com/pipermail/cygwin/2024-October/256528.html)
+* [Cygwin: cygwin 3.5.4-1: signal handling destroys 'long double' values](https://cygwin.com/pipermail/cygwin/2024-October/256503.html)
+* [Cygwin: Segfault in pthread_sigqueue() or sigtimewait()](https://cygwin.com/pipermail/cygwin/2024-November/256762.html)
+* [Cygwin: stress-ng --lockmix 1 crashes with *** fatal error - NtCreateEvent(lock): 0xC0000035](https://cygwin.com/pipermail/cygwin/2024-November/256750.html)
+* [Cygwin: SIGKILL may no longer work after many SIGCONT/SIGSTOP signals](https://cygwin.com/pipermail/cygwin/2024-November/256744.html)
+
+2025:
+* [Tegra Security Engine driver improvements](https://www.spinics.net/lists/kernel/msg5546707.html)
+* [sched_ext: Fix lock imbalance in dispatch_to_local_dsq()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=1626e5ef0b00386a4fd083fa7c46c8edbd75f9b4)
+* [mm/zswap: fix inconsistency when zswap_store_page() fails](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=63895d20d63b446f5049a963983489319c2ea3e2)
+* [LoongArch: Set max_pfn with the PFN of the last page](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=c8477bb0a8e7f6b2e47952b403c5cb67a6929e55)
+* [net: ipv4: Fix destination address determination in flowi4_init_output](https://lkml.org/lkml/2025/5/8/536)
+* [Cygwin: mq_send()/mq_receive() may never return if used from threads](https://cygwin.com/pipermail/cygwin/2025-January/257120.html)
+* [Cygwin: mq_send(-1, ...) segfaults instead of failing with EBADF](https://cygwin.com/pipermail/cygwin/2025-January/257090.html)
+* [Cygwin: STATUS_HEAP_CORRUPTION if signal arrives when x86 direction flag is set](https://cygwin.com/pipermail/cygwin/2025-March/257704.html)
+* [Cygwin: No errno set after too many open("/dev/ptmx", ...)](https://cygwin.com/pipermail/cygwin/2025-March/257786.html)
+* [Cygwin: strace: infinite exception c0000005 loop on segmentation fault](https://cygwin.com/pipermail/cygwin/2025-May/258144.html)
+* [Cygwin: Hang or crash after multiple SIGILL or SIGSEGV and siglongjmp](https://sourceware.org/pipermail/cygwin/2025-March/257726.html)
+* [binder: fix use-after-free in binderfs_evict_inode()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=8c0a559825281764061a127632e5ad273f0466ad)
 
 ## Kernel improvements that used stress-ng
 
@@ -524,6 +548,21 @@ stress-ng has found Kernel and QEMU bugs/regressions and appropriate fixes have 
 * [module: add debug stats to help identify memory pressure](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=df3e764d8e5cd416efee29e0de3c93917dff5d33)
 * [module: avoid allocation if module is already present and ready](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=064f4536d13939b6e8cdb71298ff5d657f4f8caa)
 * [sched: Interleave cfs bandwidth timers for improved single thread performance at low utilization](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=41abdba9374734b743019fc1cc05e3225c82ba6b)
+* [mm/khugepaged: remove redundant try_to_freeze()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=b39ca208403c8f2c17dab1fbfef1f5ecaff25e53)
+
+2024:
+* [mm/vmalloc: eliminated the lock contention from twice to once](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=aaab830ad887629156ef17097c2ad24ce6fb8177)
+* [mm: switch mm->get_unmapped_area() to a flag](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=529ce23a764f25d172198b4c6ba90f1e2ad17f93)
+* [mm: always inline _compound_head() with CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP=y](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=ef5f379de302884b9b7ad9b62587a942a9f0bb55)
+* [mm: optimize the redundant loop of mm_update_owner_next()](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=76ba6acfcce871db13ad51c6dc8f56fec2e92853)
+
+2025:
+* [sched: Add unlikey branch hints to several system calls](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=1a5d3492f8e14719184945893c610e0802c05533)
+* [mm/mincore: improve performance by adding an unlikely hint](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=9fa26fb554baaf71826814804749f5cff130c4d6)
+* [select: do_pollfd: add unlikely branch hint return path](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=5730609ffd7e558e1e3305d0c6839044e8f6591b)
+* [select: core_sys_select add unlikely branch hint on return path](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=6b24a702ecf167ab61456276bb72133d84ccca45)
+
+I appreciate information concerning kernel bugs or performance regressions found with stress-ng.
 
 ## Presentations
 
@@ -531,151 +570,11 @@ stress-ng has found Kernel and QEMU bugs/regressions and appropriate fixes have 
 * [Video of the above presentation](https://www.youtube.com/watch?v=8QaXStKfq3A)
 * [Linux Foundation Mentoring Session, May 2022](https://www.youtube.com/watch?v=gD3Hn02VSHA)
 * [Kernel Recipes presentation, Sept 2023](https://www.youtube.com/watch?v=PD0NOZCTIVQ)
+* [Linux Foundation, ELISA, June 2024](https://www.youtube.com/watch?v=-B1K-xpICtQ)
 
 ## Citations
 
-* [Linux kernel performance test tool](https://cdrdv2-public.intel.com/723902/lkp-tests.pdf)
-
-2015:
-* [Enhancing Cloud energy models for optimizing datacenters efficiency](https://cs.gmu.edu/~menasce/cs788/papers/ICCAC2015-Outin.pdf)
-* [Tejo: A Supervised Anomaly Detection Scheme for NewSQL Databases](https://hal.archives-ouvertes.fr/hal-01211772/document)
-* [CoMA: Resource Monitoring of Docker Containers](http://www.scitepress.org/Papers/2015/54480/54480.pdf)
-* [An Investigation of CPU utilization relationship between host and guests in a Cloud infrastructure](http://www.diva-portal.org/smash/get/diva2:861239/FULLTEXT02)
-
-2016:
-* [Increasing Platform Determinism PQOS DPDK](https://www.intel.com/content/dam/www/public/us/en/documents/white-papers/increasing-platform-determinism-pqos-dpdk-paper.pdf)
-* [Towards Energy Efficient Data Management in HPC: The Open Ethernet Drive Approach](http://www.pdsw.org/pdsw-discs16/papers/p43-kougkas.pdf)
-* [CPU and memory performance analysis on dynamic and dedicated resource allocation using XenServer in Data Center environment](http://ieeexplore.ieee.org/document/7877341/)
-* [How Much Power Does your Server Consume? Estimating Wall Socket Power Using RAPL Measurements](http://www.ena-hpc.org/2016/pdf/khan_et_al_enahpc.pdf)
-* [DevOps for IoT Applications using Cellular Networks and Cloud](https://www.ericsson.com/assets/local/publications/conference-papers/devops.pdf)
-* [A Virtual Network Function Workload Simulator](https://uu.diva-portal.org/smash/get/diva2:1043751/FULLTEXT01.pdf)
-* [Characterizing and Reducing Cross-Platform Performance Variability Using OS-level Virtualization](http://www.lofstead.org/papers/2016-varsys.pdf)
-* [How much power does your server consume? Estimating wall socket power using RAPL measurements](https://www.researchgate.net/publication/306004997_How_much_power_does_your_server_consume_Estimating_wall_socket_power_using_RAPL_measurements)
-* [UIE: User-centric Interference Estimation for Cloud Applications](https://www3.cs.stonybrook.edu/~anshul/ic2e16_uie.pdf)
-
-2017:
-* [Auto-scaling of Containers: the impact of Relative and Absolute Metrics](https://www.researchgate.net/publication/319905237_Auto-Scaling_of_Containers_The_Impact_of_Relative_and_Absolute_Metrics)
-* [Testing the Windows Subsystem for Linux](https://blogs.msdn.microsoft.com/wsl/2017/04/11/testing-the-windows-subsystem-for-linux/)
-* [Practical analysis of the Precision Time Protocol under different types of system load](http://www.diva-portal.org/smash/get/diva2:1106630/FULLTEXT01.pdf)
-* [Towards Virtual Machine Energy-Aware Cost Prediction in Clouds](http://eprints.whiterose.ac.uk/124309/1/paper_final.pdf)
-* [Algorithms and Architectures for Parallel Processing](https://books.google.co.uk/books?id=S4wwDwAAQBAJ&pg=PA7&lpg=PA7&dq=http://kernel.ubuntu.com/~cking/stress-ng/&source=bl&ots=bVZccBq2Io&sig=rIqKWyEhGmVPosAJiemKjGgEv0M&hl=en&sa=X&ved=0ahUKEwiFo6LO2fbXAhWBtxQKHRcnDY04HhDoAQguMAE#v=onepage&q=http%3A%2F%2Fkernel.ubuntu.com%2F~cking%2Fstress-ng%2F&f=false)
-* [Advanced concepts and tools for renewable energy supply of Data Centres](https://www.riverpublishers.com/pdf/ebook/RP_9788793519411.pdf)
-* [Monitoring and Modelling Open Compute Servers](http://staff.www.ltu.se/~damvar/Publications/Eriksson%20et%20al.%20-%202017%20-%20Monitoring%20and%20Modelling%20Open%20Compute%20Servers.pdf)
-* [Experimental and numerical analysis for potential heat reuse in liquid cooled data centres](http://personals.ac.upc.edu/jguitart/HomepageFiles/ECM16.pdf)
-* [Modeling and Analysis of Performance under Interference in the Cloud](https://www3.cs.stonybrook.edu/~anshul/mascots17.pdf)
-* [Effectively Measure and Reduce Kernel Latencies for Real time Constraints](https://elinux.org/images/a/a9/ELC2017-_Effectively_Measure_and_Reduce_Kernel_Latencies_for_Real-time_Constraints_%281%29.pdf)
-* [Monitoring and Analysis of CPU load relationships between Host and Guests in a Cloud Networking Infrastructure](http://www.diva-portal.org/smash/get/diva2:861235/FULLTEXT02)
-* [Measuring the impacts of the Preempt-RT patch](http://events17.linuxfoundation.org/sites/events/files/slides/rtpatch.pdf)
-* [Reliable Library Identification Using VMI Techniques](https://rp.os3.nl/2016-2017/p64/report.pdf)
-* [Elastic-PPQ: A two-level autonomic system for spatial preference query processing over dynamic data stream](https://www.researchgate.net/publication/319613604_Elastic-PPQ_A_two-level_autonomic_system_for_spatial_preference_query_processing_over_dynamic_data_streams)
-* [OpenEPC integration within 5GTN as an NFV proof of concept](http://jultika.oulu.fi/files/nbnfioulu-201706082638.pdf)
-* [Time-Aware Dynamic Binary Instrumentation](https://uwspace.uwaterloo.ca/bitstream/handle/10012/12182/Arafa_Pansy.pdf?sequence=3)
-* [Experience Report: Log Mining using Natural Language Processing and Application to Anomaly Detection](https://hal.laas.fr/hal-01576291/document)
-* [Mixed time-criticality process interferences characterization on a multicore Linux system](https://re.public.polimi.it/retrieve/handle/11311/1033069/292404/paper-accepted-version.pdf)
-* [Cloud Orchestration at the Level of Application](https://ec.europa.eu/research/participants/documents/downloadPublic/RFpPOGljenYrclUyK3N5eFN4NnVVZEJpVEl3TTAxcFhXRzRGaXdzN2dmSjBycjNIbXB6dlJ3PT0=/attachment/VFEyQTQ4M3ptUWQ4VDN5UWNDYVZ0UEVSWSt2REhrV1Q=)
-
-2018:
-* [Multicore Emulation on Virtualised Environment](https://indico.esa.int/event/165/contributions/1230/attachments/1195/1412/04b_-_Multicore_-_Presentation.pdf)
-* [Stress-SGX : Load and Stress your Enclaves for Fun and Profit](https://seb.vaucher.org/papers/stress-sgx.pdf)
-* [quiho: Automated Performance Regression Testing Using Inferred Resource Utilization Profiles](https://dl.acm.org/citation.cfm?id=3184422&dl=ACM&coll=DL&preflayout=flat)
-* [Hypervisor and Virtual Machine Memory Optimization Analysis](http://dspace.ut.ee/bitstream/handle/10062/60705/Viitkar_BSc2018.pdf)
-* [Real-Time testing with Fuego](https://elinux.org/images/4/43/ELC2018_Real-time_testing_with_Fuego-181024m.pdf)
-* [FECBench: An Extensible Framework for Pinpointing Sources of Performance Interference in the Cloud-Edge Resource Spectrum](https://www.academia.edu/68455840/FECBench_An_Extensible_Framework_for_Pinpointing_Sources_of_Performance_Interference_in_the_Cloud_Edge_Resource_Spectrum)
-* [Quantifying the Interaction Between Structural Properties of Software and Hardware in the ARM Big.LITTLE Architecture](https://research.abo.fi/ws/files/26568716/QuantifyingInteraction.pdf)
-* [RAPL in Action: Experiences in Using RAPL for Power Measurements](https://dl.acm.org/doi/10.1145/3177754)
-
-2019:
-* [Performance Isolation of Co-located Workload in a Container-based Vehicle Software Architecture](https://www.thinkmind.org/articles/ambient_2019_2_20_40020.pdf)
-* [Analysis and Detection of Cache-Based Exploits](https://ssg.lancs.ac.uk/wp-content/uploads/2020/07/analysis_and_detection_vateva.pdf)
-* [kMVX: Detecting Kernel Information Leaks with Multi-variant Execution](https://research.vu.nl/ws/files/122357910/KMVX.pdf)
-* [Scalability of Kubernetes Running Over AWS](https://www.diva-portal.org/smash/get/diva2:1367111/FULLTEXT02)
-* [A study on performance measures for auto-scaling CPU-intensive containerized applications](https://link.springer.com/article/10.1007/s10586-018-02890-1)
-* [Scavenger: A Black-Box Batch Workload Resource Manager for Improving Utilization in Cloud Environments](https://www3.cs.stonybrook.edu/~sjavadi/files/javadi_socc2019.pdf)
-* [Estimating Cloud Application Performance Based on Micro-Benchmark Profiling](https://core.ac.uk/download/pdf/198051426.pdf)
-
-2020:
-* [Performance and Energy Trade-Offs for Parallel Applications on Heterogeneous Multi-Processing Systems](https://www.mdpi.com/1996-1073/13/9/2409/htm)
-* [C-Balancer: A System for Container Profiling and Scheduling](https://arxiv.org/pdf/2009.08912.pdf)
-* [Modelling VM Latent Characteristics and Predicting Application Performance using Semi-supervised Non-negative Matrix Factorization](https://ieeexplore.ieee.org/document/9284328)
-* [Semi-dynamic load balancing: efficient distributed learning in non-dedicated environments](https://dl.acm.org/doi/10.1145/3419111.3421299)
-* [A Performance Analysis of Hardware-assisted Security Technologies](https://openscholarship.wustl.edu/cgi/viewcontent.cgi?article=1556&context=eng_etds)
-* [Green Cloud Software Engineering for Big Data Processing](https://eprints.leedsbeckett.ac.uk/id/eprint/7294/1/GreenCloudSoftwareEngineeringForBigDataProcessingPV-KOR.pdf)
-* [Real-Time Detection for Cache Side Channel Attack using Performance Counter Monitor](https://www.proquest.com/docview/2533920884)
-* [Subverting Linux’ Integrity Measurement Architecture](https://svs.informatik.uni-hamburg.de/publications/2020/2020-08-27-Bohling-IMA.pdf)
-* [Real-time performance assessment using fast interrupt request on a standard Linux kernel](https://onlinelibrary.wiley.com/doi/full/10.1002/eng2.12114)
-* [Low Energy Consumption on Post-Moore Platforms for HPC Research](https://revistas.usfq.edu.ec/index.php/avances/article/download/2108/2919/18081)
-* [Managing Latency in Edge-Cloud Environment](https://s2group.cs.vu.nl/files/pubs/2020-JSS-IG-Edge_Cloud.pdf)
-* [Demystifying the Real-Time Linux Scheduling Latency](https://bristot.me/files/research/papers/ecrts2020/deOliveira2020Demystifying.pdf)
-
-2021:
-* [Streamline: A Fast, Flushless Cache Covert-Channel Attack by Enabling Asynchronous Collusion](https://dl.acm.org/doi/pdf/10.1145/3445814.3446742)
-* [Experimental Analysis in Hadoop MapReduce: A Closer Look at Fault Detection and Recovery Techniques](https://www.mdpi.com/1131714)
-* [Performance Characteristics of the BlueField-2 SmartNIC](https://arxiv.org/pdf/2105.06619.pdf)
-* [Evaluating Latency in Multiprocessing Embedded Systems for the Smart Grid](https://www.mdpi.com/1996-1073/14/11/3322)
-* [Work-in-Progress: Timing Diversity as a Protective Mechanism](https://dl.acm.org/doi/pdf/10.1145/3477244.3477614)
-* [Sequential Deep Learning Architectures for Anomaly Detection in Virtual Network Function Chains](https://arxiv.org/pdf/2109.14276.pdf)
-* [WattEdge: A Holistic Approach for Empirical Energy Measurements in Edge Computing](https://www.researchgate.net/publication/356342806_WattEdge_A_Holistic_Approach_for_Empirical_Energy_Measurements_in_Edge_Computing)
-* [PTEMagnet: Fine-Grained Physical Memory Reservation for Faster Page Walks in Public Clouds](https://www.pure.ed.ac.uk/ws/portalfiles/portal/196157550/PTEMagnet_MARGARITOV_DOA19112020_AFV.pdf)
-* [The Price of Meltdown and Spectre: Energy Overhead of Mitigations at Operating System Level](https://www4.cs.fau.de/Publications/2021/herzog_2021_eurosec.pdf)
-* [An Empirical Study of Thermal Attacks on Edge Platforms](https://digitalcommons.kennesaw.edu/cgi/viewcontent.cgi?article=1590&context=undergradsymposiumksu)
-* [Sage: Practical & Scalable ML-Driven Performance Debugging in Microservices](https://people.csail.mit.edu/delimitrou/papers/2021.asplos.sage.pdf)
-* [A Generalized Approach For Practical Task Allocation Using A MAPE-K Control Loop](https://www.marquez-barja.com/images/papers/A_Generalized_Approach_For_Software_Placement_In_The_Fog_Using_A_MAPE_K_Control_Loop-AuthorVersion.pdf)]
-* [Towards Independent Run-time Cloud Monitoring](https://research.spec.org/icpe_proceedings/2021/companion/p21.pdf)
-* [FIRESTARTER 2: Dynamic Code Generation for Processor Stress Tests](https://tu-dresden.de/zih/forschung/ressourcen/dateien/projekte/firestarter/FIRESTARTER-2-Dynamic-Code-Generation-for-Processor-Stress-Tests.pdf?lang=en)
-* [Performance comparison between a Kubernetes cluster and an embedded system](http://www.diva-portal.se/smash/get/diva2:1569829/FULLTEXT01.pdf)
-* [Performance Exploration of Virtualization Systems](https://www.researchgate.net/publication/350061536_Performance_Exploration_of_Virtualization_Systems)
-
-2022:
-* [A general method for evaluating the overhead when consolidating servers: performance degradation in virtual machines and containers](https://link.springer.com/article/10.1007/s11227-022-04318-5)
-* [FedComm: Understanding Communication Protocols for Edge-based Federated Learning](https://arxiv.org/pdf/2208.08764.pdf)
-* [Achieving Isolation in Mixed-Criticality Industrial Edge Systems with Real-Time Containers](https://drops.dagstuhl.de/opus/volltexte/2022/16332/pdf/LIPIcs-ECRTS-2022-15.pdf)
-* [Design and Implementation of Machine Learning-Based Fault Prediction System in Cloud Infrastructure](https://www.mdpi.com/2079-9292/11/22/3765)
-* [The TSN Building Blocks in Linux](https://arxiv.org/pdf/2211.14138.pdf)
-* [uKharon: A Membership Service for Microsecond Applications](https://www.usenix.org/system/files/atc22-guerraoui.pdf)
-* [Evaluating Secure Enclave Firmware Development for Contemporary RISC-V WorkstationsContemporary RISC-V Workstation](https://scholar.afit.edu/cgi/viewcontent.cgi?article=6319&context=etd)
-* [Evaluation of Real-Time Linux on RISC-V processor architecture](https://trepo.tuni.fi/bitstream/handle/10024/138547/J%C3%A4mb%C3%A4ckMarkus.pdf)
-* [Hertzbleed: Turning Power Side-Channel Attacks Into Remote Timing Attacks on x86](https://www.hertzbleed.com/hertzbleed.pdf)
-* [Don’t Mesh Around: Side-Channel Attacks and Mitigations on Mesh Interconnects](https://www.cs.cmu.edu/~rpaccagn/papers/dont-mesh-around-usenix2022.pdf)
-
-2023:
-* [Fight Hardware with Hardware: System-wide Detection and Mitigation of Side-Channel Attacks using Performance Counters](https://dl.acm.org/doi/10.1145/3519601)
-* [Introducing k4.0s: a Model for Mixed-Criticality Container Orchestration in Industry 4.0 ](https://arxiv.org/pdf/2205.14188.pdf)
-* [A Comprehensive Study on Optimizing Systems with Data Processing Units](https://arxiv.org/pdf/2301.06070.pdf)
-* [Estimating Cloud Application Performance Based on Micro-Benchmark Profiling](https://research.chalmers.se/publication/506903/file/506903_Fulltext.pdf)
-* [PSPRAY: Timing Side-Channel based Linux Kernel Heap Exploitation Technique](https://lifeasageek.github.io/papers/yoochan-pspray.pdf)
-* [Robust and accurate performance anomaly detection and prediction for cloud applications: a novel ensemble learning-based framework](https://journalofcloudcomputing.springeropen.com/articles/10.1186/s13677-022-00383-6#Fn4)
-* [Feasibility Study for a Python-Based Embedded Real-Time Control System](https://www.mdpi.com/2079-9292/12/6/1426)
-* [Adaptation of Parallel SaaS to Heterogeneous Co-Located Cloud Resources](https://www.mdpi.com/2076-3417/13/8/5115#B56-applsci-13-05115)
-* [A Methodology and Framework to Determine the Isolation Capabilities of Virtualisation Technologies](https://dl.acm.org/doi/pdf/10.1145/3578244.3583728)
-* [Data Station: Delegated, Trustworthy, and Auditable Computation to Enable Data-Sharing Consortia with a Data Escrow](https://arxiv.org/pdf/2305.03842.pdf)
-* [An Empirical Study of Resource-Stressing Faults in Edge-Computing Applications](https://dl.acm.org/doi/pdf/10.1145/3578354.3592873)
-* [Finding flaky tests in JavaScript applications using stress and test suite reordering](https://repositories.lib.utexas.edu/handle/2152/120282)
-* [The Power of Telemetry: Uncovering Software-Based Side-Channel Attacks on Apple M1/M2 Systems](https://arxiv.org/pdf/2306.16391.pdf)
-* [A Performance Evaluation of Embedded Multi-core Mixed-criticality System Based on PREEMPT RT Linux](https://www.jstage.jst.go.jp/article/ipsjjip/31/0/31_78/_pdf)
-* [Data Leakage in Isolated Virtualized Enterprise Computing SystemsSystems](https://scholar.smu.edu/cgi/viewcontent.cgi?article=1034&context=engineering_compsci_etds)
-* [Considerations for Benchmarking Network Performance in Containerized Infrastructures](https://datatracker.ietf.org/doc/draft-dcn-bmwg-containerized-infra/)
-* [EnergAt: Fine-Grained Energy Attribution for Multi-Tenancy](https://hotcarbon.org/2023/pdf/a4-he.pdf)
-* [Quantifying the Security Profile of Linux Applications](https://dl.acm.org/doi/10.1145/3609510.3609814)
-* [Gotham Testbed: a Reproducible IoT Testbed for Security Experiments and Dataset Generation](https://arxiv.org/pdf/2207.13981.pdf)
-* [Profiling with Trust: System Monitoring from Trusted Execution Environments](https://assets.researchsquare.com/files/rs-3169665/v1_covered_63751076-8387-429e-8296-3f3cc4c3ed34.pdf?c=1689832627)
-* [Thermal-Aware on-Device Inference Using Single-Layer Parallelization with Heterogeneous Processors](https://www.sciopen.com/article/pdf/10.26599/TST.2021.9010075.pdf)
-* [Towards Fast, Adaptive, and Hardware-Assisted User-Space Scheduling](https://arxiv.org/pdf/2308.02896.pdf)
-* [Heterogeneous Anomaly Detection for Software Systems via Semi-supervised Cross-modal Attention](https://arxiv.org/pdf/2302.06914.pdf)
-* [Green coding : an empirical approach to harness the energy consumption ofsoftware services](https://theses.hal.science/tel-04074973/document)
-* [Enhancing Empirical Software Performance Engineering Research with Kernel-Level Events: A Comprehensive System Tracing Approach](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4556983)
-* [Cloud White: Detecting and Estimating QoS Degradation of Latency-Critical Workloads in the Public Cloud](https://www.sciencedirect.com/science/article/pii/S0167739X22002734)
-* [Dynamic Resource Management for Cloud-native Bulk Synchronous Parallel Applications](http://www.dre.vanderbilt.edu/~gokhale/WWW/papers/ISORC23_BSP.pdf)
-* [Towards Serverless Optimization with In-place Scaling](https://arxiv.org/pdf/2311.09526.pdf)
-* [A Modular Approach to Design an Experimental Framework for Resource Management Research](https://assets.researchsquare.com/files/rs-3400308/v1_covered_90a108f8-065c-4e38-9c56-990424f66afd.pdf?c=1697164725)
-* [Targeted Deanonymization via the Cache Side Channel: Attacks and Defenses](https://leakuidatorplusteam.github.io/preprint.pdf)
-* [Validating Full-System RISC-V Simulator: A Systematic Approach](https://infoscience.epfl.ch/record/302433)
-* [Lightweight Implementation of Per-packet Service Protection in eBPF/XDP](https://arxiv.org/pdf/2312.07152.pdf)
-* [ROS2 Real-time Performance Optimization and Evaluation](https://cjme.springeropen.com/articles/10.1186/s10033-023-00976-5)
-* [Experimental and numerical analysis of the thermal behaviour of a single-phase immersion-cooled data centre](https://www.sciencedirect.com/science/article/pii/S1359431123012899)
-
-I am keen to add to the stress-ng project page any citations to research or
-projects that use stress-ng.  I also appreciate information concerning kernel
-bugs or performance regressions found with stress-ng.
+* [Citations](./CITATIONS.md)
 
 ## Contributors
 
@@ -683,19 +582,33 @@ Many thanks to the following contributors to stress-ng (in alphabetical order):
 
 Abdul Haleem, Aboorva Devarajan, Adriand Martin, Adrian Ratiu,
 Aleksandar N. Kostadinov, Alexander Kanavin, Alexandru Ardelean,
-Alfonso Sánchez-Beato, Allen H, Andrey Gelman, André Wild, Anisse Astier,
-Anton Eliasson, Arjan van de Ven, Baruch Siach, Bryan W. Lewis,
-Camille Constans, Carlos Santos, Christian Ehrhardt, Christopher Brown,
-Chunyu Hu, Danilo Krummrich, Davidson Francis, David Turner,
-Dominik B Czarnota, Dorinda Bassey, Eder Zulian, Eric Lin, Erik Stahlman,
-Erwan Velu, Fabien Malfoy, Fabrice Fontaine, Fernand Sieber,Florian Weimer,
+Alfonso Sánchez-Beato, Allen H, Amit Singh Tomar, Andrey Gelman,
+André Wild, Anisse Astier, Anton Eliasson, Arjan van de Ven,
+Baruch Siach, Bryan W. Lewis, Camille Constans, Carlos Santos,
+Christian Ehrhardt, Christian Franke, Christopher Brown,
+Chunyu Hu, Daniel Andriesse, Daniel Hodges, Danilo Krummrich,
+Davidson Francis, David Turner, Denis Ovsienko, Dmitry Antipov,
+Dmitry Grand, Dominik B Czarnota, Dorinda Bassey, Eder Zulian,
+Eric Lin, Erik Stahlman, Erwan Velu, Fabien Malfoy,
+Fabrice Fontaine, Fernand Sieber, Fejza Indrit, Florian Weimer,
 Francis Laniel, Guilherme Janczak, Hui Wang, Hsieh-Tseng Shen,
-Iyán Méndez Veiga, James Hunt, Jan Luebbe, Jianshen Liu, John Kacur,
-Jules Maselbas, Julien Olivain, Kenny Gong, Khalid Elmously, Khem Raj,
-Luca Pizzamiglio, Luis Chamberlain, Luis Henriques, Matthew Tippett,
-Mauricio Faria de Oliveira, Maxime Chevallier, Max Kellermann, Maya Rashish,
-Mayuresh Chitale, Meysam Azad, Mike Koreneff, Munehisa Kamata, Nick Hanley,
-Nikolas Kyx, Paul Menzel, Piyush Goyal, Ralf Ramsauer, Rosen Penev, Rulin Huang,
-Sascha Hauer, Siddhesh Poyarekar, Shoily Rahman, Thadeu Lima de Souza Cascardo,
-Thia Wyrod, Thinh Tran, Tim Gardner, Tim Gates, Tim Orling,
-Tommi Rantala, Witold Baryluk, Yong-Xuan Wang, Zhiyi Sun.
+Iyán Méndez Veiga, Ivan Shapovalov, James Hunt, Jan Luebbe, 
+Jesse Huang, Jianshen Liu, Jimmy Ho, John Kacur, Julee, Jules Maselbas,
+Julien Olivain, Kenny Gong, Khalid Elmously, Khem Raj, Luca Pizzamiglio,
+Luis Chamberlain, Luis Henriques, Lukas Durfina, Matteo Italia,
+Matthew Tippett, Mauricio Faria de Oliveira, Maxime Chevallier,
+Max Kellermann, Maya Rashish, Mayuresh Chitale, Meysam Azad,
+Mike Koreneff, Munehisa Kamata, Myd Xia, Nick Hanley, Nicolas Bouton,
+Nikolas Kyx, Paul Menzel, Piyush Goyal, Ralf Ramsauer, Rosen Penev,
+Rulin Huang, Sascha Hauer, Sergey Fedorov, Sergey Matyukevich,
+Siddhesh Poyarekar, Shoily Rahman, Dominik Steinberger,
+Stian Onarheim, Thadeu Lima de Souza Cascardo, Thia Wyrod, Thinh Tran,
+Tim Gardner, Tim Gates, Tim Orling, Tommi Rantala, Witold Baryluk,
+Yiwei Lin, Yong-Xuan Wang, Zhiyi Sun, Zong Li.
+
+## Static Analysis
+
+<a href="https://scan.coverity.com/projects/stress-ng">
+  <img alt="Coverity Scan Build Status"
+       src="https://scan.coverity.com/projects/921/badge.svg"/>
+</a>

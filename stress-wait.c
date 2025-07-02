@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -137,7 +137,7 @@ static void NORETURN killer(
  *  stress_wait_continued()
  *	check WIFCONTINUED
  */
-static void stress_wait_continued(stress_args_t *args, int status)
+static inline void stress_wait_continued(stress_args_t *args, int status)
 {
 #if defined(WIFCONTINUED)
 	if (WIFCONTINUED(status))
@@ -184,12 +184,14 @@ static int stress_wait(stress_args_t *args)
 	options |= WCONTINUED;
 #endif
 
-	pr_dbg("%s: waiter started [%d]\n",
-		args->name, (int)args->pid);
+	pr_dbg("%s: waiter started [%" PRIdMAX "]\n",
+		args->name, (intmax_t)args->pid);
 
 	if (stress_sighandler(args->name, SIGUSR1, stress_sighandler_nop, NULL) < 0)
 		return EXIT_FAILURE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	pid_r = spawn(args, runner, 0);
@@ -216,39 +218,41 @@ static int stress_wait(stress_args_t *args)
 		 *  Exercise waitpid
 		 */
 		wret = syscall_shim_waitpid(pid_r, &status, options);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
-			pr_fail("%s: waitpid failed, errno=%d (%s)\n",
-				args->name, errno, strerror(errno));
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
+			pr_fail("%s: waitpid on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+				args->name, (intmax_t)pid_r, errno, strerror(errno));
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
 		 *  Exercise wait
 		 */
 		wret = shim_wait(&status);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #if defined(HAVE_WAIT3)
 		/*
 		 *  Exercise wait3 if available
 		 */
 		wret = shim_wait3(&status, options, &usage);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait3 failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 #endif
 
@@ -257,52 +261,56 @@ static int stress_wait(stress_args_t *args)
 		 *  Exercise wait4 if available
 		 */
 		wret = shim_wait4(pid_r, &status, options, &usage);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait4 failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
 		 *  Exercise PID -1 -> any child process
 		 */
 		wret = shim_wait4(-1, &status, options, &usage);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait4 on PID -1 failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
 		 *  Exercise PID 0 -> process group of caller
 		 */
 		wret = shim_wait4(0, &status, options, &usage);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait4 on PID 0 failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
 		 *  Exercise -ve PID -> PGID number
 		 */
 		wret = shim_wait4(-pgrp, &status, options, &usage);
-		if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+		if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 			pr_fail("%s: wait4 on pgrp %" PRIdMAX " failed, errno=%d (%s)\n",
 				args->name, (intmax_t)pgrp, errno, strerror(errno));
+			ret = EXIT_FAILURE;
 			break;
 		}
 		stress_wait_continued(args, status);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
@@ -325,49 +333,52 @@ static int stress_wait(stress_args_t *args)
 
 			(void)shim_memset(&info, 0, sizeof(info));
 			wret = waitid(P_PID, (id_t)pid_r, &info, options);
-			if ((wret < 0) && (errno != EINTR) && (errno != ECHILD)) {
+			if (UNLIKELY((wret < 0) && (errno != EINTR) && (errno != ECHILD))) {
 				pr_fail("%s: waitid failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				ret = EXIT_FAILURE;
 				break;
 			}
 			/*
 			 *  Need to look into this, but on a heavily loaded
 			 *  system we can get info.si_pid set to zero(!)
 			 */
-			if ((info.si_pid != pid_r) && (info.si_pid != 0)) {
+			if (UNLIKELY((info.si_pid != pid_r) && (info.si_pid != 0))) {
 				pr_fail("%s: waitid returned PID %ld but expected PID %ld\n",
 					args->name, (long int)info.si_pid, (long int)pid_r);
+				ret = EXIT_FAILURE;
 			}
-			if ((info.si_signo != SIGCHLD) && (info.si_signo != 0)) {
+			if (UNLIKELY((info.si_signo != SIGCHLD) && (info.si_signo != 0))) {
 				pr_fail("%s: waitid returned si_signo %d (%s) but expected SIGCHLD\n",
 					args->name, info.si_signo, stress_strsignal(info.si_signo));
+				ret = EXIT_FAILURE;
 			}
-			if ((info.si_status != EXIT_SUCCESS) &&
-			    (info.si_status != SIGSTOP) &&
-			    (info.si_status != SIGCONT) &&
-			    (info.si_status != SIGKILL)) {
+			if (UNLIKELY((info.si_status != EXIT_SUCCESS) &&
+				     (info.si_status != SIGSTOP) &&
+				     (info.si_status != SIGCONT) &&
+				     (info.si_status != SIGKILL))) {
 				pr_fail("%s: waitid returned unexpected si_status %d\n",
 					args->name, info.si_status);
+				ret = EXIT_FAILURE;
 			}
 #if defined(CLD_EXITED) &&	\
     defined(CLD_KILLED) &&	\
     defined(CLD_STOPPED) &&	\
     defined(CLD_CONTINUED)
-			if ((info.si_code != CLD_EXITED) &&
-			    (info.si_code != CLD_KILLED) &&
-			    (info.si_code != CLD_STOPPED) &&
-			    (info.si_code != CLD_CONTINUED) &&
-			    (info.si_code != 0)) {
+			if (UNLIKELY((info.si_code != CLD_EXITED) &&
+				     (info.si_code != CLD_KILLED) &&
+				     (info.si_code != CLD_STOPPED) &&
+				     (info.si_code != CLD_CONTINUED) &&
+				     (info.si_code != 0))) {
 				pr_fail("%s: waitid returned unexpected si_code %d\n",
 					args->name, info.si_code);
+				ret = EXIT_FAILURE;
 			}
 #endif
 			stress_wait_continued(args, status);
-			if (!stress_continue_flag())
-				break;
 		}
 #endif
-	} while (stress_continue_flag() && (!args->max_ops || (stress_bogo_get(args) < args->max_ops)));
+	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)stress_kill_pid_wait(pid_k, NULL);
@@ -378,16 +389,16 @@ tidy:
 	return ret;
 }
 
-stressor_info_t stress_wait_info = {
+const stressor_info_t stress_wait_info = {
 	.stressor = stress_wait,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_wait_info = {
+const stressor_info_t stress_wait_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "disabled for GNU/HURD because it causes the kernel to assert"

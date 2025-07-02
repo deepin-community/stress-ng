@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,8 @@
 #include "core-killpid.h"
 #include "core-try-open.h"
 
+#include <time.h>
+
 /*
  *  stress_try_kill()
  *	hammer away and try to kill a process
@@ -33,16 +35,16 @@ static void stress_try_kill(
 {
 	int i;
 
-	for (i = 1; stress_continue(args) && (i <= 20); i++) {
+	for (i = 1; LIKELY(stress_continue(args) && (i <= 20)); i++) {
 		int status;
 
 		VOID_RET(int, stress_kill_pid(pid));
-		VOID_RET(int, waitpid(pid, &status, WNOHANG));
+		VOID_RET(pid_t, waitpid(pid, &status, WNOHANG));
 		if ((shim_kill(pid, 0) < 0) && (errno == ESRCH))
 			return;
 		(void)shim_usleep(10000 * i);
 	}
-	pr_dbg("%s: can't kill PID %jd opening %s\n",
+	pr_dbg("%s: can't kill PID %" PRIdMAX " opening %s\n",
 		args->name, (intmax_t)pid, path);
 	stress_process_info(args, pid);
 }
@@ -55,13 +57,13 @@ int stress_try_open(
 	stress_args_t *args,
 	const char *path,
 	const int flags,
-	const unsigned long timeout_ns)
+	const unsigned long int timeout_ns)
 {
 	pid_t pid;
-	int ret, status = 0;
+	int status = 0;
 	struct stat statbuf;
 	const int retries = 20;
-	const unsigned long sleep_ns = timeout_ns / retries;
+	const unsigned long int sleep_ns = timeout_ns / retries;
 	int i;
 
 	(void)args;
@@ -89,6 +91,8 @@ int stress_try_open(
 	}
 
 	for (i = 0; i < retries; i++) {
+		pid_t ret;
+
 		/*
 		 *  Child may block on open forever if the driver
 		 *  is broken, so use WNOHANG wait to poll rather
@@ -137,7 +141,7 @@ int stress_open_timeout(
 	const char *name,
 	const char *path,
 	const int flags,
-	const unsigned long timeout_ns)
+	const unsigned long int timeout_ns)
 {
 	int ret, t_ret, tmp;
 	struct sigevent sev;
@@ -182,7 +186,7 @@ int stress_open_timeout(
 	const char *name,
 	const char *path,
 	const int flags,
-	const unsigned long timeout_ns)
+	const unsigned long int timeout_ns)
 {
 	(void)name;
 	(void)timeout_ns;

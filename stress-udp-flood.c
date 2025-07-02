@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-builtin.h"
 #include "core-net.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_LINUX_SOCKIOS_H)
 #include <linux/sockios.h>
 #else
@@ -37,30 +39,12 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_udp_domain()
- *      set the udp domain option
- */
-static int stress_set_udp_flood_domain(const char *name)
-{
-	int ret, udp_flood_domain;
+static int udp_domain_mask = DOMAIN_INET_ALL;
 
-	ret = stress_set_net_domain(DOMAIN_INET_ALL, "udp-flood-domain",
-		name, &udp_flood_domain);
-	stress_set_setting("udp-flood-domain", TYPE_ID_INT, &udp_flood_domain);
-
-	return ret;
-}
-
-static int stress_set_udp_flood_if(const char *name)
-{
-	return stress_set_setting("udp-flood-if", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_udp_flood_domain,	stress_set_udp_flood_domain },
-	{ OPT_udp_flood_if,	stress_set_udp_flood_if },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_udp_flood_domain,	"udp-flood-domain", TYPE_ID_INT_DOMAIN, 0, 0, &udp_domain_mask },
+	{ OPT_udp_flood_if,	"udp-flood-if",     TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
 #if defined(AF_PACKET)
@@ -99,7 +83,7 @@ static int OPTIMIZE3 stress_udp_flood(stress_args_t *args)
 
 	if ((fd = socket(udp_flood_domain, SOCK_DGRAM, AF_PACKET)) < 0) {
 		if (errno == EPROTONOSUPPORT) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: skipping stressor, protocol not supported\n",
 					args->name);
 			return EXIT_NOT_IMPLEMENTED;
@@ -108,11 +92,14 @@ static int OPTIMIZE3 stress_udp_flood(stress_args_t *args)
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
-	if (stress_set_sockaddr_if(args->name, args->instance, args->pid,
+	if (stress_set_sockaddr_if(args->name, args->instance,
+			args->pid,
 			udp_flood_domain, port, udp_flood_if,
 			&addr, &addr_len, NET_ADDR_ANY) < 0) {
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t = stress_time_now();
@@ -150,7 +137,7 @@ static int OPTIMIZE3 stress_udp_flood(stress_args_t *args)
 #endif
 		stress_net_release_ports(port, port);
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		rand_port = 1024 + stress_mwc16modn(65535 - 1024);
@@ -175,14 +162,14 @@ static int OPTIMIZE3 stress_udp_flood(stress_args_t *args)
 
 	rate = (duration > 0.0) ? (bytes / duration) / (double)MB : 0.0;
 	stress_metrics_set(args, 0, "MB per sec sendto rate",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (duration > 0.0) ? (stress_bogo_get(args) / duration) : 0.0;
 	stress_metrics_set(args, 1, "sendto calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	total_count = stress_bogo_get(args) + sendto_failed;
 	rate = (total_count > 0) ? ((total_count - sendto_failed) / total_count) * 100.0 : 0.0;
 	stress_metrics_set(args, 2, "% sendto calls succeeded",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	/* 100% sendto failure is not good */
 	if ((total_count > 0) && (sendto_failed == total_count)) {
@@ -198,18 +185,18 @@ static int OPTIMIZE3 stress_udp_flood(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_udp_flood_info = {
+const stressor_info_t stress_udp_flood_info = {
 	.stressor = stress_udp_flood,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_udp_flood_info = {
+const stressor_info_t stress_udp_flood_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built with undefined AF_PACKET"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,9 +18,10 @@
  *
  */
 #include "stress-ng.h"
+#include "core-madvise.h"
+#include "core-pragma.h"
 #include "core-sort.h"
 #include "core-target-clones.h"
-#include "core-pragma.h"
 
 #define THRESH 63
 
@@ -61,20 +62,6 @@ static void MLOCKED_TEXT stress_qsort_handler(int signum)
 	}
 }
 
-/*
- *  stress_set_qsort_size()
- *	set qsort size
- */
-static int stress_set_qsort_size(const char *opt)
-{
-	uint64_t qsort_size;
-
-	qsort_size = stress_get_uint64(opt);
-	stress_check_range("qsort-size", qsort_size,
-		MIN_QSORT_SIZE, MAX_QSORT_SIZE);
-	return stress_set_setting("qsort-size", TYPE_ID_UINT64, &qsort_size);
-}
-
 typedef uint32_t qsort_swap_type_t;
 
 static inline size_t qsort_bm_minimum(const size_t x, const size_t y)
@@ -82,14 +69,14 @@ static inline size_t qsort_bm_minimum(const size_t x, const size_t y)
 	return x <= y ? x : y;
 }
 
-static uint8_t OPTIMIZE3 *qsort_bm_med3(uint8_t *a, uint8_t *b, uint8_t *c, comp_func_t cmp)
+static inline uint8_t ALWAYS_INLINE *qsort_bm_med3(uint8_t *a, uint8_t *b, uint8_t *c, comp_func_t cmp)
 {
 	return (cmp(a, b) < 0) ?
 		((cmp(b, c) < 0) ? b : (cmp(a, c) < 0) ? c : a) :
 		((cmp(b, c) > 0) ? b : (cmp(a, c) > 0) ? c : a);
 }
 
-static inline void OPTIMIZE3 qsort_bm_swapfunc(uint8_t *a, uint8_t *b, size_t n, int swaptype)
+static inline void ALWAYS_INLINE qsort_bm_swapfunc(uint8_t *a, uint8_t *b, size_t n, int swaptype)
 {
 	if (swaptype <= 1) {
 		register qsort_swap_type_t * RESTRICT pi = (qsort_swap_type_t *)a;
@@ -118,7 +105,7 @@ PRAGMA_UNROLL_N(4)
 	}
 }
 
-static inline void OPTIMIZE3 qsort_bm_swap(uint8_t *a, uint8_t *b, const size_t es, const int swaptype)
+static inline void ALWAYS_INLINE qsort_bm_swap(uint8_t *a, uint8_t *b, const size_t es, const int swaptype)
 {
 	if (swaptype == 0) {
 		register qsort_swap_type_t tmp;
@@ -222,29 +209,11 @@ static const stress_qsort_method_t stress_qsort_methods[] = {
 	{ "qsort-bm",		qsort_bm },
 };
 
-static int stress_set_qsort_method(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_qsort_methods); i++) {
-		if (strcmp(opt, stress_qsort_methods[i].name) == 0) {
-			stress_set_setting("qsort-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "qsort-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_qsort_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_qsort_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
 static inline bool OPTIMIZE3 stress_qsort_verify_forward(
 	stress_args_t *args,
 	const int32_t *data,
-	const size_t n)
+	const size_t n,
+	int *rc)
 {
 	if (g_opt_flags & OPT_FLAGS_VERIFY) {
 		register const int32_t *ptr = data;
@@ -253,7 +222,7 @@ static inline bool OPTIMIZE3 stress_qsort_verify_forward(
 
 PRAGMA_UNROLL_N(8)
 		while (ptr < end) {
-			register int32_t next_val = *(ptr + 1);
+			register const int32_t next_val = *(ptr + 1);
 
 			if (UNLIKELY(val > next_val))
 				goto fail;
@@ -267,13 +236,15 @@ PRAGMA_UNROLL_N(8)
 fail:
 	pr_fail("%s: forward sort error detected, incorrect ordering found\n",
 		args->name);
+	*rc = EXIT_FAILURE;
 	return false;
 }
 
 static inline bool OPTIMIZE3 stress_qsort_verify_reverse(
 	stress_args_t *args,
 	const int32_t *data,
-	const size_t n)
+	const size_t n,
+	int *rc)
 {
 	if (g_opt_flags & OPT_FLAGS_VERIFY) {
 		register const int32_t *ptr = data;
@@ -296,6 +267,7 @@ PRAGMA_UNROLL_N(8)
 fail:
 	pr_fail("%s: reverse sort error detected, incorrect ordering found\n",
 		args->name);
+	*rc = EXIT_FAILURE;
 	return false;
 }
 
@@ -312,6 +284,7 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 	int ret;
 	double rate;
 	NOCLOBBER double duration = 0.0, count = 0.0, sorted = 0.0;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 	qsort_func_t qsort_func;
 
 	stress_catch_sigill();
@@ -329,10 +302,14 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_inf_skip("%s: mmap failed allocating %zd 32 bit integers, errno=%d (%s), "
-			"skipping stressor\n", args->name, n, errno, strerror(errno));
+		pr_inf_skip("%s: mmap failed allocating %zu 32 bit integers%s, errno=%d (%s), "
+			"skipping stressor\n", args->name, n,
+			stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	(void)stress_madvise_collapse(data, data_size);
+	stress_set_vma_anon_name(data, data_size, "qsort-data");
 
 	ret = sigsetjmp(jmp_env, 1);
 	if (ret) {
@@ -352,10 +329,12 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 	stress_sort_data_int32_init(data, n);
 
 	qsort_func = stress_qsort_methods[qsort_method].qsort_func;
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf("%s: using method '%s'\n",
 			args->name, stress_qsort_methods[qsort_method].name);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -371,10 +350,10 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 		count += (double)stress_sort_compare_get();
 		sorted += (double)n;
 
-		if (!stress_qsort_verify_forward(args, data, n))
+		if (!stress_qsort_verify_forward(args, data, n, &rc))
 			break;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* Reverse sort */
@@ -385,10 +364,10 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 		count += (double)stress_sort_compare_get();
 		sorted += (double)n;
 
-		if (!stress_qsort_verify_reverse(args, data, n))
+		if (!stress_qsort_verify_reverse(args, data, n, &rc))
 			break;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		stress_sort_data_int32_mangle(data, n);
@@ -407,7 +386,7 @@ static int OPTIMIZE3 stress_qsort(stress_args_t *args)
 		count += (double)stress_sort_compare_get();
 		sorted += (double)n;
 
-		if (!stress_qsort_verify_reverse(args, data, n))
+		if (!stress_qsort_verify_reverse(args, data, n, &rc))
 			break;
 
 		stress_bogo_inc(args);
@@ -419,25 +398,30 @@ tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "qsort comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "qsort comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)data, data_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_qsort_integers,	stress_set_qsort_size },
-	{ OPT_qsort_method,	stress_set_qsort_method },
-	{ 0,			NULL }
+static const char *stress_qsort_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_qsort_methods)) ? stress_qsort_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_qsort_size,   "qsort-size",   TYPE_ID_UINT64, MIN_QSORT_SIZE, MAX_QSORT_SIZE, NULL },
+	{ OPT_qsort_method, "qsort-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_qsort_method },
+	END_OPT,
 };
 
-stressor_info_t stress_qsort_info = {
+const stressor_info_t stress_qsort_info = {
 	.stressor = stress_qsort,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SORT,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

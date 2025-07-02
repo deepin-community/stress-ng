@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,7 +43,8 @@ static inline void OPTIMIZE3 socket_pair_memset(
 	uint8_t val,
 	const size_t sz)
 {
-	register uint8_t *ptr, *buf_end = buf + sz;
+	register uint8_t *ptr;
+	register const uint8_t *buf_end = buf + sz;
 	register uint8_t checksum = 0;
 
 PRAGMA_UNROLL_N(4)
@@ -60,7 +61,7 @@ static inline int OPTIMIZE3 socket_pair_memchk(
 	uint8_t *buf,
 	const size_t sz)
 {
-	register uint8_t *ptr, *buf_end = buf + sz;
+	register const uint8_t *ptr, *buf_end = buf + sz;
 	register uint8_t checksum = 0;
 
 PRAGMA_UNROLL_N(4)
@@ -113,7 +114,7 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 	int i, max, ret, parent_cpu;
 	double t, duration, rate, bytes = 0.0;
 	uint64_t low_memory_count = 0;
-	const size_t low_mem_size = args->page_size * 32 * args->num_instances;
+	const size_t low_mem_size = args->page_size * 32 * args->instances;
 	const bool oom_avoid = !!(g_opt_flags & OPT_FLAGS_OOM_AVOID);
 	(void)context;
 
@@ -121,7 +122,7 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 	socket_pair_fds_bad[0] = -1;
 	socket_pair_fds_bad[1] = -1;
 	ret = socketpair(~0, SOCK_STREAM, 0, socket_pair_fds_bad);
-	if (ret == 0) {
+	if (UNLIKELY(ret == 0)) {
 		(void)close(socket_pair_fds_bad[0]);
 		(void)close(socket_pair_fds_bad[1]);
 	}
@@ -130,14 +131,14 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 	socket_pair_fds_bad[0] = -1;
 	socket_pair_fds_bad[1] = -1;
 	ret = socketpair(AF_UNIX, ~0, 0, socket_pair_fds_bad);
-	if (ret == 0) {
+	if (UNLIKELY(ret == 0)) {
 		(void)close(socket_pair_fds_bad[0]);
 		(void)close(socket_pair_fds_bad[1]);
 	}
 
 	/* exercise invalid socketpair type protocol */
 	ret = socketpair(AF_UNIX, SOCK_STREAM, ~0, socket_pair_fds_bad);
-	if (ret == 0) {
+	if (UNLIKELY(ret == 0)) {
 		(void)close(socket_pair_fds_bad[0]);
 		(void)close(socket_pair_fds_bad[1]);
 	}
@@ -147,7 +148,7 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 
 	t = stress_time_now();
 	for (max = 0; max < MAX_SOCKET_PAIRS; max++) {
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			socket_pair_close(socket_pair_fds, max, 0);
 			socket_pair_close(socket_pair_fds, max, 1);
 			return EXIT_SUCCESS;
@@ -158,14 +159,14 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 	duration = stress_time_now() - t;
 	rate = (duration > 0.0) ? (double)max / duration : 0.0;
 	stress_metrics_set(args, 0, "socketpair calls sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	if (max == 0) {
 		int rc;
 
 		switch (errno) {
 		case EAFNOSUPPORT:
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: socketpair: address family not supported, "
 					"skipping stressor\n", args->name);
 			rc = EXIT_NO_RESOURCE;
@@ -177,13 +178,13 @@ static int stress_sockpair_oomable(stress_args_t *args, void *context)
 			rc = EXIT_NO_RESOURCE;
 			break;
 		case EPROTONOSUPPORT:
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: socketpair: protocol not supported, "
 					"skipping stressor\n", args->name);
 			rc = EXIT_NO_RESOURCE;
 			break;
 		case EOPNOTSUPP:
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: socketpair: protocol does not support "
 					"socket pairs, skipping stressor\n", args->name);
 			rc = EXIT_NO_RESOURCE;
@@ -208,7 +209,7 @@ again:
 		socket_pair_close(socket_pair_fds, max, 0);
 		socket_pair_close(socket_pair_fds, max, 1);
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -226,27 +227,26 @@ again:
 			uint8_t buf[SOCKET_PAIR_BUF] ALIGN64;
 			ssize_t n;
 
-			for (i = 0; stress_continue(args) && (i < max); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < max)); i++) {
 				errno = 0;
 
 				n = read(socket_pair_fds[i][0], buf, sizeof(buf));
 				if (UNLIKELY(n <= 0)) {
-					if ((errno == EAGAIN) || (errno == EINTR))
+					switch (errno) {
+					case 0:		/* OKAY */
+					case EAGAIN:	/* Redo */
+					case EINTR:	/* Interrupted */
 						continue;
-					else if (errno == ENFILE) /* Too many files! */
+					case ENFILE:	/* Too many files */
+					case EMFILE:	/* Occurs on socket shutdown */
+					case EPERM:	/* Occurs on socket closure */
+					case EPIPE:	/* Pipe broke */
 						goto abort;
-					else if (errno == EMFILE) /* Occurs on socket shutdown */
-						goto abort;
-					else if (errno == EPERM)  /* Occurs on socket closure */
-						goto abort;
-					else if (errno == EPIPE)  /* Pipe broke */
-						goto abort;
-					else if (errno) {
+					default:
 						pr_fail("%s: read failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
 						goto abort;
 					}
-					continue;
 				}
 				if (UNLIKELY(verify && socket_pair_memchk(buf, (size_t)n))) {
 					pr_fail("%s: socket_pair read error detected, "
@@ -272,23 +272,23 @@ abort:
 		socket_pair_close(socket_pair_fds, max, 0);
 
 		do {
-			for (i = 0; stress_continue(args) && (i < max); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < max)); i++) {
 				ssize_t wret;
 
 				/* Low memory avoidance, re-start */
 				if (UNLIKELY(oom_avoid)) {
 					while (stress_low_memory(low_mem_size)) {
 						low_memory_count++;
-						if (!stress_continue_flag())
+						if (UNLIKELY(!stress_continue_flag()))
 							goto tidy;
-						shim_usleep(100000);
+						(void)shim_usleep(100000);
 					}
 				}
 
 				socket_pair_memset(buf, (uint8_t)val++, sizeof(buf));
 				t = stress_time_now();
 				wret = write(socket_pair_fds[i][1], buf, sizeof(buf));
-				if (wret > 0) {
+				if (LIKELY(wret > 0)) {
 					bytes += (double)wret;
 					duration += stress_time_now() - t;
 				} else {
@@ -303,7 +303,7 @@ abort:
 					}
 					continue;
 				}
-				shim_sched_yield();
+				(void)shim_sched_yield();
 				stress_bogo_inc(args);
 			}
 		} while (stress_continue(args));
@@ -311,7 +311,7 @@ abort:
 tidy:
 		rate = (duration > 0.0) ? (double)bytes / duration : 0.0;
 		stress_metrics_set(args, 1, "MB written per sec",
-			rate / (double)MB, STRESS_HARMONIC_MEAN);
+			rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 		if (low_memory_count > 0) {
 			pr_dbg("%s: %.2f%% of writes backed off due to low memory\n",
@@ -341,6 +341,8 @@ static int stress_sockpair(stress_args_t *args)
 {
 	int rc;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (stress_sighandler(args->name, SIGPIPE, stress_sighandler_nop, NULL) < 0)
@@ -353,9 +355,9 @@ static int stress_sockpair(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_sockpair_info = {
+const stressor_info_t stress_sockpair_info = {
 	.stressor = stress_sockpair,
-	.class = CLASS_NETWORK | CLASS_OS,
+	.classifier = CLASS_NETWORK | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

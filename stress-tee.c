@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -52,8 +52,8 @@ static pid_t stress_tee_spawn(
 {
 	pid_t pid;
 
-	if (pipe(fds) < 0) {
-		pr_err("%s: pipe failed: %d (%s)\n",
+	if (UNLIKELY(pipe(fds) < 0)) {
+		pr_err("%s: pipe failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return -1;
 	}
@@ -65,13 +65,12 @@ again:
 			goto again;
 		(void)close(fds[0]);
 		(void)close(fds[1]);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return -1;
-		pr_err("%s: fork failed: %d (%s)\n",
+		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return -1;
-	}
-	if (pid == 0) {
+	} else if (pid == 0) {
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
 
@@ -132,21 +131,22 @@ static void stress_tee_pipe_read(stress_args_t *args, int fds[2])
 
 	while (stress_continue_flag()) {
 		register size_t n = 0;
-		ssize_t ret;
 
 		while (n < sizeof(data)) {
+			ssize_t ret;
+
 			ret = read(fds[0], &data, sizeof(data));
 			if (UNLIKELY(ret < 0)) {
 				switch (errno) {
 				case EPIPE:
-					goto finish;
+					return;
 				case EAGAIN:
 				case EINTR:
 					continue;
 				default:
 					pr_fail("%s: unexpected read error, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
-					goto finish;
+					return;
 				}
 			} else {
 				n += (size_t)ret;
@@ -162,8 +162,6 @@ static void stress_tee_pipe_read(stress_args_t *args, int fds[2])
 		}
 		counter++;
 	}
-finish:
-	(void)close(fds[1]);
 }
 
 /*
@@ -239,22 +237,22 @@ static int stress_tee(stress_args_t *args)
 
 	fd = open("/dev/null", O_WRONLY);
 	if (fd < 0) {
-		pr_err("%s: open /dev/null failed: errno=%d (%s)\n",
+		pr_err("%s: open /dev/null failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	pids[0] = stress_tee_spawn(args, stress_tee_pipe_write, pipe_in);
-	if (pids[0] < 0) {
-		(void)close(fd);
-		return EXIT_FAILURE;
-	}
+	if (pids[0] < 0)
+		goto tidy_fd;
 	(void)close(pipe_in[1]);
 
 	pids[1] = stress_tee_spawn(args, stress_tee_pipe_read, pipe_out);
-	if (pids[0] < 0)
+	if (pids[1] < 0)
 		goto tidy_child1;
 	(void)close(pipe_out[0]);
 
@@ -276,7 +274,7 @@ static int stress_tee(stress_args_t *args)
 				goto do_splice;
 			}
 		}
-		if (len == 0)
+		if (UNLIKELY(len == 0))
 			break;
 
 		if (UNLIKELY(len < 0)) {
@@ -294,7 +292,7 @@ static int stress_tee(stress_args_t *args)
 				ret = EXIT_NO_RESOURCE;
 				goto tidy_child2;
 			}
-			pr_fail("%s: tee failed: errno=%d (%s)\n",
+			pr_fail("%s: tee failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy_child2;
 		}
@@ -306,14 +304,14 @@ do_splice:
 			if (UNLIKELY(errno == EINTR))
 				break;
 			if (UNLIKELY(slen < 0)) {
-				pr_err("%s: splice failed: errno=%d (%s)\n",
+				pr_err("%s: splice failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 				goto tidy_child2;
 			}
 			len -= slen;
 		}
 
-		if (exercise_tee(args, release, pipe_in[0], pipe_out[1]) < 0)
+		if (UNLIKELY(exercise_tee(args, release, pipe_in[0], pipe_out[1]) < 0))
 			goto tidy_child2;
 
 		stress_bogo_inc(args);
@@ -323,7 +321,7 @@ do_splice:
 
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB per sec tee rate",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 tidy_child2:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -334,22 +332,22 @@ tidy_child1:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)close(pipe_in[0]);
 	(void)stress_kill_pid_wait(pids[0], NULL);
-
+tidy_fd:
 	(void)close(fd);
 
 	return ret;
 }
 
-stressor_info_t stress_tee_info = {
+const stressor_info_t stress_tee_info = {
 	.stressor = stress_tee,
-	.class = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
+	.classifier = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_tee_info = {
+const stressor_info_t stress_tee_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
+	.classifier = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without tee() system call or undefined SPLICE_F_NONBLOCK"

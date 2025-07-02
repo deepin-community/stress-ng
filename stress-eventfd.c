@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,14 +33,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_eventfd_nonblock(const char *opt)
-{
-	return stress_set_setting_true("eventfd-nonblock", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_eventfd_nonblock,	stress_set_eventfd_nonblock },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_eventfd_nonblock, "eventfd-nonblock", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_EVENTFD_H) && \
@@ -92,6 +87,8 @@ static int stress_eventfd(stress_args_t *args)
 	if (test_fd >= 0)
 		(void)close(test_fd);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -103,7 +100,7 @@ again:
 		(void)close(fd1);
 		(void)close(fd2);
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return EXIT_SUCCESS;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -124,7 +121,7 @@ again:
 			VOID_RET(ssize_t, read(fd1, re, sizeof(re)));
 
 			for (;;) {
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto exit_child;
 				ret = read(fd1, &val, sizeof(val));
 				if (UNLIKELY(ret < 0)) {
@@ -160,7 +157,7 @@ again:
 
 			val = 1;
 			for (;;) {
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto exit_child;
 				ret = write(fd2, &val, sizeof(val));
 				if (UNLIKELY(ret < 0)) {
@@ -197,7 +194,7 @@ exit_child:
 			(void)stress_read_fdinfo(self, stress_mwc1() ? fd1 : fd2);
 
 			for (;;) {
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto exit_parent;
 
 				ret = write(fd1, &val, sizeof(val));
@@ -218,7 +215,7 @@ exit_child:
 			}
 
 			for (;;) {
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					goto exit_parent;
 
 				ret = read(fd2, &val, sizeof(val));
@@ -249,18 +246,18 @@ exit_parent:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_eventfd_info = {
+const stressor_info_t stress_eventfd_info = {
 	.stressor = stress_eventfd,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_eventfd_info = {
+const stressor_info_t stress_eventfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/eventfd.h or eventfd() support"

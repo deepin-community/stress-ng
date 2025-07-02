@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -190,7 +190,7 @@ static int stress_chown(stress_args_t *args)
 	(void)stress_temp_filename(filename, sizeof(filename),
 		args->name, ppid, 0, 0);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		if ((fd = creat(filename, S_IRUSR | S_IWUSR)) < 0) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: creat %s failed, errno=%d (%s)\n",
@@ -211,7 +211,7 @@ static int stress_chown(stress_args_t *args)
 			(void)shim_usleep(100000);
 #endif
 			/* Timed out, then give up */
-			if (!stress_continue_flag()) {
+			if (UNLIKELY(!stress_continue_flag())) {
 				rc = EXIT_SUCCESS;
 				goto tidy;
 			}
@@ -227,34 +227,48 @@ static int stress_chown(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
+#if defined(HAVE_PATHCONF) &&	\
+    defined(_PC_CHOWN_RESTRICTED)
+	VOID_RET(long int, pathconf(filename, _PC_CHOWN_RESTRICTED));
+#endif
+
+	rc = EXIT_SUCCESS;
 	do {
 		int ret;
 
 		ret = do_fchown(fd, bad_fd, cap_chown, uid, gid);
-		if ((ret < 0) && (ret != -EPERM))
+		if ((ret < 0) && (ret != -EPERM)) {
 			pr_fail("%s: fchown failed, errno=%d (%s)%s\n",
 				args->name, errno, strerror(errno),
 				stress_get_fs_type(filename));
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		ret = do_chown(chown, filename, cap_chown, uid, gid);
 		if ((ret < 0) && (ret != -EPERM)) {
 			pr_fail("%s: chown %s failed, errno=%d (%s)%s\n",
 				args->name, filename, errno, strerror(errno),
 				stress_get_fs_type(filename));
+			rc = EXIT_FAILURE;
+			break;
 		}
 		ret = do_chown(lchown, filename, cap_chown, uid, gid);
 		if ((ret < 0) && (ret != -EPERM)) {
 			pr_fail("%s: lchown %s failed, errno=%d (%s)%s\n",
 				args->name, filename, errno, strerror(errno),
 				stress_get_fs_type(filename));
+			rc = EXIT_FAILURE;
+			break;
 		}
 		(void)shim_fsync(fd);
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
-	rc = EXIT_SUCCESS;
 tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -266,9 +280,9 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_chown_info = {
+const stressor_info_t stress_chown_info = {
 	.stressor = stress_chown,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -55,7 +55,7 @@ static int OPTIMIZE3 stress_branch(stress_args_t *args)
 	uint64_t lo, hi, bogo_counter, bogo_thresh;
 	int rc = EXIT_SUCCESS;
 
-	static const void ALIGN64 *labels[] = {
+	static const void ALIGN64 * const labels[] = {
 		&&L0x000, &&L0x001, &&L0x002, &&L0x003, &&L0x004, &&L0x005, &&L0x006, &&L0x007,
 		&&L0x008, &&L0x009, &&L0x00a, &&L0x00b, &&L0x00c, &&L0x00d, &&L0x00e, &&L0x00f,
 		&&L0x010, &&L0x011, &&L0x012, &&L0x013, &&L0x014, &&L0x015, &&L0x016, &&L0x017,
@@ -212,6 +212,8 @@ static int OPTIMIZE3 stress_branch(stress_args_t *args)
 	for (i = 0; i < SIZEOF_ARRAY(counters); i++)
 		counters[i] = 0ULL;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	for (;;) {
@@ -219,9 +221,9 @@ L0x000:
 		stress_bogo_inc(args);
 #if defined(STRESS_ARCH_SH4)
 		/* For some reason, can't interrupt SH4 in QEMU, add yield to do so */
-		shim_sched_yield();
+		(void)shim_sched_yield();
 #endif
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		RESEED_JMP(0x000)
 
@@ -396,16 +398,16 @@ L0x000:
 	return rc;
 }
 
-stressor_info_t stress_branch_info = {
+const stressor_info_t stress_branch_info = {
 	.stressor = stress_branch,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_branch_info = {
+const stressor_info_t stress_branch_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without compiler support gcc style 'labels as values' feature"

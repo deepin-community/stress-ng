@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-madvise.h"
 #include "core-sort.h"
 
 #define MIN_HEAPSORT_SIZE	(1 * KB)
@@ -42,74 +43,6 @@ typedef struct {
 	const heapsort_func_t heapsort_func;
 } stress_heapsort_method_t;
 
-static inline OPTIMIZE3 void heapsort_swap(void *p1, void *p2, register size_t size)
-{
-	switch (size) {
-	case 8: {
-			register uint64_t tmp64;
-
-			tmp64 = *(uint64_t *)p1;
-			*(uint64_t *)p1 = *(uint64_t *)p2;
-			*(uint64_t *)p2 = tmp64;
-			return;
-		}
-	case 4: {
-			register uint32_t tmp32;
-
-			tmp32 = *(uint32_t *)p1;
-			*(uint32_t *)p1 = *(uint32_t *)p2;
-			*(uint32_t *)p2 = tmp32;
-			return;
-		}
-	case 2: {
-			register uint16_t tmp16;
-
-			tmp16 = *(uint16_t *)p1;
-			*(uint16_t *)p1 = *(uint16_t *)p2;
-			*(uint16_t *)p2 = tmp16;
-			return;
-		}
-	default: {
-			register uint8_t *u8p1 = (uint8_t *)p1;
-			register uint8_t *u8p2 = (uint8_t *)p2;
-
-			do {
-				register uint8_t tmp;
-
-				tmp = *(u8p1);
-				*(u8p1++) = *(u8p2);
-				*(u8p2++) = tmp;
-			} while (--size);
-			return;
-		}
-	}
-}
-
-static inline void heapsort_copy(void *p1, void *p2, register size_t size)
-{
-	register uint8_t *u8p1, *u8p2;
-
-	switch (size) {
-	case 8:
-		*(uint64_t *)p1 = *(uint64_t *)p2;
-		return;
-	case 4:
-		*(uint32_t *)p1 = *(uint32_t *)p2;
-		return;
-	case 2:
-		*(uint16_t *)p1 = *(uint16_t *)p2;
-		return;
-	default:
-		u8p1 = (uint8_t *)p1;
-		u8p2 = (uint8_t *)p2;
-
-		do {
-			*(u8p1++) = *(u8p2++);
-		} while (--size);
-		return;
-	}
-}
-
 static int heapsort_nonlibc(
 	void *base,
 	size_t nmemb,
@@ -118,6 +51,8 @@ static int heapsort_nonlibc(
 {
 	register uint8_t *u8base;
 	register size_t l = (nmemb / 2) + 1;
+	sort_swap_func_t swap_func;
+	sort_copy_func_t copy_func;
 
 	if (UNLIKELY(nmemb <= 1))
 		return 0;
@@ -125,6 +60,9 @@ static int heapsort_nonlibc(
 		errno = EINVAL;
 		return -1;
 	}
+
+	swap_func = sort_swap_func(size);
+	copy_func = sort_copy_func(size);
 
 	/*
 	 *  Phase #1, create initial heap
@@ -143,7 +81,7 @@ static int heapsort_nonlibc(
 			p2 = u8base + (i * size);
 			if (compar(p1, p2) <= 0)
 				break;
-			heapsort_swap(p2, p1, size);
+			swap_func(p2, p1, size);
 		}
 	}
 	/*
@@ -154,8 +92,8 @@ static int heapsort_nonlibc(
 		register size_t i, j;
 		uint8_t tmp[size] ALIGN64;
 
-		heapsort_copy(tmp, ptr, size);
-		heapsort_copy(ptr, u8base + size, size);
+		copy_func(tmp, ptr, size);
+		copy_func(ptr, u8base + size, size);
 		nmemb--;
 
 		for (i = 1; (j = i * 2) <= nmemb; i = j) {
@@ -166,7 +104,7 @@ static int heapsort_nonlibc(
 				++j;
 			}
 			p2 = u8base + (i * size);
-			heapsort_copy(p2, p1, size);
+			copy_func(p2, p1, size);
 		}
 		for (;;) {
 			register uint8_t *p1, *p2;
@@ -176,10 +114,10 @@ static int heapsort_nonlibc(
 			p1 = u8base + (j * size);
 			p2 = u8base + (i * size);
 			if ((j == 1) || (compar(tmp, p2) < 0)) {
-				heapsort_copy(p1, tmp, size);
+				copy_func(p1, tmp, size);
 				break;
 			}
-			(void)heapsort_copy(p1, p2, size);
+			(void)copy_func(p1, p2, size);
 		}
 	}
 	return 0;
@@ -187,48 +125,20 @@ static int heapsort_nonlibc(
 
 static const stress_heapsort_method_t stress_heapsort_methods[] = {
 #if defined(HAVE_LIB_BSD)
-	{ "heapsort-libc",		heapsort },
+	{ "heapsort-libc",	heapsort },
 #endif
-	{ "heapsort-nonlibc",		heapsort_nonlibc },
+	{ "heapsort-nonlibc",	heapsort_nonlibc },
 };
 
-static int stress_set_heapsort_method(const char *opt)
+static const char *stress_heapsort_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_heapsort_methods); i++) {
-		if (strcmp(opt, stress_heapsort_methods[i].name) == 0) {
-			stress_set_setting("heapsort-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "heapsort-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_heapsort_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_heapsort_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_heapsort_methods)) ? stress_heapsort_methods[i].name : NULL;
 }
 
-/*
- *  stress_set_heapsort_size()
- *	set heapsort size
- */
-static int stress_set_heapsort_size(const char *opt)
-{
-	uint64_t heapsort_size;
-
-	heapsort_size = stress_get_uint64(opt);
-	stress_check_range("heapsort-size", heapsort_size,
-		MIN_HEAPSORT_SIZE, MAX_HEAPSORT_SIZE);
-	return stress_set_setting("heapsort-size", TYPE_ID_UINT64, &heapsort_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_heapsort_size,	stress_set_heapsort_size },
-	{ OPT_heapsort_method,	stress_set_heapsort_method },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_heapsort_size,   "heapsort-size",   TYPE_ID_UINT64, MIN_HEAPSORT_SIZE, MAX_HEAPSORT_SIZE, NULL },
+	{ OPT_heapsort_method, "heapsort-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_heapsort_method },
+	END_OPT,
 };
 
 /*
@@ -253,17 +163,18 @@ static int stress_heapsort(stress_args_t *args)
 {
 	uint64_t heapsort_size = DEFAULT_HEAPSORT_SIZE;
 	int32_t *data, *ptr;
-	size_t n, i, heapsort_method = 0;
+	size_t n, i, data_size, heapsort_method = 0;
 	struct sigaction old_action;
 	int ret;
 	double rate;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 	NOCLOBBER double duration = 0.0, count = 0.0, sorted = 0.0;
 	heapsort_func_t heapsort_func;
 
 	(void)stress_get_setting("heapsort-method", &heapsort_method);
 
 	heapsort_func = stress_heapsort_methods[heapsort_method].heapsort_func;
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf("%s: using method '%s'\n",
 			args->name, stress_heapsort_methods[heapsort_method].name);
 
@@ -274,13 +185,19 @@ static int stress_heapsort(stress_args_t *args)
 			heapsort_size = MIN_HEAPSORT_SIZE;
 	}
 	n = (size_t)heapsort_size;
+	data_size = n * sizeof(*data);
 
-	if ((data = calloc(n, sizeof(*data))) == NULL) {
-		pr_inf_skip("%s: failed to allocate %zu integers, skipping stressor\n",
-			args->name, n);
+	data = (int32_t *)stress_mmap_populate(NULL, data_size,
+				PROT_READ | PROT_WRITE,
+				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	if (data == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu 32 bit integers%s, "
+			"errno=%d (%s), skipping stressor\n", args->name, n,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
-
+	(void)stress_madvise_collapse(data, data_size);
+	stress_set_vma_anon_name(data, data_size, "heapsort-data");
 
 	ret = sigsetjmp(jmp_env, 1);
 	if (ret) {
@@ -297,6 +214,9 @@ static int stress_heapsort(stress_args_t *args)
 	}
 
 	stress_sort_data_int32_init(data, n);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -308,48 +228,52 @@ static int stress_heapsort(stress_args_t *args)
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		if (heapsort_func(data, n, sizeof(*data), stress_sort_cmp_fwd_int32) < 0) {
-			pr_fail("%s: heapsort of random data failed: %d (%s)\n",
+			pr_fail("%s: heapsort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
 			sorted += (double)n;
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr > *(ptr + 1)) {
+					if (UNLIKELY(*ptr > *(ptr + 1))) {
 						pr_fail("%s: sort error "
 							"detected, incorrect ordering "
 							"found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/* Reverse sort */
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		if (heapsort_func(data, n, sizeof(*data), stress_sort_cmp_rev_int32) < 0) {
-			pr_fail("%s: reversed heapsort of random data failed: %d (%s)\n",
+			pr_fail("%s: reversed heapsort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
 			sorted += (double)n;
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr < *(ptr + 1)) {
+					if (UNLIKELY(*ptr < *(ptr + 1))) {
 						pr_fail("%s: reverse sort "
 							"error detected, incorrect "
 							"ordering found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		/* And re-order  */
 		stress_sort_data_int32_mangle(data, n);
@@ -359,24 +283,26 @@ static int stress_heapsort(stress_args_t *args)
 		stress_sort_compare_reset();
 		t = stress_time_now();
 		if (heapsort_func(data, n, sizeof(*data), stress_sort_cmp_rev_int32) < 0) {
-			pr_fail("%s: reversed heapsort of random data failed: %d (%s)\n",
+			pr_fail("%s: reversed heapsort of random data failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 		} else {
 			duration += stress_time_now() - t;
 			count += (double)stress_sort_compare_get();
 			sorted += (double)n;
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				for (ptr = data, i = 0; i < n - 1; i++, ptr++) {
-					if (*ptr < *(ptr + 1)) {
+					if (UNLIKELY(*ptr < *(ptr + 1))) {
 						pr_fail("%s: reverse sort "
 							"error detected, incorrect "
 							"ordering found\n", args->name);
+						rc = EXIT_FAILURE;
 						break;
 					}
 				}
 			}
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		stress_bogo_inc(args);
@@ -388,19 +314,19 @@ tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "heapsort comparisons per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	stress_metrics_set(args, 1, "heapsort comparisons per item",
-		count / sorted, STRESS_HARMONIC_MEAN);
+		count / sorted, STRESS_METRIC_HARMONIC_MEAN);
 
-	free(data);
+	(void)munmap((void *)data, data_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_heapsort_info = {
+const stressor_info_t stress_heapsort_info = {
 	.stressor = stress_heapsort,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SORT,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

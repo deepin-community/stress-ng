@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,11 +66,11 @@ struct shim_kcmp_epoll_slot {
 
 #define SHIM_KCMP(pid1, pid2, type, idx1, idx2)				\
 	(int)shim_kcmp((pid_t)pid1, (pid_t)pid2, (int)type,		\
-		  (unsigned long)idx1, (unsigned long)idx2)		\
+		  (unsigned long int)idx1, (unsigned long int)idx2)	\
 
 #define KCMP(pid1, pid2, type, idx1, idx2)				\
 do {									\
-	int rc = SHIM_KCMP(pid1, pid2, type, idx1, idx2);		\
+	const int rc = SHIM_KCMP(pid1, pid2, type, idx1, idx2);		\
 									\
 	if (UNLIKELY(rc < 0)) {	 					\
 		if (errno == EPERM) {					\
@@ -90,7 +90,7 @@ do {									\
 
 #define KCMP_VERIFY(pid1, pid2, type, idx1, idx2, res)			\
 do {									\
-	int rc = SHIM_KCMP(pid1, pid2, type, idx1, idx2);		\
+	const int rc = SHIM_KCMP(pid1, pid2, type, idx1, idx2);		\
 									\
 	if (UNLIKELY(rc != res)) {					\
 		if (rc < 0) {						\
@@ -112,7 +112,7 @@ do {									\
 			args->name, rc, ret);				\
 		}							\
 	}								\
-	if (!stress_continue_flag())					\
+	if (UNLIKELY(!stress_continue_flag()))				\
 		goto reap;						\
 } while (0)
 
@@ -127,7 +127,7 @@ static int stress_kcmp(stress_args_t *args)
 
 #if defined(HAVE_SYS_EPOLL_H) &&	\
     NEED_GLIBC(2,3,2)
-	int efd, sfd;
+	int efd = -1, sfd = -1;
 	int so_reuseaddr = 1;
 	struct epoll_event ev;
 	struct sockaddr *addr = NULL;
@@ -137,6 +137,10 @@ static int stress_kcmp(stress_args_t *args)
 	int ret = EXIT_SUCCESS;
 	const int bad_fd = stress_get_bad_fd();
 	const bool is_root = stress_check_capability(SHIM_CAP_IS_ROOT);
+#if defined(HAVE_SYS_EPOLL_H) &&	\
+    NEED_GLIBC(2,3,2)
+	int port = 23000, reserved_port;
+#endif
 
 	static const char *capfail =
 		"need CAP_SYS_PTRACE capability to run kcmp stressor, "
@@ -150,54 +154,57 @@ static int stress_kcmp(stress_args_t *args)
 
 #if defined(HAVE_SYS_EPOLL_H) &&	\
     NEED_GLIBC(2,3,2)
-	efd = -1;
-	if ((sfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-		sfd = -1;
-		goto again;
-	}
-	if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR,
-			&so_reuseaddr, sizeof(so_reuseaddr)) < 0) {
-		(void)close(sfd);
-		sfd = -1;
-		goto again;
-	}
-	if (stress_set_sockaddr(args->name, args->instance, mypid,
-		AF_INET, 23000, &addr, &addr_len, NET_ADDR_ANY) < 0) {
-		(void)close(sfd);
-		sfd = -1;
-		goto again;
-	}
+	reserved_port = stress_net_reserve_ports(port, port);
 
-	if (bind(sfd, addr, addr_len) < 0) {
-		(void)close(sfd);
-		sfd = -1;
-		goto again;
-	}
-	if (listen(sfd, SOMAXCONN) < 0) {
-		(void)close(sfd);
-		sfd = -1;
-		goto again;
-	}
-
-	efd = epoll_create1(0);
-	if (efd < 0) {
-		(void)close(sfd);
-		sfd = -1;
+	if (reserved_port >= 0) {
 		efd = -1;
-		goto again;
-	}
-
-	(void)shim_memset(&ev, 0, sizeof(ev));
-	ev.data.fd = efd;
-	ev.events = EPOLLIN | EPOLLET;
-	if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &ev) < 0) {
-		(void)close(sfd);
-		(void)close(efd);
-		sfd = -1;
-		efd = -1;
+		if ((sfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+			sfd = -1;
+			goto again;
+		}
+		if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR,
+				&so_reuseaddr, sizeof(so_reuseaddr)) < 0) {
+			(void)close(sfd);
+			sfd = -1;
+			goto again;
+		}
+		if (stress_set_sockaddr(args->name, args->instance, mypid,
+					AF_INET, reserved_port, &addr, &addr_len, NET_ADDR_ANY) < 0) {
+			(void)close(sfd);
+			sfd = -1;
+			goto again;
+		}
+		if (bind(sfd, addr, addr_len) < 0) {
+			(void)close(sfd);
+			sfd = -1;
+			goto again;
+		}
+		if (listen(sfd, SOMAXCONN) < 0) {
+			(void)close(sfd);
+			sfd = -1;
+			goto again;
+		}
+		efd = epoll_create1(0);
+		if (efd < 0) {
+			(void)close(sfd);
+			sfd = -1;
+			efd = -1;
+			goto again;
+		}
+		(void)shim_memset(&ev, 0, sizeof(ev));
+		ev.data.fd = efd;
+		ev.events = EPOLLIN | EPOLLET;
+		if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &ev) < 0) {
+			(void)close(sfd);
+			(void)close(efd);
+			sfd = -1;
+			efd = -1;
+		}
 	}
 #endif
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	pid1 = fork();
@@ -205,7 +212,7 @@ again:
 		if (stress_redo_fork(args, errno))
 			goto again;
 		(void)close(fd1);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -278,15 +285,15 @@ again:
 
 #if defined(HAVE_SYS_EPOLL_H) &&	\
     NEED_GLIBC(2,3,2)
-			if ((sfd != -1) && (efd != -1)) {
+			if (LIKELY((sfd != -1) && (efd != -1))) {
 				struct shim_kcmp_epoll_slot slot;
 
 				slot.efd = (uint32_t)efd;
 				slot.tfd = (uint32_t)sfd;
 				slot.toff = (uint32_t)0;
-				KCMP(pid1, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long)&slot);
-				KCMP(pid2, pid1, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long)&slot);
-				KCMP(pid2, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long)&slot);
+				KCMP(pid1, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long int)&slot);
+				KCMP(pid2, pid1, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long int)&slot);
+				KCMP(pid2, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long int)&slot);
 			}
 #endif
 
@@ -308,7 +315,7 @@ again:
 					slot.efd = (uint32_t)efd;
 					slot.tfd = (uint32_t)sfd;
 					slot.toff = (uint32_t)0;
-					KCMP(pid1, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long)&slot);
+					KCMP(pid1, pid2, SHIM_KCMP_EPOLL_TFD, efd, (unsigned long int)&slot);
 				}
 #endif
 			}
@@ -344,16 +351,16 @@ finish:
 	return ret;
 }
 
-stressor_info_t stress_kcmp_info = {
+const stressor_info_t stress_kcmp_info = {
 	.stressor = stress_kcmp,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_kcmp_info = {
+const stressor_info_t stress_kcmp_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without kcmp() system call support"
