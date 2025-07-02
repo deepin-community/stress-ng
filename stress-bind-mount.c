@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -57,7 +57,7 @@ static void MLOCKED_TEXT stress_bind_mount_child_handler(int signum)
  */
 static int stress_bind_mount_child(void *parg)
 {
-	stress_pthread_args_t *pargs = (stress_pthread_args_t *)parg;
+	const stress_pthread_args_t *pargs = (stress_pthread_args_t *)parg;
 	stress_args_t *args = pargs->args;
 	const char *path = (const char *)pargs->data;
 	double mount_duration = 0.0, umount_duration = 0.0;
@@ -79,14 +79,19 @@ static int stress_bind_mount_child(void *parg)
 	stress_parent_died_alarm();
 
 	do {
-		int rc, retries;
+		int rc, retries, stat_count, stat_okay;
 		DIR *dir;
-		struct dirent *d;
+		const struct dirent *d;
 		double t;
 
 		t = stress_time_now();
 		rc = mount("/", path, "", MS_BIND | MS_REC | MS_RDONLY, 0);
 		if (rc < 0) {
+			if ((errno == EACCES) || (errno == ENOENT)) {
+				pr_inf_skip("%s: bind mount failed, skipping stressor\n", args->name);
+				(void)shim_rmdir(path);
+				return EXIT_NO_RESOURCE;
+			}
 			if (errno != ENOSPC)
 				pr_fail("%s: bind mount failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
@@ -101,6 +106,10 @@ static int stress_bind_mount_child(void *parg)
 		dir = opendir("/");
 		if (!dir)
 			goto bind_umount;
+
+		stat_count = 0;
+		stat_okay = 0;
+
 		while ((d = readdir(dir)) != NULL) {
 			char bindpath[PATH_MAX + sizeof(d->d_name) + 1];
 			const char *name = d->d_name;
@@ -109,13 +118,23 @@ static int stress_bind_mount_child(void *parg)
 			if (*name == '.')
 				continue;
 
+			stat_count++;
 			(void)snprintf(bindpath, sizeof(bindpath), "%s/%s", path, name);
+			/*
+			 *  Note that not all files may succeed on being stat'd on
+			 *  some systems
+			 */
 			rc = shim_stat(bindpath, &statbuf);
-			if (rc < 0) {
-				pr_fail("%s: failed to stat bind mounted file %s, errno=%d (%s)\n",
-					args->name, bindpath, errno, strerror(errno));
-			}
+			if (rc == 0)
+				stat_okay++;
 		}
+		/*
+		 *  More than one file in directory and all failed to stat..? then
+		 *  this looks like multiple failures, so report it
+		 */
+		if ((stat_okay == 0) && (stat_count > 0))
+			pr_fail("%s: failed to stat %d bind mounted files\n",
+				args->name, stat_count - stat_okay);
 		(void)closedir(dir);
 
 bind_umount:
@@ -145,19 +164,18 @@ bind_umount:
 #endif
 		}
 		stress_bogo_inc(args);
-	} while (stress_continue_flag() &&
-		 (!args->max_ops || (stress_bogo_get(args) < args->max_ops)));
+	} while (stress_continue(args));
 
 	rate = (mount_count > 0.0) ? (double)mount_duration / mount_count : 0.0;
 	stress_metrics_set(args, 0, "microsecs per mount",
-		rate * STRESS_DBL_MICROSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MICROSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (umount_count > 0.0) ? (double)umount_duration / umount_count : 0.0;
 	stress_metrics_set(args, 1, "microsecs per umount",
-		rate * STRESS_DBL_MICROSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_MICROSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	/* Remove path in child process just in case parent fails to reap it */
 	(void)shim_rmdir(path);
-	return 0;
+	return EXIT_SUCCESS;
 }
 
 /*
@@ -166,10 +184,12 @@ bind_umount:
  */
 static int stress_bind_mount(stress_args_t *args)
 {
-	int status, ret;
+	int status, ret, rc = EXIT_SUCCESS;
 	char path[PATH_MAX];
 	stress_pthread_args_t pargs = { args, path, 0 };
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	(void)stress_temp_dir(path, sizeof(path), args->name, getpid(), args->instance);
@@ -184,7 +204,7 @@ static int stress_bind_mount(stress_args_t *args)
 	do {
 		pid_t pid;
 		static char stack[CLONE_STACK_SIZE];
-		char *stack_top = (char *)stress_get_stack_top((void *)stack, CLONE_STACK_SIZE);
+		char *const stack_top = (char *)stress_get_stack_top((void *)stack, CLONE_STACK_SIZE);
 
 		(void)shim_memset(stack, 0, sizeof stack);
 
@@ -207,26 +227,37 @@ static int stress_bind_mount(stress_args_t *args)
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
 		}
-		VOID_RET(int, shim_waitpid(pid, &status, 0));
+		if (shim_waitpid(pid, &status, 0) < 0) {
+			pr_inf("%s: waitpid on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+				args->name, (intmax_t)pid, errno, strerror(errno));
+			break;
+		}
+		if (WIFEXITED(status)) {
+			rc = WEXITSTATUS(status);
+			if (rc != EXIT_SUCCESS)
+				break;
+		} else if (WIFSIGNALED(status)) {
+			break;
+		}
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	(void)shim_rmdir(path);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_bind_mount_info = {
+const stressor_info_t stress_bind_mount_info = {
 	.stressor = stress_bind_mount,
-	.class = CLASS_FILESYSTEM | CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_bind_mount_info = {
+const stressor_info_t stress_bind_mount_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without Linux bind-mount options MS_BIND"

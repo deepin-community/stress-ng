@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,6 +29,8 @@
 #define STRESS_EFI_VARS		(1)
 #define STRESS_EFI_EFIVARS	(2)
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
 #endif
@@ -43,13 +45,13 @@ static const stress_help_t help[] = {
     !defined(STRESS_ARCH_ALPHA)
 
 typedef struct {
-	uint16_t	varname[512];
+	uint8_t		varname[512 * sizeof(uint16_t)];
 	uint8_t		guid[16];
-	uint64_t	datalen;
+	uint8_t		datalen[8];
 	uint8_t		data[1024];
-	uint64_t	status;
-	uint32_t	attributes;
-} __attribute__((packed)) stress_efi_var_t;
+	uint8_t		status[8];
+	uint8_t		attributes[4];
+} stress_efi_var_t ALIGNED(8);
 
 static const char sysfs_efi_vars[] = "/sys/firmware/efi/vars";
 static const char sysfs_efi_efivars[] = "/sys/firmware/efi/efivars";
@@ -109,13 +111,7 @@ static inline void efi_get_varname(char *dst, const size_t len, const stress_efi
 {
 	register size_t i = len;
 
-	/*
-	 * gcc-9 -Waddress-of-packed-member workaround, urgh, we know
-	 * this is always going to be aligned correctly, but gcc-9 whines
-	 * so this hack works around it for now.
-	 */
-	const uint8_t *src8 = (const uint8_t *)var->varname;
-	const uint16_t *src = (const uint16_t *)src8;
+	const uint16_t *src = (const uint16_t *)var->varname;
 
 	while ((*src) && (i > 1)) {
 		*dst++ = (char)(*(src++) & 0xff);
@@ -328,6 +324,7 @@ static int get_variable_sysfs_efi_vars(
 {
 	size_t i;
 	stress_efi_var_t var;
+	const uint32_t *attributes = (uint32_t *)var.attributes;
 
 	static const char * const efi_sysfs_names[] = {
 		"attributes",
@@ -350,7 +347,7 @@ static int get_variable_sysfs_efi_vars(
 			      duration, count) < 0)
 		return -1;
 
-	if (var.attributes) {
+	if (*attributes) {
 		char get_varname[513];
 		char guid_str[37];
 
@@ -395,7 +392,7 @@ static int efi_vars_get(
 	static char data[4096];
 	int i, rc = 0;
 
-	for (i = 0; stress_continue(args) && (i < dir_count); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < dir_count)); i++) {
 		char *d_name = efi_dentries[i]->d_name;
 		int ret;
 
@@ -439,11 +436,11 @@ static int efi_vars_get(
  */
 static int stress_efivar_supported(const char *name)
 {
-	if (access(sysfs_efi_efivars, R_OK)) {
+	if (access(sysfs_efi_efivars, R_OK) >= 0) {
 		efi_mode = STRESS_EFI_EFIVARS;
 		return 0;
 	}
-	if (access(sysfs_efi_vars, R_OK)) {
+	if (access(sysfs_efi_vars, R_OK) >= 0) {
 		efi_mode = STRESS_EFI_VARS;
 		return 0;
 	}
@@ -492,34 +489,39 @@ static int stress_efivar(stress_args_t *args)
 	}
 
 	sz = (((size_t)dir_count * sizeof(*efi_ignore)) + args->page_size) & (args->page_size - 1);
-	efi_ignore = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+	efi_ignore = (bool *)mmap(NULL, sz, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (efi_ignore == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %zd bytes of shared memory: "
+		pr_inf_skip("%s: cannot mmap %zu bytes of shared memory%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, sz, errno, strerror(errno));
+			args->name, sz, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(efi_ignore, sz, "efi-ignore-state");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	pid = fork();
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
-		pr_err("%s: fork failed: errno=%d (%s)\n",
+		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 	} else if (pid > 0) {
-		int status, ret;
+		int status;
+		pid_t ret;
 
 		/* Parent, wait for child */
 		ret = shim_waitpid(pid, &status, 0);
 		if (ret < 0) {
 			if (errno != EINTR)
-				pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 			stress_force_killed_bogo(args);
 			(void)stress_kill_pid_wait(pid, NULL);
 		} else if (WIFSIGNALED(status)) {
@@ -548,7 +550,7 @@ again:
 
 		rate = (duration > 0.0) ? count / duration : 0.0;
 		stress_metrics_set(args, 0, "efi raw data reads per sec",
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 
 		_exit(rc);
 	}
@@ -556,16 +558,16 @@ again:
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	(void)munmap(efi_ignore, sz);
+	(void)munmap((void *)efi_ignore, sz);
 	stress_dirent_list_free(efi_dentries, dir_count);
 
 	return rc;
 }
 
-stressor_info_t stress_efivar_info = {
+const stressor_info_t stress_efivar_info = {
 	.stressor = stress_efivar,
 	.supported = stress_efivar_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -577,10 +579,10 @@ static int stress_efivar_supported(const char *name)
 
 	return -1;
 }
-stressor_info_t stress_efivar_info = {
+const stressor_info_t stress_efivar_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_efivar_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux with EFI variable filesystem"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include "core-attribute.h"
 #include "core-builtin.h"
 #include "core-capabilities.h"
+
+#include <time.h>
 
 #if defined(HAVE_POLL_H)
 #include <poll.h>
@@ -167,6 +169,7 @@ static int stress_clock(stress_args_t *args)
 {
 	bool test_invalid_timespec = true;
 	const bool is_root = stress_check_capability(SHIM_CAP_IS_ROOT);
+	int rc = EXIT_SUCCESS;
 
 #if defined(CHECK_INVALID_CLOCK_ID)
 	const bool invalid_clock_id = check_invalid_clock_id(INT_MAX);
@@ -178,6 +181,8 @@ static int stress_clock(stress_args_t *args)
 	 */
 	stress_mwc_set_seed(0xf238, 0x1872);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -192,10 +197,14 @@ static int stress_clock(stress_args_t *args)
 			 *  Exercise setting local thread CPU timer
 			 */
 			ret = shim_clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
-			if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-			    (errno != EINVAL) && (errno != ENOSYS))
+			if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+				     (errno != EINVAL) &&
+				     (errno != ENOSYS) &&
+				     (errno != EINTR))) {
 				pr_fail("%s: clock_gettime failed for timer 'CLOCK_THREAD_CPUTIME_ID', errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+			}
 
 			/* Exercise clock_settime with illegal clockid */
 			(void)shim_clock_settime((clockid_t)-1, &t);
@@ -231,15 +240,21 @@ static int stress_clock(stress_args_t *args)
 				int ret;
 
 				ret = shim_clock_getres(clocks[i].id, &t);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-			            (errno != EINVAL) && (errno != ENOSYS))
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+					     (errno != EINVAL) &&
+					     (errno != ENOSYS))) {
 					pr_fail("%s: clock_getres failed for timer '%s', errno=%d (%s)\n",
 							args->name, clocks[i].name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 				ret = shim_clock_gettime(clocks[i].id, &t);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-			            (errno != EINVAL) && (errno != ENOSYS))
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+					     (errno != EINVAL) &&
+					     (errno != ENOSYS))) {
 					pr_fail("%s: clock_gettime failed for timer '%s', errno=%d (%s)\n",
 						args->name, clocks[i].name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+				}
 			}
 		}
 #else
@@ -257,22 +272,25 @@ static int stress_clock(stress_args_t *args)
 
 				/* Save current time to reset later if required */
 				ret = shim_clock_gettime(clocks[i].id, &t1);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-				    (errno != EINVAL) && (errno != ENOSYS)) {
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+					     (errno != EINVAL) &&
+					     (errno != ENOSYS))) {
 					pr_fail("%s: clock_getres failed for timer '%s', errno=%d (%s)\n",
-					args->name, clocks[i].name, errno, strerror(errno));
+						args->name, clocks[i].name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
-				if (ret < 0)
+				if (UNLIKELY(ret < 0))
 					continue;
 
 				/* Ensuring clock_settime cannot succeed without privilege */
 				if (!is_root) {
 					ret = shim_clock_settime(clocks[i].id, &t1);
-					if (ret != -EPERM) {
+					if (UNLIKELY(ret != -EPERM)) {
 						/* This is an error, report it! */
 						pr_fail("%s: clock_settime failed, did not have privilege to "
 							"set time, expected -EPERM, instead got errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 				}
 
@@ -291,19 +309,21 @@ static int stress_clock(stress_args_t *args)
 				 */
 				if ((t.tv_sec < 0) && (t.tv_nsec < 0)) {	/* cppcheck-suppress knownConditionTrueFalse */
 					ret = shim_clock_settime(clocks[i].id, &t);
-					if (ret < 0)
+					if (UNLIKELY(ret < 0))
 						continue;
 
 					/* Expected a failure, but it succeeded(!) */
 					pr_fail("%s: clock_settime was able to set an "
 						"invalid negative time for timer '%s'\n",
 						args->name, clocks[i].name);
+					rc = EXIT_FAILURE;
 
 					/* Restore the correct time */
 					ret = shim_clock_settime(clocks[i].id, &t1);
-					if ((ret < 0) && (errno != EINVAL) && (errno != ENOSYS)) {
+					if (UNLIKELY((ret < 0) && (errno != EINVAL) && (errno != ENOSYS))) {
 						pr_fail("%s: clock_gettime failed for timer '%s', errno=%d (%s)\n",
 							args->name, clocks[i].name, errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 					/*
 					 * Ensuring invalid clock_settime runs
@@ -355,11 +375,15 @@ static int stress_clock(stress_args_t *args)
 				 *  clock_nanosleep() to return immediately
 				 */
 				ret = clock_nanosleep(clocks_nanosleep[i], TIMER_ABSTIME, &t, NULL);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))
-					pr_fail("%s: clock_nanosleep failed for timer '%s', errno=%d (%s)\n",
-						args->name,
-						stress_clock_name(clocks_nanosleep[i]),
-						errno, strerror(errno));
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
+					if (errno != EINTR) {
+						pr_fail("%s: clock_nanosleep failed for timer '%s', errno=%d (%s)\n",
+							args->name,
+							stress_clock_name(clocks_nanosleep[i]),
+							errno, strerror(errno));
+						rc = EXIT_FAILURE;
+					}
+				}
 			}
 		}
 #else
@@ -393,11 +417,12 @@ static int stress_clock(stress_args_t *args)
 				tx.time.tv_usec = 0;
 
 				ret = shim_clock_adjtime(clocks[i].id, &tx);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-			            (errno != EINVAL) && (errno != ENOSYS) &&
-				    (errno != EPERM) && (errno != EOPNOTSUPP)) {
+				if (UNLIKELY(((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+					     (errno != EINVAL) && (errno != ENOSYS) &&
+					     (errno != EPERM) && (errno != EOPNOTSUPP)))) {
 					pr_fail("%s: clock_adjtime failed for timer '%s', errno=%d (%s)\n",
 						args->name, clocks[i].name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 		}
@@ -429,15 +454,16 @@ static int stress_clock(stress_args_t *args)
 
 				sevp.sigev_notify = SIGEV_NONE;
 				ret = timer_create(timers[i], &sevp, &timer_id[i]);
-				if (ret < 0) {
+				if (UNLIKELY(ret < 0)) {
 					timer_fail[i] = true;
 					if (g_opt_flags & OPT_FLAGS_VERIFY) {
-						if ((errno == EINVAL) || (errno == EPERM))
+						if ((errno == EINVAL) || (errno == EPERM) || (errno == ENOTSUP))
 							continue;
 						pr_fail("%s: timer_create failed for timer '%s', errno=%d (%s)\n",
 							args->name,
 							stress_clock_name(timers[i]),
 							errno, strerror(errno));
+						rc = EXIT_FAILURE;
 					}
 					continue;
 				}
@@ -449,38 +475,41 @@ static int stress_clock(stress_args_t *args)
 				its.it_interval.tv_nsec = 0;
 
 				ret = timer_settime(timer_id[i], 0, &its, NULL);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY)) {
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
 					pr_fail("%s: timer_settime failed for timer '%s', errno=%d (%s)\n",
 						args->name,
 						stress_clock_name(timers[i]),
 						errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 			}
 
 			for (i = 0; i < MAX_TIMERS; i++) {
-				if (timer_fail[i] || (timer_id[i] == (timer_t)-1))
+				if (UNLIKELY(timer_fail[i] || (timer_id[i] == (timer_t)-1)))
 					continue;
 
 				ret = timer_gettime(timer_id[i], &its);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY)) {
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
 					pr_fail("%s: timer_gettime failed for timer '%s', errno=%d (%s)\n",
 						args->name,
 						stress_clock_name(timers[i]),
 						errno, strerror(errno));
+					rc = EXIT_FAILURE;
 					break;
 				}
 				VOID_RET(int, timer_getoverrun(timer_id[i]));
 			}
 
 			for (i = 0; i < MAX_TIMERS; i++) {
-				if (timer_fail[i] || (timer_id[i] == (timer_t)-1))
+				if (UNLIKELY(timer_fail[i] || (timer_id[i] == (timer_t)-1)))
 					continue;
 				ret = timer_delete(timer_id[i]);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY)) {
+				if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
 					pr_fail("%s: timer_delete failed for timer '%s', errno=%d (%s)\n",
 						args->name,
 						stress_clock_name(timers[i]),
 						errno, strerror(errno));
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -496,8 +525,10 @@ static int stress_clock(stress_args_t *args)
 			fd = open("/dev/ptp0", O_RDWR);
 			if (fd >= 0) {
 				struct timespec t;
-				int ret, clkid = FD_TO_CLOCKID(fd);
-#if defined(HAVE_POLL_H)
+				int ret;
+				const int clkid = FD_TO_CLOCKID(fd);
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 				struct pollfd pollfds[1];
 
 				pollfds[0].fd = fd;
@@ -512,14 +543,16 @@ static int stress_clock(stress_args_t *args)
 				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
 				    (errno != EINVAL) && (errno != ENOSYS)) {
 					pr_fail("%s: clock_gettime failed for /dev/ptp0, errno=%d (%s)",
-					args->name, errno, strerror(errno));
+						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 #if defined(HAVE_CLOCK_GETRES)
 				ret = shim_clock_getres(clkid, &t);
-				if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
-				    (errno != EINVAL) && (errno != ENOSYS)) {
+				if (UNLIKELY(((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY) &&
+					     (errno != EINVAL) && (errno != ENOSYS)))) {
 					pr_fail("%s: clock_getres failed for /dev/ptp0, errno=%d (%s)",
-					args->name, errno, strerror(errno));
+						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 #else
 				UNEXPECTED
@@ -533,19 +566,19 @@ static int stress_clock(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_clock_info = {
+const stressor_info_t stress_clock_info = {
 	.stressor = stress_clock,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_clock_info = {
+const stressor_info_t stress_clock_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without librt or clock_gettime()/clock_settime() support"

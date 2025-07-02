@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -79,7 +79,8 @@ typedef struct {
 typedef void (*stress_tree_func)(stress_args_t *args,
 				 const size_t n,
 				 struct tree_node *data,
-				 stress_tree_metrics_t *metrics);
+				 stress_tree_metrics_t *metrics,
+				 int *rc);
 
 typedef struct {
 	const char              *name;  /* human readable form of stressor */
@@ -125,7 +126,7 @@ typedef struct btree_node {
 } btree_node_t;
 
 /*
- *  We can enable struct packing for x86 since
+ *  We can enable struct packing for 64 bit x86 since
  *  this allows unaligned access of packed pointers.
  *  For large trees where stressing becomes memory
  *  bound once the tree is larger than the cache
@@ -133,7 +134,7 @@ typedef struct btree_node {
  *  since the memory stall penalty is much larger than
  *  the misaligned pointer access penalty.
  */
-#if !defined(STRESS_ARCH_X86)
+#if !defined(STRESS_ARCH_X86_64)
 #undef PACKED
 #define PACKED
 #endif
@@ -158,20 +159,6 @@ struct tree_node {
 } PACKED;
 
 STRESS_PRAGMA_POP
-
-/*
- *  stress_set_tree_size()
- *	set tree size
- */
-static int stress_set_tree_size(const char *opt)
-{
-	uint64_t tree_size;
-
-	tree_size = stress_get_uint64(opt);
-	stress_check_range("tree-size", tree_size,
-		MIN_TREE_SIZE, MAX_TREE_SIZE);
-	return stress_set_setting("tree-size", TYPE_ID_UINT64, &tree_size);
-}
 
 /*
  *  stress_tree_handler()
@@ -209,7 +196,8 @@ static void OPTIMIZE3 stress_tree_rb(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 	register struct tree_node *node, *next;
@@ -229,14 +217,16 @@ PRAGMA_UNROLL_N(4)
 	}
 	metrics->insert += stress_time_now() - t;
 
-	/* Manditory forward tree check */
+	/* Mandatory forward tree check */
 	t = stress_time_now();
 PRAGMA_UNROLL_N(4)
 	for (node = nodes, i = 0; i < n; i++, node++) {
 		find = RB_FIND(stress_rb_tree, &rb_root, node);
-		if (!find)
+		if (UNLIKELY(!find)) {
 			pr_fail("%s: rb tree node #%zd not found\n",
 				args->name, i);
+			*rc = EXIT_FAILURE;
+		}
 	}
 	metrics->find += stress_time_now() - t;
 
@@ -244,9 +234,11 @@ PRAGMA_UNROLL_N(4)
 		/* optional reverse find */
 		for (node = &nodes[n - 1], i = n - 1; node >= nodes; node--, i--) {
 			find = RB_FIND(stress_rb_tree, &rb_root, node);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: rb tree node #%zd not found\n",
 					args->name, i);
+				*rc = EXIT_FAILURE;
+			}
 		}
 		/* optional random find */
 PRAGMA_UNROLL_N(4)
@@ -254,9 +246,11 @@ PRAGMA_UNROLL_N(4)
 			const size_t j = stress_mwc32modn(n);
 
 			find = RB_FIND(stress_rb_tree, &rb_root, &nodes[j]);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: rb tree node #%zd not found\n",
 					args->name, j);
+				*rc = EXIT_FAILURE;
+			}
 		}
 	}
 
@@ -279,7 +273,8 @@ static void OPTIMIZE3 stress_tree_splay(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 	register struct tree_node *node, *next;
@@ -299,14 +294,16 @@ PRAGMA_UNROLL_N(4)
 	}
 	metrics->insert += stress_time_now() - t;
 
-	/* Manditory forward tree check */
+	/* Mandatory forward tree check */
 	t = stress_time_now();
 PRAGMA_UNROLL_N(4)
 	for (node = nodes, i = 0; i < n; i++, node++) {
 		find = SPLAY_FIND(stress_splay_tree, &splay_root, node);
-		if (!find)
+		if (UNLIKELY(!find)) {
 			pr_fail("%s: splay tree node #%zd not found\n",
 				args->name, i);
+			*rc = EXIT_FAILURE;
+		}
 	}
 	metrics->find += stress_time_now() - t;
 
@@ -314,18 +311,22 @@ PRAGMA_UNROLL_N(4)
 		/* optional reverse find */
 		for (node = &nodes[n - 1], i = n - 1; node >= nodes; node--, i--) {
 			find = SPLAY_FIND(stress_splay_tree, &splay_root, node);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: splay tree node #%zd not found\n",
 					args->name, i);
+				*rc = EXIT_FAILURE;
+			}
 		}
 		/* optional random find */
 		for (i = 0; i < n; i++) {
 			const size_t j = stress_mwc32modn(n);
 
 			find = SPLAY_FIND(stress_splay_tree, &splay_root, &nodes[j]);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: splay tree node #%zd not found\n",
 					args->name, j);
+				*rc = EXIT_FAILURE;
+			}
 		}
 	}
 	t = stress_time_now();
@@ -382,11 +383,12 @@ static void OPTIMIZE3 stress_tree_binary(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 	struct tree_node *node, *head = NULL;
-	struct tree_node *find;
+	const struct tree_node *find;
 	double t;
 
 	t = stress_time_now();
@@ -396,14 +398,16 @@ PRAGMA_UNROLL_N(4)
 	}
 	metrics->insert += stress_time_now() - t;
 
-	/* Manditory forward tree check */
+	/* Mandatory forward tree check */
 	t = stress_time_now();
 PRAGMA_UNROLL_N(4)
 	for (node = nodes, i = 0; i < n; i++, node++) {
 		find = binary_find(head, node);
-		if (!find)
+		if (UNLIKELY(!find)) {
 			pr_fail("%s: binary tree node #%zd not found\n",
 				args->name, i);
+			*rc = EXIT_FAILURE;
+		}
 	}
 	metrics->find += stress_time_now() - t;
 
@@ -411,18 +415,22 @@ PRAGMA_UNROLL_N(4)
 		/* optional reverse find */
 		for (node = &nodes[n - 1], i = n - 1; node >= nodes; node--, i--) {
 			find = binary_find(head, node);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: binary tree node #%zd not found\n",
 					args->name, i);
+				*rc = EXIT_FAILURE;
+			}
 		}
 		/* optional random find */
 		for (i = 0; i < n; i++) {
 			const size_t j = stress_mwc32modn(n);
 
 			find = binary_find(head, &nodes[j]);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: binary tree node #%zd not found\n",
 					args->name, j);
+				*rc = EXIT_FAILURE;
+			}
 		}
 	}
 	t = stress_time_now();
@@ -589,11 +597,12 @@ static void OPTIMIZE3 stress_tree_avl(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 	struct tree_node *node, *head = NULL;
-	struct tree_node *find;
+	const struct tree_node *find;
 	double t;
 
 	t = stress_time_now();
@@ -603,14 +612,16 @@ PRAGMA_UNROLL_N(4)
 	}
 	metrics->insert += stress_time_now() - t;
 
-	/* Manditory forward tree check */
+	/* Mandatory forward tree check */
 	t = stress_time_now();
 PRAGMA_UNROLL_N(4)
 	for (node = nodes, i = 0; i < n; i++, node++) {
 		find = avl_find(head, node);
-		if (!find)
+		if (UNLIKELY(!find)) {
 			pr_fail("%s: avl tree node #%zd not found\n",
 				args->name, i);
+			*rc = EXIT_FAILURE;
+		}
 	}
 	metrics->find += stress_time_now() - t;
 
@@ -618,18 +629,22 @@ PRAGMA_UNROLL_N(4)
 		/* optional reverse find */
 		for (node = &nodes[n - 1], i = n - 1; node >= nodes; node--, i--) {
 			find = avl_find(head, node);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: avl tree node #%zd not found\n",
 					args->name, i);
+				*rc = EXIT_FAILURE;
+			}
 		}
 		/* optional random find */
 		for (i = 0; i < n; i++) {
 			const size_t j = stress_mwc32modn(n);
 
 			find = avl_find(head, &nodes[j]);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: avl tree node #%zd not found\n",
 					args->name, j);
+				*rc = EXIT_FAILURE;
+			}
 		}
 	}
 	t = stress_time_now();
@@ -808,7 +823,8 @@ static void stress_tree_btree(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 	struct tree_node *node;
@@ -822,14 +838,16 @@ PRAGMA_UNROLL_N(4)
 		btree_insert(&root, node->value);
 	metrics->insert += stress_time_now() - t;
 
-	/* Manditory forward tree check */
+	/* Mandatory forward tree check */
 	t = stress_time_now();
 PRAGMA_UNROLL_N(4)
 	for (node = nodes, i = 0; i < n; i++, node++) {
 		find = btree_find(root, node->value);
-		if (!find)
+		if (UNLIKELY(!find)) {
 			pr_fail("%s: btree node #%zd not found\n",
 				args->name, i);
+			*rc = EXIT_FAILURE;
+		}
 	}
 	metrics->find += stress_time_now() - t;
 
@@ -837,18 +855,22 @@ PRAGMA_UNROLL_N(4)
 		/* optional reverse find */
 		for (node = &nodes[n - 1], i = n - 1; node >= nodes; node--, i--) {
 			find = btree_find(root, node->value);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: btree node #%zd not found\n",
 					args->name, i);
+				*rc = EXIT_FAILURE;
+			}
 		}
 		/* optional random find */
 		for (i = 0; i < n; i++) {
 			const size_t j = stress_mwc32modn(n);
 
 			find = btree_find(root, nodes[j].value);
-			if (!find)
+			if (UNLIKELY(!find)) {
 				pr_fail("%s: btree node #%zd not found\n",
 					args->name, j);
+				*rc = EXIT_FAILURE;
+			}
 		}
 	}
 	t = stress_time_now();
@@ -861,7 +883,8 @@ static void stress_tree_all(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics);
+	stress_tree_metrics_t *metrics,
+	int *rc);
 
 /*
  * Table of tree stress methods
@@ -885,45 +908,27 @@ static void stress_tree_all(
 	stress_args_t *args,
 	const size_t n,
 	struct tree_node *nodes,
-	stress_tree_metrics_t *metrics)
+	stress_tree_metrics_t *metrics,
+	int *rc)
 {
 	size_t i;
 
 	(void)metrics;
 
 	for (i = 1; i < SIZEOF_ARRAY(stress_tree_methods); i++) {
-		stress_tree_methods[i].func(args, n, nodes, &stress_tree_metrics[i]);
+		stress_tree_methods[i].func(args, n, nodes, &stress_tree_metrics[i], rc);
 	}
 }
 
-/*
- *  stress_set_tree_method()
- *	set the default funccal stress method
- */
-static int stress_set_tree_method(const char *name)
+static const char *stress_tree_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_tree_methods); i++) {
-		if (!strcmp(stress_tree_methods[i].name, name)) {
-			stress_set_setting("tree-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "tree-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_tree_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_tree_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_tree_methods)) ? stress_tree_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_tree_method,	stress_set_tree_method },
-	{ OPT_tree_size,	stress_set_tree_size },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_tree_method, "tree-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_tree_method },
+	{ OPT_tree_size,   "tree-size",   TYPE_ID_UINT64, MIN_TREE_SIZE, MAX_TREE_SIZE, NULL },
+	END_OPT,
 };
 
 static void OPTIMIZE3 TARGET_CLONES stress_tree_shuffle(struct tree_node *nodes, const size_t n)
@@ -957,7 +962,7 @@ static int stress_tree(stress_args_t *args)
 	struct tree_node *nodes;
 	size_t n, i, j, tree_method = 0;
 	struct sigaction old_action;
-	int ret;
+	int ret, rc = EXIT_SUCCESS;
 	stress_tree_func func;
 	stress_tree_metrics_t *metrics;
 
@@ -982,7 +987,7 @@ static int stress_tree(stress_args_t *args)
 			tree_size = MIN_TREE_SIZE;
 	}
 	n = (size_t)tree_size;
-	nodes = calloc(n, sizeof(*nodes));
+	nodes = (struct tree_node *)calloc(n, sizeof(*nodes));
 	if (!nodes) {
 		pr_inf_skip("%s: malloc failed allocating %zd tree nodes, "
 			"skipping stressor\n", args->name, n);
@@ -1007,14 +1012,16 @@ static int stress_tree(stress_args_t *args)
 		nodes[i].value = (uint32_t)i;
 	stress_tree_shuffle(nodes, n);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		func(args, n, nodes, metrics);
+		func(args, n, nodes, metrics, &rc);
 		stress_tree_shuffle(nodes, n);
 
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	do_jmp = false;
 	(void)stress_sigrestore(args->name, SIGALRM, &old_action);
@@ -1031,20 +1038,20 @@ tidy:
 
 			(void)snprintf(msg, sizeof(msg), "%s tree operations per sec", stress_tree_methods[i].name);
 			stress_metrics_set(args, j, msg,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	free(nodes);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_tree_info = {
+const stressor_info_t stress_tree_info = {
 	.stressor = stress_tree,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SEARCH,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

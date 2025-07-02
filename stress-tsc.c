@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,20 +42,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_tsc_lfence(const char *opt)
-{
-	return stress_set_setting_true("tsc-lfence", opt);
-}
-
-static int stress_set_tsc_rdtscp(const char *opt)
-{
-	return stress_set_setting_true("tsc-rdtscp", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_tsc_lfence,	stress_set_tsc_lfence },
-	{ OPT_tsc_rdtscp,	stress_set_tsc_rdtscp },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_tsc_lfence, "tsc-lfence", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_tsc_rdtscp, "tsc-rdtscp", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(STRESS_ARCH_LOONG64) &&	\
@@ -104,7 +94,7 @@ static void stress_sigill_handler(int signum)
  */
 static int stress_tsc_supported(const char *name)
 {
-	unsigned long cycles;
+	unsigned long int cycles;
 
 	if (stress_sighandler(name, SIGILL, stress_sigill_handler, NULL) < 0)
 		return -1;
@@ -172,7 +162,7 @@ static inline uint64_t rdtsc(void)
 	return stress_asm_x86_rdtsc();
 }
 
-#elif defined(STRESS_ARCH_PPC64) &&		\
+#elif (defined(STRESS_ARCH_PPC64) || defined(STRESS_ARCH_PPC)) &&	\
       defined(HAVE_SYS_PLATFORM_PPC_H) &&	\
       defined(HAVE_PPC_GET_TIMEBASE)
 
@@ -653,7 +643,10 @@ static int stress_tsc(stress_args_t *args)
 	int ret = EXIT_SUCCESS;
 	int (*tsc_func)(stress_args_t *args, const bool verify, double *duration) = stress_tsc_generic;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	(void)stress_get_setting("tsc-lfence", &tsc_lfence);
 	(void)stress_get_setting("tsc-rdtscp", &tsc_rdtscp);
 
@@ -701,19 +694,19 @@ static int stress_tsc(stress_args_t *args)
 		count = 32.0 * 4.0 * (double)stress_bogo_get(args);
 		duration = (count > 0.0) ? duration / count : 0.0;
 		stress_metrics_set(args, 0, "nanosecs per time counter read",
-			duration * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+			duration * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return ret;
 }
 
-stressor_info_t stress_tsc_info = {
+const stressor_info_t stress_tsc_info = {
 	.stressor = stress_tsc,
 	.supported = stress_tsc_supported,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_OPTIONAL,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 #else
@@ -725,12 +718,12 @@ static int stress_tsc_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_tsc_info = {
+const stressor_info_t stress_tsc_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_tsc_supported,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_OPTIONAL,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without RISC-V rdtime, x86 rdtsc, s390 stck instructions or powerpc __ppc_get_timebase()"
 };

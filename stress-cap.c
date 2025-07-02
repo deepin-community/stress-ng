@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+
+#include <ctype.h>
 
 #if defined(HAVE_SYS_CAPABILITY_H)
 #include <sys/capability.h>
@@ -54,8 +56,9 @@ static int stress_capgetset_pid(
 	if (ret < 0) {
 		if (((errno == ESRCH) && exists) ||
 		    (errno != ESRCH)) {
-			pr_fail("%s: capget on PID %jd failed: errno=%d (%s)\n",
+			pr_fail("%s: capget on PID %" PRIdMAX " failed, errno=%d (%s)\n",
 				args->name, (intmax_t)pid, errno, strerror(errno));
+			return EXIT_FAILURE;
 		}
 	}
 
@@ -64,8 +67,9 @@ static int stress_capgetset_pid(
 		if (ret < 0) {
 			if (((errno == ESRCH) && exists) ||
 			    (errno != ESRCH)) {
-				pr_fail("%s: capget on PID %jd failed: errno=%d (%s)\n",
+				pr_fail("%s: capget on PID %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)pid, errno, strerror(errno));
+				return EXIT_FAILURE;
 			}
 		}
 
@@ -145,34 +149,36 @@ static int stress_capgetset_pid(
  */
 static int stress_cap(stress_args_t *args)
 {
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		DIR *dir;
 
 		stress_capgetset_pid(args, 1, false, true);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		stress_capgetset_pid(args, args->pid, true, true);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		stress_capgetset_pid(args, getppid(), false, false);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		dir = opendir("/proc");
 		if (dir) {
-			struct dirent *d;
+			const struct dirent *d;
 
 			while ((d = readdir(dir)) != NULL) {
 				intmax_t p;
 
-				if (!isdigit(d->d_name[0]))
+				if (!isdigit((unsigned char)d->d_name[0]))
 					continue;
 				if (sscanf(d->d_name, "%" SCNdMAX, &p) != 1)
 					continue;
 				stress_capgetset_pid(args, (pid_t)p, false, false);
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					break;
 			}
 			(void)closedir(dir);
@@ -183,16 +189,16 @@ static int stress_cap(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_cap_info = {
+const stressor_info_t stress_cap_info = {
 	.stressor = stress_cap,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_cap_info = {
+const stressor_info_t stress_cap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.verify = VERIFY_ALWAYS,
 	.unimplemented_reason = "built without sys/capability.h"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -44,42 +44,12 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_affinity_delay(const char *opt)
-{
-	uint64_t affinity_delay;
-
-	affinity_delay = stress_get_uint64(opt);
-	stress_check_range("affinity-delay", affinity_delay,
-		0, STRESS_NANOSECOND);
-	return stress_set_setting("affinity-delay", TYPE_ID_UINT64, &affinity_delay);
-}
-
-static int stress_set_affinity_rand(const char *opt)
-{
-	return stress_set_setting_true("affinity-rand", opt);
-}
-
-static int stress_set_affinity_pin(const char *opt)
-{
-	return stress_set_setting_true("affinity-pin", opt);
-}
-
-static int stress_set_affinity_sleep(const char *opt)
-{
-	uint64_t affinity_sleep;
-
-	affinity_sleep = stress_get_uint64(opt);
-	stress_check_range("affinity-sleep", affinity_sleep,
-		0, STRESS_NANOSECOND);
-	return stress_set_setting("affinity-sleep", TYPE_ID_UINT64, &affinity_sleep);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_affinity_delay,	stress_set_affinity_delay },
-	{ OPT_affinity_pin,	stress_set_affinity_pin },
-	{ OPT_affinity_rand,    stress_set_affinity_rand },
-	{ OPT_affinity_sleep,   stress_set_affinity_sleep },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_affinity_delay, "affinity-delay", TYPE_ID_UINT64, 0, STRESS_NANOSECOND, NULL },
+	{ OPT_affinity_pin,   "affinity-pin",	TYPE_ID_BOOL,	0, 1,                 NULL },
+	{ OPT_affinity_rand,  "affinity-rand",  TYPE_ID_BOOL,	0, 1,                 NULL },
+	{ OPT_affinity_sleep, "affinity-sleep", TYPE_ID_UINT64, 0, STRESS_NANOSECOND, NULL },
+	END_OPT,
 };
 
 /*
@@ -119,9 +89,9 @@ static int stress_affinity_supported(const char *name)
  *  stress_affinity_reap()
  *	kill and wait on child processes
  */
-static void stress_affinity_reap(stress_args_t *args, const pid_t *pids)
+static void stress_affinity_reap(stress_args_t *args, const stress_pid_t *s_pids)
 {
-	stress_kill_and_wait_many(args, pids, STRESS_AFFINITY_PROCS,  SIGALRM, true);
+	stress_kill_and_wait_many(args, s_pids, STRESS_AFFINITY_PROCS, SIGALRM, true);
 }
 
 /*
@@ -138,7 +108,7 @@ static inline void stress_affinity_spin_delay(
 		((double)delay / (double)STRESS_NANOSECOND);
 
 	while ((stress_time_now() < end) && (cpu == info->cpu))
-		shim_sched_yield();
+		(void)shim_sched_yield();
 }
 
 /*
@@ -155,8 +125,6 @@ static void stress_affinity_child(
 	bool stress_continue_affinity = true;
 
 	CPU_ZERO(&mask0);
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		cpu_set_t mask;
@@ -186,7 +154,7 @@ static void stress_affinity_child(
 		}
 		CPU_ZERO(&mask);
 		CPU_SET(cpu, &mask);
-		if (sched_setaffinity(0, sizeof(mask), &mask) < 0) {
+		if (UNLIKELY(sched_setaffinity(0, sizeof(mask), &mask) < 0)) {
 			if (errno == EINVAL) {
 				/*
 				 * We get this if CPU is offline'd,
@@ -209,6 +177,31 @@ static void stress_affinity_child(
 						args->name, cpu);
 			}
 		}
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE) {
+			uint32_t next_cpu = (cpu + 1) % info->cpus;
+			uint32_t prev_cpu = (cpu + info->cpus - 1) % info->cpus;
+
+			CPU_ZERO(&mask);
+			CPU_SET(next_cpu, &mask);
+			(void)sched_setaffinity(0, sizeof(mask), &mask);
+			(void)shim_sched_yield();
+
+			CPU_ZERO(&mask);
+			CPU_SET(stress_mwc32modn(info->cpus), &mask);
+			(void)sched_setaffinity(0, sizeof(mask), &mask);
+			(void)shim_sched_yield();
+
+			CPU_ZERO(&mask);
+			CPU_SET(next_cpu, &mask);
+			(void)sched_setaffinity(0, sizeof(mask), &mask);
+			(void)shim_sched_yield();
+
+			CPU_ZERO(&mask);
+			CPU_SET(prev_cpu, &mask);
+			(void)sched_setaffinity(0, sizeof(mask), &mask);
+			(void)shim_sched_yield();
+		}
+
 		/* Exercise getaffinity with invalid pid */
 		VOID_RET(int, sched_getaffinity(-1, sizeof(mask), &mask));
 
@@ -229,20 +222,29 @@ affinity_continue:
 		if (info->affinity_delay > 0)
 			stress_affinity_spin_delay(info->affinity_delay, info);
 		if (info->affinity_sleep > 0)
-			shim_nanosleep_uint64(info->affinity_sleep);
+			(void)shim_nanosleep_uint64(info->affinity_sleep);
 	} while (stress_continue(args));
 }
 
 static int stress_affinity(stress_args_t *args)
 {
-	pid_t pids[STRESS_AFFINITY_PROCS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
+
 	size_t i;
 	stress_affinity_info_t *info;
 	const size_t info_sz = (sizeof(*info) + args->page_size) & ~(args->page_size - 1);
 
-	counter_lock = stress_lock_create();
+	s_pids = stress_sync_s_pids_mmap(STRESS_AFFINITY_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, STRESS_AFFINITY_PROCS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
+
+	counter_lock = stress_lock_create("counter");
 	if (!counter_lock) {
 		pr_inf_skip("%s: failed to create counter lock. skipping stressor\n", args->name);
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_AFFINITY_PROCS);
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -250,13 +252,13 @@ static int stress_affinity(stress_args_t *args)
 			info_sz, PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (info == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %zd bytes for shared counters, skipping stressor\n",
-			args->name, info_sz);
+		pr_inf_skip("%s: cannot mmap %zu bytes for shared counters%s, skipping stressor\n",
+			args->name, info_sz, stress_get_memfree_str());
 		(void)stress_lock_destroy(counter_lock);
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_AFFINITY_PROCS);
 		return EXIT_NO_RESOURCE;
 	}
-
-	(void)shim_memset(pids, 0, sizeof(pids));
+	stress_set_vma_anon_name(info, info_sz, "counters");
 
 	info->affinity_delay = 0;
 	info->affinity_pin = false;
@@ -274,15 +276,27 @@ static int stress_affinity(stress_args_t *args)
 	 *  slot 0 is the parent.
 	 */
 	for (i = 1; i < STRESS_AFFINITY_PROCS; i++) {
-		pids[i] = fork();
+		stress_sync_start_init(&s_pids[i]);
+		s_pids[i].pid = fork();
 
-		if (pids[i] == 0) {
+		if (s_pids[i].pid == 0) {
+			s_pids[i].pid = getpid();
+
+			stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+			stress_sync_start_wait_s_pid(&s_pids[i]);
+			stress_set_proc_state(args->name, STRESS_STATE_RUN);
 			stress_affinity_child(args, info, false);
 			_exit(EXIT_SUCCESS);
+		} else if (s_pids[i].pid > 0) {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	stress_affinity_child(args, info, true);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -291,27 +305,28 @@ static int stress_affinity(stress_args_t *args)
 	 *  will have reap'd the processes, but to be safe, reap again
 	 *  to ensure all processes are really dead and reaped.
 	 */
-	stress_affinity_reap(args, pids);
+	stress_affinity_reap(args, s_pids);
 
 	(void)munmap((void *)info, info_sz);
 	(void)stress_lock_destroy(counter_lock);
+	(void)stress_sync_s_pids_munmap(s_pids, STRESS_AFFINITY_PROCS);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_affinity_info = {
+const stressor_info_t stress_affinity_info = {
 	.stressor = stress_affinity,
-	.class = CLASS_SCHEDULER,
+	.classifier = CLASS_SCHEDULER,
 	.supported = stress_affinity_supported,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 };
 #else
-stressor_info_t stress_affinity_info = {
+const stressor_info_t stress_affinity_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without sched_getaffinity() or sched_setaffinity()"

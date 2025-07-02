@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -118,22 +118,22 @@ static struct sock_filter filter[] = {
 static struct sock_filter filter_random[64];
 
 static struct sock_fprog prog_allow_all = {
-	.len = (unsigned short)SIZEOF_ARRAY(filter_allow_all),
+	.len = (unsigned short int)SIZEOF_ARRAY(filter_allow_all),
 	.filter = filter_allow_all
 };
 
 static struct sock_fprog prog_allow_write = {
-	.len = (unsigned short)SIZEOF_ARRAY(filter_allow_write),
+	.len = (unsigned short int)SIZEOF_ARRAY(filter_allow_write),
 	.filter = filter_allow_write
 };
 
 static struct sock_fprog prog = {
-	.len = (unsigned short)SIZEOF_ARRAY(filter),
+	.len = (unsigned short int)SIZEOF_ARRAY(filter),
 	.filter = filter
 };
 
 static struct sock_fprog prog_random = {
-	.len = (unsigned short)SIZEOF_ARRAY(filter_random),
+	.len = (unsigned short int)SIZEOF_ARRAY(filter_random),
 	.filter = filter_random
 };
 
@@ -175,7 +175,7 @@ static int stress_seccomp_supported(const char *name)
 	pid = fork();
 	if (pid < 0) {
 		pr_inf_skip("%s stressor will be skipped, the check for seccomp "
-			"failed, fork failed: errno=%d (%s)\n",
+			"failed, fork failed, errno=%d (%s)\n",
 			name, errno, strerror(errno));
 		return -1;
 	}
@@ -187,7 +187,7 @@ static int stress_seccomp_supported(const char *name)
 	}
 	if (shim_waitpid(pid, &status, 0) < 0) {
 		pr_inf_skip("%s stressor will be skipped, the check for seccomp "
-			"failed, wait failed: errno=%d (%s)\n",
+			"failed, wait failed, errno=%d (%s)\n",
 			name, errno, strerror(errno));
 		return -1;
 	}
@@ -237,13 +237,13 @@ static int stress_seccomp_set_huge_filter(stress_args_t *args)
 	for (j = 0; (n < n_max) && (n != max) && (j < 64); j++) {
 		struct sock_filter *huge_filter;
 
-		huge_filter = calloc(n, sizeof(*huge_filter));
+		huge_filter = (struct sock_filter *)calloc(n, sizeof(*huge_filter));
 		if (!huge_filter)
 			return -1;
 
 		for (i = 0; i < n; i++)
 			huge_filter[i] = bpf_stmt;
-		huge_prog.len = (unsigned short)n;
+		huge_prog.len = (unsigned short int)n;
 		huge_prog.filter = huge_filter;
 
 #if defined(__NR_seccomp)
@@ -383,6 +383,8 @@ redo_prctl:
  */
 static int stress_seccomp(stress_args_t *args)
 {
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -432,8 +434,8 @@ static int stress_seccomp(stress_args_t *args)
 			/* Wait for child to exit or get killed by seccomp */
 			if (shim_waitpid(pid, &status, 0) < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid failed, errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 			} else {
 				/* Did the child hit a weird error? */
 				if (WIFEXITED(status) &&
@@ -450,6 +452,7 @@ static int stress_seccomp(stress_args_t *args)
 						"but got a successful exit which "
 						"was not expected\n",
 						args->name);
+					return EXIT_FAILURE;
 				}
 				/* ..exited with a SIGSYS but we expected OK exit? */
 				if (WIFSIGNALED(status) && allow_write) {
@@ -458,6 +461,7 @@ static int stress_seccomp(stress_args_t *args)
 							"but got a seccomp SIGSYS "
 							"which was not expected\n",
 							args->name);
+						return EXIT_FAILURE;
 					}
 				}
 			}
@@ -470,17 +474,17 @@ static int stress_seccomp(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_seccomp_info = {
+const stressor_info_t stress_seccomp_info = {
 	.stressor = stress_seccomp,
 	.supported = stress_seccomp_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_seccomp_info = {
+const stressor_info_t stress_seccomp_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/seccomp.h, linux/audit.h, linux/filter.h or prctl()"

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,8 +27,8 @@
 #define STRESS_TRY_AGAIN	  (5)		/* Device busy, try again */
 
 extern int stress_try_open(stress_args_t *args, const char *path,
-	const int flags, const unsigned long timeout_ns);
+	const int flags, const unsigned long int timeout_ns);
 extern int stress_open_timeout(const char *name, const char *path,
-	const int flags, const unsigned long timeout_ns);
+	const int flags, const unsigned long int timeout_ns);
 
 #endif

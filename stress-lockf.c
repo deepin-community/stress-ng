@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -50,14 +50,9 @@ typedef struct {
 static stress_lockf_info_list_t lockf_infos;
 #endif
 
-static int stress_lockf_set_nonblock(const char *opt)
-{
-	return stress_set_setting_true("lockf-nonblock", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_lockf_nonblock,   stress_lockf_set_nonblock },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_lockf_nonblock, "lockf-nonblock", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LOCKF)
@@ -75,7 +70,7 @@ static stress_lockf_info_t *stress_lockf_info_new(void)
 		lockf_infos.free = new->next;
 		new->next = NULL;
 	} else {
-		new = calloc(1, sizeof(*new));
+		new = (stress_lockf_info_t *)calloc(1, sizeof(*new));
 		if (!new)
 			return NULL;
 	}
@@ -144,17 +139,17 @@ static void stress_lockf_info_free(void)
 static int stress_lockf_unlock(stress_args_t *args, const int fd)
 {
 	/* Pop one off list */
-	if (!lockf_infos.head)
+	if (UNLIKELY(!lockf_infos.head))
 		return 0;
 
-	if (lseek(fd, lockf_infos.head->offset, SEEK_SET) < 0) {
+	if (UNLIKELY(lseek(fd, lockf_infos.head->offset, SEEK_SET) < 0)) {
 		pr_err("%s: lseek failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return -1;
 	}
 	stress_lockf_info_head_remove();
 
-	if (lockf(fd, F_ULOCK, LOCK_SIZE) < 0) {
+	if (UNLIKELY(lockf(fd, F_ULOCK, LOCK_SIZE) < 0)) {
 		pr_fail("%s: lockf F_ULOCK failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return -1;
@@ -189,17 +184,17 @@ static int stress_lockf_contention(
 				return -1;
 
 		offset = (off_t)stress_mwc64modn(LOCK_FILE_SIZE - LOCK_SIZE);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
-		if (lseek(fd, offset, SEEK_SET) < 0) {
+		if (UNLIKELY(lseek(fd, offset, SEEK_SET) < 0)) {
 			pr_err("%s: lseek failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -1;
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		rc = lockf(fd, lockf_cmd, LOCK_SIZE);
-		if (rc < 0) {
+		if (UNLIKELY(rc < 0)) {
 			if (stress_lockf_unlock(args, fd) < 0)
 				return -1;
 			continue;
@@ -207,21 +202,22 @@ static int stress_lockf_contention(
 
 		/* Locked OK, add to lock list */
 		lockf_info = stress_lockf_info_new();
-		if (!lockf_info) {
-			pr_err("%s: calloc failed, out of memory\n", args->name);
+		if (UNLIKELY(!lockf_info)) {
+			pr_err("%s: calloc failed, out of memory%s\n",
+				args->name, stress_get_memfree_str());
 			return -1;
 		}
 		lockf_info->offset = offset;
 		/*
 		 *  Occasionally exercise lock on a bad fd, ignore error
 		 */
-		if (counter++ >= 65536) {
-			if (!stress_continue_flag())
+		if (UNLIKELY(counter++ >= 65536)) {
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			VOID_RET(int, lockf(bad_fd, lockf_cmd, LOCK_SIZE));
 			counter = 0;
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			/* Exercise F_TEST, ignore result */
 			VOID_RET(int, lockf(fd, F_TEST, LOCK_SIZE));
@@ -286,7 +282,7 @@ static int stress_lockf(stress_args_t *args)
 	}
 	for (offset = 0; offset < LOCK_FILE_SIZE; offset += sizeof(buffer)) {
 redo:
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			ret = EXIT_SUCCESS;
 			goto tidy;
 		}
@@ -301,6 +297,8 @@ redo:
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -308,7 +306,7 @@ again:
 	if (cpid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto tidy;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -341,18 +339,18 @@ tidy:
 	return ret;
 }
 
-stressor_info_t stress_lockf_info = {
+const stressor_info_t stress_lockf_info = {
 	.stressor = stress_lockf,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_lockf_info = {
+const stressor_info_t stress_lockf_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without lockf() system call"

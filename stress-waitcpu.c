@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -130,7 +130,8 @@ static void stress_waitcpu_x86_tpause1(void)
 #endif
 
 #if !defined(HAVE_COMPILER_PCC) &&	\
-    defined(HAVE_ARCH_X86_64)
+    defined(STRESS_ARCH_X86_64) &&	\
+    defined(STRESS_ARCH_X86_LP64)
 static bool stress_waitcpu_x86_umwait_supported(void)
 {
 	if (!stress_cpu_is_x86())
@@ -187,6 +188,28 @@ static void stress_waitcpu_ppc64_mdoom(void)
 }
 #endif
 
+#if defined(STRESS_ARCH_PPC)
+static bool stress_waitcpu_ppc_supported(void)
+{
+	return true;
+}
+
+static void stress_waitcpu_ppc_yield(void)
+{
+	stress_asm_ppc_yield();
+}
+
+static void stress_waitcpu_ppc_mdoio(void)
+{
+	stress_asm_ppc_mdoio();
+}
+
+static void stress_waitcpu_ppc_mdoom(void)
+{
+	stress_asm_ppc_mdoom();
+}
+#endif
+
 #if defined(STRESS_ARCH_RISCV)
 static bool stress_waitcpu_riscv_pause_supported(void)
 {
@@ -225,9 +248,10 @@ stress_waitcpu_method_t stress_waitcpu_method[] = {
 	{ "tpause1",	stress_waitcpu_x86_tpause1,	stress_waitcpu_x86_tpause_supported,	false, 0.0, 0.0, 0.0 },
 #endif
 #if !defined(HAVE_COMPILER_PCC) &&	\
-    defined(HAVE_ARCH_X86_64)
+    defined(STRESS_ARCH_X86_64) &&	\
+    defined(STRESS_ARCH_X86_LP64)
 	{ "umwait0",	stress_waitcpu_x86_umwait0,	stress_waitcpu_x86_umwait_supported,	false, 0.0, 0.0, 0.0 },
-	{ "umwait0",	stress_waitcpu_x86_umwait1,	stress_waitcpu_x86_umwait_supported,	false, 0.0, 0.0, 0.0 },
+	{ "umwait1",	stress_waitcpu_x86_umwait1,	stress_waitcpu_x86_umwait_supported,	false, 0.0, 0.0, 0.0 },
 #endif
 #endif
 #if defined(STRESS_ARCH_RISCV)
@@ -240,6 +264,11 @@ stress_waitcpu_method_t stress_waitcpu_method[] = {
 	{ "mdoio",	stress_waitcpu_ppc64_mdoio,	stress_waitcpu_ppc64_supported,		false, 0.0, 0.0, 0.0 },
 	{ "mdoom",	stress_waitcpu_ppc64_mdoom,	stress_waitcpu_ppc64_supported,		false, 0.0, 0.0, 0.0 },
 	{ "yield",	stress_waitcpu_ppc64_yield,	stress_waitcpu_ppc64_supported,		false, 0.0, 0.0, 0.0 },
+#endif
+#if defined(STRESS_ARCH_PPC)
+	{ "mdoio",	stress_waitcpu_ppc_mdoio,	stress_waitcpu_ppc_supported,		false, 0.0, 0.0, 0.0 },
+	{ "mdoom",	stress_waitcpu_ppc_mdoom,	stress_waitcpu_ppc_supported,		false, 0.0, 0.0, 0.0 },
+	{ "yield",	stress_waitcpu_ppc_yield,	stress_waitcpu_ppc_supported,		false, 0.0, 0.0, 0.0 },
 #endif
 #if defined(STRESS_ARCH_LOONG64)
 #if defined(HAVE_ASM_LOONG64_DBAR)
@@ -275,19 +304,22 @@ static int stress_waitcpu(stress_args_t *args)
 		stress_waitcpu_method[i].count = 0.0;
 	}
 	if (!supported) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: no CPU wait/pause instructions available, skipping stressor\n",
 				args->name);
 		return EXIT_NO_RESOURCE;
 	}
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf("%s: exercising instruction%s:%s\n", args->name,
 			SIZEOF_ARRAY(stress_waitcpu_method) > 1 ? "s" : "",
 			str);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	do {
-		for (i = 0; (i < SIZEOF_ARRAY(stress_waitcpu_method)) && stress_continue(args); i++) {
+		for (i = 0; LIKELY((i < SIZEOF_ARRAY(stress_waitcpu_method)) && stress_continue(args)); i++) {
 			const int loops = 1000;
 
 			if (stress_waitcpu_method[i].supported) {
@@ -313,7 +345,7 @@ static int stress_waitcpu(stress_args_t *args)
 		if ((stress_waitcpu_method[i].duration > 0.0) &&
 		    (stress_waitcpu_method[i].count > 0.0))
 			rate = stress_waitcpu_method[i].count /
-			       stress_waitcpu_method[i].duration;;
+			       stress_waitcpu_method[i].duration;
 
 #if defined(STRESS_ARCH_X86)
 		if (!strcmp("nop", stress_waitcpu_method[i].name))
@@ -325,7 +357,7 @@ static int stress_waitcpu(stress_args_t *args)
 
 			(void)snprintf(msg, sizeof(msg), "%s ops per sec", stress_waitcpu_method[i].name);
 			stress_metrics_set(args, j, msg,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 		stress_waitcpu_method[i].rate = rate;
@@ -374,9 +406,9 @@ static int stress_waitcpu(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_waitcpu_info = {
+const stressor_info_t stress_waitcpu_info = {
 	.stressor = stress_waitcpu,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

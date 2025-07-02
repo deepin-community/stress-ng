@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -55,6 +55,8 @@ static int stress_kill(stress_args_t *args)
 		_exit(0);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -82,30 +84,30 @@ static int stress_kill(stress_args_t *args)
 
 		t = stress_time_now();
 		ret = kill(args->pid, SIGUSR1);
-		if (ret == 0) {
-			int saved_errno = errno;
+		if (LIKELY(ret == 0)) {
+			const int saved_errno = errno;
 
 			duration += stress_time_now() - t;
 			count += 1.0;
 			errno = saved_errno;
-		}
-		if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))
-			pr_fail("%s: kill PID %jd with SIGUSR1 failed, errno=%d (%s)\n",
+		} else if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
+			pr_fail("%s: kill PID %" PRIdMAX " with SIGUSR1 failed, errno=%d (%s)\n",
 				args->name, (intmax_t)args->pid, errno, strerror(errno));
+		}
 
 		/* Zero signal can be used to see if process exists */
 		t = stress_time_now();
 		ret = kill(args->pid, 0);
-		if (ret == 0) {
-			int saved_errno = errno;
+		if (LIKELY(ret == 0)) {
+			const int saved_errno = errno;
 
 			duration += stress_time_now() - t;
 			count += 1.0;
 			errno = saved_errno;
-		}
-		if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))
-			pr_fail("%s: kill PID %jd with signal 0 failed, errno=%d (%s)\n",
+		} else if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
+			pr_fail("%s: kill PID %" PRIdMAX " with signal 0 failed, errno=%d (%s)\n",
 				args->name, (intmax_t)args->pid, errno, strerror(errno));
+		}
 
 		/*
 		 * Zero signal can be used to see if process exists,
@@ -114,16 +116,16 @@ static int stress_kill(stress_args_t *args)
 		 */
 		t = stress_time_now();
 		ret = kill(-1, 0);
-		if (ret == 0) {
-			int saved_errno = errno;
+		if (LIKELY(ret == 0)) {
+			const int saved_errno = errno;
 
 			duration += stress_time_now() - t;
 			count += 1.0;
 			errno = saved_errno;
-		}
-		if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))
+		} else if (UNLIKELY((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY))) {
 			pr_fail("%s: kill PID -1 with signal 0 failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+		}
 
 		/*
 		 * Exercise the kernel by sending illegal signal numbers,
@@ -142,7 +144,7 @@ static int stress_kill(stress_args_t *args)
 		/*
 		 * Send child process some signals to keep it busy
 		 */
-		if (pid > 1) {
+		if (LIKELY(pid > 1)) {
 			VOID_RET(int, kill(pid, 0));
 #if defined(SIGSTOP) && 	\
     defined(SIGCONT)
@@ -164,19 +166,19 @@ static int stress_kill(stress_args_t *args)
 		int status;
 
 		VOID_RET(int, kill(pid, SIGKILL));
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "kill calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_kill_info = {
+const stressor_info_t stress_kill_info = {
 	.stressor = stress_kill,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

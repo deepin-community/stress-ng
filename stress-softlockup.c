@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -156,29 +156,17 @@ static void MLOCKED_TEXT NORETURN stress_rlimit_handler(int signum)
  */
 static void drop_niceness(void)
 {
-	int nice_val, i;
-
-	errno = 0;
-	nice_val = nice(0);
-
-	/* Should never fail */
-	if (errno)
-		return;
+	int i;
 
 	/*
 	 *  Traditionally no more than -20, but see if we
 	 *  can force it lower if we are originally running
 	 *  at nice level 19
 	 */
-	for (i = 0; i < 40; i++) {
-		int old_nice_val = nice_val;
-
+	errno = EPERM;
+	for (i = -40; (i < 0) && errno; i++) {
 		errno = 0;
-		nice_val = nice(-1);
-		if (errno)
-			return;
-		if (nice_val == old_nice_val)
-			return;
+		VOID_RET(int, nice(i));
 	}
 }
 
@@ -201,7 +189,7 @@ static void stress_softlockup_child(
 	 *  ramping up the scheduler priority
 	 */
 	while (softlockup_start && stress_continue(args)) {
-		shim_usleep(100000);
+		(void)shim_usleep(100000);
 	}
 
 	/*
@@ -242,7 +230,7 @@ static void stress_softlockup_child(
 		if (ret < 0) {
 			if (errno != EPERM) {
 				pr_fail("%s: sched_setscheduler "
-					"failed: errno=%d (%s) "
+					"failed, errno=%d (%s) "
 					"for scheduler policy %s\n",
 					args->name, errno, strerror(errno),
 					policies[policy].name);
@@ -274,13 +262,13 @@ static int stress_softlockup(stress_args_t *args)
 	size_t policy = 0;
 	int max_prio = 0, parent_cpu;
 	bool good_policy = false;
-	const bool first_instance = (args->instance == 0);
+	const bool first_instance = (stress_instance_zero(args));
 	const uint32_t cpus_online = (uint32_t)stress_get_processors_online();
 	uint32_t i;
 	struct sched_param param;
 	NOCLOBBER uint64_t timeout;
 	const double start = stress_time_now();
-	pid_t *pids;
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	int rc = EXIT_SUCCESS;
 	uint64_t loop_count;
 
@@ -293,16 +281,19 @@ static int stress_softlockup(stress_args_t *args)
 #if defined(HAVE_X86_REP_STOSB)
 	softlockup_buffer = (uint8_t *)mmap(NULL, MB, PROT_READ | PROT_WRITE,
 					MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (softlockup_buffer != MAP_FAILED)
+		stress_set_vma_anon_name(softlockup_buffer, MB, "x86-rep-stosb-data");
 #endif
 
-	pids = malloc(sizeof(*pids) * (size_t)cpus_online);
-	if (!pids) {
-		pr_inf_skip("%s: cannot allocate %" PRIu32 " pids, skipping stressor\n",
-			args->name, cpus_online);
+	s_pids = stress_sync_s_pids_mmap((size_t)cpus_online);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu PIDs%s, skipping stressor\n", 
+			args->name, (size_t)cpus_online, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
+
 	for (i = 0; i < cpus_online; i++)
-		pids[i] = -1;
+		stress_sync_start_init(&s_pids[i]);
 
 	if (SIZEOF_ARRAY(policies) == (0)) {
 		if (first_instance) {
@@ -310,7 +301,7 @@ static int stress_softlockup(stress_args_t *args)
 					"available, skipping stressor\n",
 					args->name);
 		}
-		free(pids);
+		(void)stress_sync_s_pids_munmap(s_pids, (size_t)cpus_online);
 		return EXIT_NOT_IMPLEMENTED;
 	}
 
@@ -335,41 +326,50 @@ static int stress_softlockup(stress_args_t *args)
 				"scheduling policies, skipping test\n",
 					args->name);
 		}
-		free(pids);
+		(void)stress_sync_s_pids_munmap(s_pids, (size_t)cpus_online);
 		return EXIT_NOT_IMPLEMENTED;
 	}
 
-	if ((max_prio < 1) && (args->instance == 0)) {
+	if ((max_prio < 1) && (stress_instance_zero(args))) {
 		pr_inf("%s: running with a low maximum priority of %d\n",
 			args->name, max_prio);
 	}
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-
 	for (i = 0; i < cpus_online; i++) {
 again:
 		parent_cpu = stress_get_cpu();
-		pids[i] = fork();
-		if (pids[i] < 0) {
+		s_pids[i].pid = fork();
+		if (s_pids[i].pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
 			pr_inf("%s: cannot fork, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto finish;
-		} else if (pids[i] == 0) {
+		} else if (s_pids[i].pid == 0) {
+			s_pids[i].pid = getpid();
+			stress_sync_start_wait_s_pid(&s_pids[i]);
+
 			(void)stress_change_cpu(args, parent_cpu);
 			stress_softlockup_child(args, &param, start, timeout, loop_count);
+		} else {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	param.sched_priority = policies[0].max_prio;
 	(void)sched_setscheduler(args->pid, policies[0].policy, &param);
 
 	softlockup_start = true;
 
 	(void)pause();
-	rc = stress_kill_and_wait_many(args, pids, (size_t)cpus_online, SIGALRM, false);
+	rc = stress_kill_and_wait_many(args, s_pids, (size_t)cpus_online, SIGALRM, false);
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -378,22 +378,22 @@ finish:
 		(void)munmap((void *)softlockup_buffer, MB);
 #endif
 
-	free(pids);
+	(void)stress_sync_s_pids_munmap(s_pids, (size_t)cpus_online);
 
 	return rc;
 }
 
-stressor_info_t stress_softlockup_info = {
+const stressor_info_t stress_softlockup_info = {
 	.stressor = stress_softlockup,
 	.supported = stress_softlockup_supported,
-	.class = CLASS_SCHEDULER,
+	.classifier = CLASS_SCHEDULER,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_softlockup_info = {
+const stressor_info_t stress_softlockup_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER,
+	.classifier = CLASS_SCHEDULER,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sched_get_priority_min() or sched_setscheduler()"

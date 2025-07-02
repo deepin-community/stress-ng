@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,11 +30,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_mmapaddr_mlock(const char *opt)
-{
-	return stress_set_setting_true("mmapaddr-mlock", opt);
-}
-
 static void stress_fault_handler(int signum)
 {
 	(void)signum;
@@ -57,7 +52,7 @@ static int stress_mmapaddr_check(stress_args_t *args, uint8_t *map_addr)
 	val = *map_addr;
 	(void)val;
 
-	if (page_fault) {
+	if (UNLIKELY(page_fault)) {
 		pr_fail("%s: read of mmap'd address %p SEGFAULTed\n",
 			args->name, (void *)map_addr);
 		return -1;
@@ -65,12 +60,12 @@ static int stress_mmapaddr_check(stress_args_t *args, uint8_t *map_addr)
 
 	vec[0] = 0;
 	ret = shim_mincore(map_addr, args->page_size, vec);
-	if (ret != 0) {
+	if (UNLIKELY(ret != 0)) {
 		pr_fail("%s: mincore on address %p failed, errno=%d (%s)\n",
 			args->name, (void *)map_addr, errno, strerror(errno));
 		return -1;
 	}
-	if ((vec[0] & 1) == 0) {
+	if (UNLIKELY((vec[0] & 1) == 0)) {
 		pr_inf("%s: mincore on address %p suggests page is not resident\n",
 			args->name, (void *)map_addr);
 		return -1;
@@ -124,12 +119,14 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
 
 	(void)stress_get_setting("mmapaddr-mlock", &mmapaddr_mlock);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		uint8_t *addr, *map_addr, *remap_addr;
 		int flags;
-		uint8_t rnd = stress_mwc8();
+		const uint8_t rnd = stress_mwc8();
 #if defined(MAP_POPULATE)
 		const int mmap_flags = MAP_POPULATE | MAP_PRIVATE | MAP_ANONYMOUS;
 #else
@@ -140,7 +137,7 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
 
 		addr = stress_mmapaddr_get_addr(args, mask, page_size);
 		if (!addr) {
-			if (errno == ENOSYS)
+			if (UNLIKELY(errno == ENOSYS))
 				break;
 			continue;
 		}
@@ -152,7 +149,7 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
 #if defined(MAP_LOCKED)
 		flags |= ((rnd & 0x20) ? MAP_LOCKED : 0);
 #endif
-		if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size))
+		if (UNLIKELY((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(page_size)))
 			continue;
 		map_addr = (uint8_t *)mmap((void *)addr, page_size, PROT_READ, flags, -1, 0);
 		if (!map_addr || (map_addr == MAP_FAILED))
@@ -161,7 +158,7 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
 		(void)stress_madvise_mergeable(map_addr, page_size);
 		if (mmapaddr_mlock)
 			(void)shim_mlock(map_addr, page_size);
-		if (stress_mmapaddr_check(args, map_addr) < 0)
+		if (UNLIKELY(stress_mmapaddr_check(args, map_addr) < 0))
 			goto unmap;
 
 		/* Now attempt to mmap the newly map'd page */
@@ -174,7 +171,7 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
 		}
 #endif
 		remap_addr = (uint8_t *)mmap((void *)addr, page_size, PROT_READ, flags, -1, 0);
-		if (!remap_addr || (remap_addr == MAP_FAILED))
+		if (UNLIKELY(!remap_addr || (remap_addr == MAP_FAILED)))
 			goto unmap;
 
 		(void)stress_madvise_mergeable(remap_addr, page_size);
@@ -188,7 +185,7 @@ static int stress_mmapaddr_child(stress_args_t *args, void *context)
     defined(MREMAP_FIXED) &&	\
     defined(MREMAP_MAYMOVE)
 		addr = stress_mmapaddr_get_addr(args, mask, page_size);
-		if (!addr)
+		if (UNLIKELY(!addr))
 			goto unmap;
 
 		/* Now try to remap with a new fixed address */
@@ -240,15 +237,15 @@ static int stress_mmapaddr(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_mmapaddr_child, STRESS_OOMABLE_NORMAL);
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mmapaddr_mlock,	stress_set_mmapaddr_mlock },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_mmapaddr_mlock, "mmapaddr-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_mmapaddr_info = {
+const stressor_info_t stress_mmapaddr_info = {
 	.stressor = stress_mmapaddr,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

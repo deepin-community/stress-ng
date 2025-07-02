@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-killpid.h"
+
+#include <time.h>
 
 #if defined(HAVE_PTRACE)
 #include <sys/ptrace.h>
@@ -57,8 +59,8 @@ static inline bool OPTIMIZE3 stress_syscall_wait(
 		}
 		if (UNLIKELY(shim_waitpid(pid, &status, 0) < 0)) {
 			if ((errno != EINTR) && (errno != ECHILD))
-				pr_fail("%s: waitpid failed, errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_fail("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 			return true;
 		}
 
@@ -80,6 +82,8 @@ static int OPTIMIZE3 stress_ptrace(stress_args_t *args)
 {
 	pid_t pid;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 again:
@@ -87,7 +91,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -103,7 +107,7 @@ again:
 		 */
 		if (ptrace(PTRACE_TRACEME) != 0) {
 			pr_inf_skip("%s: child cannot be traced, "
-				"skipping stressor: errno=%d (%s)\n",
+				"skipping stressor, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			_exit(EXIT_SUCCESS);
 		}
@@ -132,8 +136,8 @@ again:
 
 		if (shim_waitpid(pid, &status, 0) < 0) {
 			if ((errno != EINTR) && (errno != ECHILD)) {
-				pr_fail("%s: waitpid failed, errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_fail("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 				return EXIT_FAILURE;
 			}
 			return EXIT_SUCCESS;
@@ -141,15 +145,15 @@ again:
 		if (ptrace(PTRACE_SETOPTIONS, pid,
 			0, PTRACE_O_TRACESYSGOOD) < 0) {
 			pr_inf_skip("%s: child cannot be traced, "
-				"skipping stressor: errno=%d (%s)\n",
+				"skipping stressor, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			if ((errno == ESRCH) || (errno == EPERM) || (errno == EACCES)) {
 				/* Ensure child is really dead and reap */
 				(void)stress_kill_pid(pid);
 				if (shim_waitpid(pid, &status, 0) < 0) {
 					if ((errno != EINTR) && (errno != ECHILD)) {
-						pr_fail("%s: waitpid failed, errno=%d (%s)\n",
-							args->name, errno, strerror(errno));
+						pr_fail("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+							args->name, (intmax_t)pid, errno, strerror(errno));
 						return EXIT_FAILURE;
 					}
 					return EXIT_SUCCESS;
@@ -177,10 +181,10 @@ again:
 				const pid_t bad_pid = stress_get_unused_pid_racy(false);
 
 				/* exercise invalid options */
-				VOID_RET(long, ptrace((shim_ptrace_request)~0L, pid, 0, PTRACE_O_TRACESYSGOOD));
+				VOID_RET(long int, ptrace((shim_ptrace_request)~0L, pid, 0, PTRACE_O_TRACESYSGOOD));
 
 				/* exercise invalid pid */
-				VOID_RET(long, ptrace(PTRACE_SETOPTIONS, bad_pid, 0, PTRACE_O_TRACESYSGOOD));
+				VOID_RET(long int, ptrace(PTRACE_SETOPTIONS, bad_pid, 0, PTRACE_O_TRACESYSGOOD));
 			}
 			i++;
 
@@ -195,16 +199,16 @@ finish:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_ptrace_info = {
+const stressor_info_t stress_ptrace_info = {
 	.stressor = stress_ptrace,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_ptrace_info = {
+const stressor_info_t stress_ptrace_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without ptrace() system call support"

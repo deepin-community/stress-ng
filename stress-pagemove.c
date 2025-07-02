@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,6 +17,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 
 #define DEFAULT_PAGE_MOVE_BYTES		(4 * MB)
@@ -27,6 +28,7 @@ static const stress_help_t help[] = {
 	{ NULL,	"pagemove N",	  	"start N workers that shuffle move pages" },
 	{ NULL,	"pagemove-bytes N",	"size of mmap'd region to exercise page moving in bytes" },
 	{ NULL, "pagemove-mlock",	"attempt to mlock pages into memory" },
+	{ NULL, "pagemove-numa",	"bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	"pagemove-ops N",	"stop after N page move bogo operations" },
 	{ NULL,	NULL,			NULL }
 };
@@ -36,25 +38,11 @@ typedef struct {
 	size_t	page_num;		/* original page number relative to start of entire mapping */
 } page_info_t;
 
-static int stress_set_pagemove_mlock(const char *opt)
-{
-	return stress_set_setting_true("pagemove-mlock", opt);
-}
-
-static int stress_set_pagemove_bytes(const char *opt)
-{
-	size_t pagemove_bytes;
-
-	pagemove_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("pagemove-bytes", pagemove_bytes,
-		MIN_PAGE_MOVE_BYTES, MAX_PAGE_MOVE_BYTES);
-	return stress_set_setting("pagemove-bytes", TYPE_ID_SIZE_T, &pagemove_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_pagemove_bytes,	stress_set_pagemove_bytes },
-	{ OPT_pagemove_mlock,	stress_set_pagemove_mlock },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_pagemove_bytes, "pagemove-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_PAGE_MOVE_BYTES, MAX_PAGE_MOVE_BYTES, NULL },
+	{ OPT_pagemove_mlock, "pagemove-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_pagemove_numa,  "pagemove-numa",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MREMAP) &&	\
@@ -76,7 +64,7 @@ static void stress_pagemove_remap_fail(
 
 static int stress_pagemove_child(stress_args_t *args, void *context)
 {
-	size_t sz, pages, pagemove_bytes = DEFAULT_PAGE_MOVE_BYTES;
+	size_t sz, pages, pagemove_bytes, pagemove_bytes_total = DEFAULT_PAGE_MOVE_BYTES;
 	const size_t page_size = args->page_size;
 	size_t page_num;
 	uint8_t *buf, *buf_end, *unmapped_page = NULL, *ptr;
@@ -84,24 +72,40 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 	double duration = 0.0, count = 0.0, rate;
 	int metrics_count = 0;
 	bool pagemove_mlock = false;
+	bool pagemove_numa = false;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+       stress_numa_mask_t *numa_mask = NULL;
+       stress_numa_mask_t *numa_nodes = NULL;
+#endif
 
 	(void)context;
 
-	(void)stress_get_setting("pagemove-mlock", &pagemove_mlock);
-
-	if (!stress_get_setting("pagemove-bytes", &pagemove_bytes)) {
-		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			pagemove_bytes = MAX_32;
-		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			pagemove_bytes = MIN_PAGE_MOVE_BYTES;
+	if (!stress_get_setting("pagemove-mlock", &pagemove_mlock)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			pagemove_mlock = true;
 	}
-	pagemove_bytes /= args->num_instances;
+	if (!stress_get_setting("pagemove-numa", &pagemove_numa)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			pagemove_numa = true;
+	}
+	if (!stress_get_setting("pagemove-bytes", &pagemove_bytes_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			pagemove_bytes_total = MAX_32;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			pagemove_bytes_total = MIN_PAGE_MOVE_BYTES;
+	}
+	pagemove_bytes = pagemove_bytes_total / args->instances;
 	if (pagemove_bytes < MIN_PAGE_MOVE_BYTES)
 		pagemove_bytes = MIN_PAGE_MOVE_BYTES;
 	if (pagemove_bytes < page_size)
 		pagemove_bytes = page_size;
+	pagemove_bytes_total = pagemove_bytes * args->instances;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, pagemove_bytes, pagemove_bytes_total);
 
 	sz = pagemove_bytes & ~(page_size - 1);
+	if (sz > (MAX_32 - page_size))
+		sz = MAX_32 - page_size;
 	pages = sz / page_size;
 
 	buf = (uint8_t *)stress_mmap_populate(NULL, sz + page_size,
@@ -109,8 +113,9 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 		MAP_PRIVATE | MAP_ANONYMOUS,
 		-1, 0);
 	if (buf == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap %zu bytes (errno=%d) %s, skipping stressor\n",
-			args->name, sz + page_size, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), skipping stressor\n",
+			args->name, sz + page_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 	if (pagemove_mlock)
@@ -119,13 +124,27 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 	unmapped_page = buf_end;
 	(void)munmap((void *)unmapped_page, page_size);
 
+	if (pagemove_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &numa_nodes, &numa_mask,
+						"--pagemove-numa", &pagemove_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --pagemove-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		pagemove_numa = false;
+#endif
+	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
-		(void)madvise((void *)buf, sz, PROT_WRITE);
+		(void)mprotect((void *)buf, sz, PROT_WRITE);
 
 		for (page_num = 0, ptr = buf; ptr < buf_end; ptr += page_size, page_num++) {
 			page_info_t *p = (page_info_t *)ptr;
@@ -134,7 +153,7 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 			p->virt_addr = (void *)ptr;
 		}
 
-		(void)madvise((void *)buf, sz, PROT_READ);
+		(void)mprotect((void *)buf, sz, PROT_READ);
 
 		for (page_num = 0, ptr = buf; ptr < buf_end; ptr += page_size, page_num++) {
 			register const page_info_t *p = (page_info_t *)ptr;
@@ -165,6 +184,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, ptr, unmapped_page);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr1, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr1, page_size);
 
@@ -174,6 +197,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, ptr + page_size, ptr);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr2, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr2, page_size);
 
@@ -183,6 +210,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, remap_addr1, ptr + page_size);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr3, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr3, page_size);
 			} else {
@@ -199,6 +230,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, ptr, unmapped_page);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr1, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr1, page_size);
 
@@ -212,6 +247,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, ptr + page_size, ptr);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr2, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr2, page_size);
 
@@ -225,6 +264,10 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 					stress_pagemove_remap_fail(args, remap_addr1, ptr + page_size);
 					goto fail;
 				}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+				if (pagemove_numa)
+					stress_numa_randomize_pages(args, numa_nodes, numa_mask, remap_addr3, page_size, page_size);
+#endif
 				if (pagemove_mlock)
 					(void)shim_mlock(remap_addr3, page_size);
 			}
@@ -245,11 +288,17 @@ static int stress_pagemove_child(stress_args_t *args, void *context)
 	rc = EXIT_SUCCESS;
 fail:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	(void)munmap(buf, sz);
+	(void)munmap((void *)buf, sz);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (numa_mask)
+		stress_numa_mask_free(numa_mask);
+	if (numa_nodes)
+		stress_numa_mask_free(numa_nodes);
+#endif
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "page remaps per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
@@ -263,18 +312,18 @@ static int stress_pagemove(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_pagemove_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_pagemove_info = {
+const stressor_info_t stress_pagemove_info = {
 	.stressor = stress_pagemove,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_pagemove_info = {
+const stressor_info_t stress_pagemove_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without mremap() or MREMAP_FIXED/MREMAP_MAYMOVE defined"

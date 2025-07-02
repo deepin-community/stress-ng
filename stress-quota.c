@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -96,12 +96,12 @@ static int stress_quota_supported(const char *name)
  */
 static int do_quotactl_call(
 	const int cmd,
-	stress_dev_info_t *dev,
+	const stress_dev_info_t *dev,
 	const int id,
 	const caddr_t addr)
 {
 	static bool have_quotactl_fd = true;
-	int ret, fd;
+	int ret, fd, saved_errno;
 
 	/*
 	 *  quotactl_fd() failed on ENOSYS or random choice
@@ -125,7 +125,9 @@ static int do_quotactl_call(
 		(void)close(fd);
 		goto do_quotactl;
 	}
+	saved_errno = errno;
 	(void)close(fd);
+	errno = saved_errno;
 	return ret;
 
 do_quotactl:
@@ -173,7 +175,7 @@ static int do_quotactl(
 			return errno;
 		default:
 			status->failed++;
-			pr_fail("%s: quotactl command %s on %s (%s) failed: errno=%d (%s)\n",
+			pr_fail("%s: quotactl command %s on %s (%s) failed, errno=%d (%s)\n",
 				args->name, cmdname, dev->name, dev->mount, errno, strerror(errno));
 		}
 	}
@@ -193,7 +195,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 	(void)shim_memset(&status, 0, sizeof(status));
 
 #if defined(Q_GETQUOTA)
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		struct dqblk dqblk;
 
 		(void)shim_memset(&dqblk, 0, sizeof(dqblk));
@@ -205,7 +207,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 	}
 #endif
 #if defined(Q_GETNEXTQUOTA)
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		struct shim_nextdqblk nextdqblk;
 
 		(void)shim_memset(&nextdqblk, 0, sizeof(nextdqblk));
@@ -217,7 +219,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 	}
 #endif
 #if defined(Q_GETFMT)
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		uint32_t format;
 
 		(void)shim_memset(&format, 0, sizeof(format));
@@ -229,7 +231,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 	}
 #endif
 #if defined(Q_GETINFO)
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		struct dqinfo dqinfo;
 
 		(void)shim_memset(&dqinfo, 0, sizeof(dqinfo));
@@ -242,7 +244,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 #endif
 #if defined(Q_GETSTATS)
 	/* Obsolete in recent kernels */
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		struct dqstats dqstats;
 
 		(void)shim_memset(&dqstats, 0, sizeof(dqstats));
@@ -254,7 +256,7 @@ static int do_quotas(stress_args_t *args, stress_dev_info_t *const dev)
 	}
 #endif
 #if defined(Q_SYNC)
-	if (stress_continue_flag()) {
+	if (LIKELY(stress_continue_flag())) {
 		err = do_quotactl(args, "Q_SYNC", &status,
 			QCMD(Q_SYNC, USRQUOTA),
 			dev, 0, 0);
@@ -332,7 +334,7 @@ static int stress_quota(stress_args_t *args)
 	char *mnts[MAX_DEVS];
 	stress_dev_info_t devs[MAX_DEVS];
 	DIR *dir;
-	struct dirent *d;
+	const struct dirent *d;
 	struct stat buf;
 
 	(void)shim_memset(mnts, 0, sizeof(mnts));
@@ -342,7 +344,7 @@ static int stress_quota(stress_args_t *args)
 
 	dir = opendir("/dev/");
 	if (!dir) {
-		pr_err("%s: opendir on /dev failed: errno=%d: (%s)\n",
+		pr_err("%s: opendir on /dev failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		return rc;
 	}
@@ -366,7 +368,7 @@ static int stress_quota(stress_args_t *args)
 			if (devs[i].valid &&
 			    !devs[i].name &&
 			    (buf.st_rdev == devs[i].st_dev)) {
-				devs[i].name = strdup(path);
+				devs[i].name = shim_strdup(path);
 				devs[i].mount = mnts[i];
 				if (!devs[i].name) {
 					pr_err("%s: out of memory\n",
@@ -402,6 +404,8 @@ static int stress_quota(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (!n_devs) {
@@ -411,7 +415,7 @@ static int stress_quota(stress_args_t *args)
 		do {
 			int failed = 0, skipped = 0;
 
-			for (i = 0; stress_continue_flag() && (i < n_devs); i++) {
+			for (i = 0; LIKELY(stress_continue_flag() && (i < n_devs)); i++) {
 				int ret;
 
 				/* This failed before, so don't re-test */
@@ -467,17 +471,17 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_quota_info = {
+const stressor_info_t stress_quota_info = {
 	.stressor = stress_quota,
 	.supported = stress_quota_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_quota_info = {
+const stressor_info_t stress_quota_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/quota.h or only supported on Linux"

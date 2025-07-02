@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
+ * Copyright (C) 2025 SiPearl
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +19,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-asm-arm.h"
 #include "core-asm-ppc64.h"
 #include "core-asm-x86.h"
 #include "core-builtin.h"
@@ -25,13 +27,14 @@
 #include "core-cpu-cache.h"
 #include "core-put.h"
 
-#define MIN_PREFETCH_L3_SIZE      (4 * KB)
-#define MAX_PREFETCH_L3_SIZE      (MAX_MEM_LIMIT)
-#define DEFAULT_PREFETCH_L3_SIZE  (4 * MB)
+#define MIN_PREFETCH_L3_SIZE		(4 * KB)
+#define MAX_PREFETCH_L3_SIZE		(MAX_MEM_LIMIT)
+#define DEFAULT_PREFETCH_L3_SIZE	(4 * MB)
 
-#define STRESS_PREFETCH_OFFSETS	(128)
-#define STRESS_CACHE_LINE_SIZE	(64)
+#define STRESS_PREFETCH_OFFSETS		(128)
+#define STRESS_CACHE_LINE_SIZE		(64)
 
+#define STRESS_PTRU64_ADD(ptru64, inc)	(uint64_t *)(((uintptr_t)(ptru64)) + inc)
 
 static const stress_help_t help[] = {
 	{ NULL,	"prefetch N",		"start N workers exercising memory prefetching " },
@@ -56,15 +59,23 @@ typedef struct {
 	bool check_prefetch_rate;
 } stress_prefetch_method_t;
 
-#define STRESS_PREFETCH_BUILTIN		(0)
-#define STRESS_PREFETCH_BUILTIN_L0	(1)
-#define STRESS_PREFETCH_BUILTIN_L3	(2)
-#define STRESS_PREFETCH_X86_PREFETCHT0	(3)
-#define STRESS_PREFETCH_X86_PREFETCHT1	(4)
-#define STRESS_PREFETCH_X86_PREFETCHT2	(5)
-#define STRESS_PREFETCH_X86_PREFETCHNTA	(6)
-#define STRESS_PREFETCH_PPC64_DCBT	(7)
-#define STRESS_PREFETCH_PPC64_DCBTST	(8)
+#define STRESS_PREFETCH_BUILTIN            (0)
+#define STRESS_PREFETCH_BUILTIN_L0         (1)
+#define STRESS_PREFETCH_BUILTIN_L3         (2)
+#define STRESS_PREFETCH_X86_PREFETCHT0     (3)
+#define STRESS_PREFETCH_X86_PREFETCHT1     (4)
+#define STRESS_PREFETCH_X86_PREFETCHT2     (5)
+#define STRESS_PREFETCH_X86_PREFETCHNTA    (6)
+#define STRESS_PREFETCH_PPC64_DCBT         (7)
+#define STRESS_PREFETCH_PPC64_DCBTST       (8)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL1KEEP (9)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL2KEEP (10)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL3KEEP (11)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL1STRM (12)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL2STRM (13)
+#define STRESS_PREFETCH_ARM_PRFM_PLDL3STRM (14)
+#define STRESS_PREFETCH_PPC_DCBT           (15)
+#define STRESS_PREFETCH_PPC_DCBTST         (16)
 
 static inline bool stress_prefetch_true(void)
 {
@@ -87,44 +98,31 @@ stress_prefetch_method_t prefetch_methods[] = {
 #if defined(HAVE_ASM_X86_PREFETCHNTA)
 	{ "prefetchnta",	STRESS_PREFETCH_X86_PREFETCHNTA, stress_cpu_x86_has_sse, true },
 #endif
-#if defined(HAVE_ASM_PPC64_DCBT)
+#if defined(STRESS_ARCH_PPC64) &&	\
+    defined(HAVE_ASM_PPC64_DCBT)
 	{ "dcbt",		STRESS_PREFETCH_PPC64_DCBT,	stress_prefetch_true,	true },
 #endif
-#if defined(HAVE_ASM_PPC64_DCBTST)
+#if defined(STRESS_ARCH_PPC64) &&	\
+    defined(HAVE_ASM_PPC64_DCBTST)
 	{ "dcbtst",		STRESS_PREFETCH_PPC64_DCBTST,	stress_prefetch_true,	true },
 #endif
+#if defined(HAVE_ASM_ARM_PRFM)
+	{ "prfm_pldl1keep",	STRESS_PREFETCH_ARM_PRFM_PLDL1KEEP,	stress_prefetch_true,	true },
+	{ "prfm_pldl2keep",	STRESS_PREFETCH_ARM_PRFM_PLDL2KEEP,	stress_prefetch_true,	true },
+	{ "prfm_pldl3keep",	STRESS_PREFETCH_ARM_PRFM_PLDL3KEEP,	stress_prefetch_true,	true },
+	{ "prfm_pldl1strm",	STRESS_PREFETCH_ARM_PRFM_PLDL1STRM,	stress_prefetch_true,	true },
+	{ "prfm_pldl2strm",	STRESS_PREFETCH_ARM_PRFM_PLDL2STRM,	stress_prefetch_true,	true },
+	{ "prfm_pldl3strm",	STRESS_PREFETCH_ARM_PRFM_PLDL3STRM,	stress_prefetch_true,	true },
+#endif
+#if defined(STRESS_ARCH_PPC) &&	\
+    defined(HAVE_ASM_PPC_DCBT)
+	{ "dcbt",		STRESS_PREFETCH_PPC_DCBT,	stress_prefetch_true,	true },
+#endif
+#if defined(STRESS_ARCH_PPC) &&	\
+    defined(HAVE_ASM_PPC_DCBTST)
+	{ "dcbtst",		STRESS_PREFETCH_PPC_DCBTST,	stress_prefetch_true,	true },
+#endif
 };
-
-static int stress_set_prefetch_L3_size(const char *opt)
-{
-	uint64_t prefetch_L3_size;
-	size_t sz;
-
-	prefetch_L3_size = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("prefetch-L3-size", prefetch_L3_size,
-		MIN_PREFETCH_L3_SIZE, MAX_PREFETCH_L3_SIZE);
-	sz = (size_t)prefetch_L3_size;
-
-	return stress_set_setting("prefetch-L3-size", TYPE_ID_SIZE_T, &sz);
-}
-
-static int stress_set_prefetch_method(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(prefetch_methods); i++) {
-		if (!strcmp(prefetch_methods[i].name, opt)) {
-			return stress_set_setting("prefetch-method", TYPE_ID_SIZE_T, &i);
-		}
-	}
-
-	(void)fprintf(stderr, "prefetch-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(prefetch_methods); i++) {
-		(void)fprintf(stderr, " %s", prefetch_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
 
 static inline uint64_t get_prefetch_L3_size(stress_args_t *args)
 {
@@ -201,14 +199,14 @@ static inline void stress_prefetch_none(const void *addr)
 			checksum += *(ptr + 1);				\
 			checksum += *(ptr + 2);				\
 			checksum += *(ptr + 3);				\
-			pre_ptr += 8;					\
+			pre_ptr = STRESS_PTRU64_ADD(pre_ptr, STRESS_CACHE_LINE_SIZE); \
 			checksum += *(ptr + 4);				\
 			checksum += *(ptr + 5);				\
 			checksum += *(ptr + 6);				\
 			checksum += *(ptr + 7);				\
-			ptr += 8;					\
+			ptr = STRESS_PTRU64_ADD(ptr, STRESS_CACHE_LINE_SIZE); \
 		}							\
-		if (checksum != checksum_sane) {			\
+		if (UNLIKELY(checksum != checksum_sane)) {		\
 			pr_fail("%s: %s method: checksum failure, got "	\
 				"0x%" PRIx64 ", expected 0x%" PRIx64 "\n",\
 				args->name, type,			\
@@ -222,12 +220,12 @@ static inline void stress_prefetch_none(const void *addr)
 			(void)(*(ptr + 1));				\
 			(void)(*(ptr + 2));				\
 			(void)(*(ptr + 3));				\
-			pre_ptr += 8;					\
+			pre_ptr = STRESS_PTRU64_ADD(pre_ptr, STRESS_CACHE_LINE_SIZE); \
 			(void)(*(ptr + 4));				\
 			(void)(*(ptr + 5));				\
 			(void)(*(ptr + 6));				\
 			(void)(*(ptr + 7));				\
-			ptr += 8;					\
+			ptr = STRESS_PTRU64_ADD(ptr, STRESS_CACHE_LINE_SIZE); \
 		}							\
 	}
 
@@ -249,28 +247,22 @@ static inline void OPTIMIZE3 stress_prefetch_benchmark(
 	uint64_t *pre_ptr;
 	register uint64_t checksum;
 
-	shim_cacheflush((char *)l3_data, (int)l3_data_size, SHIM_DCACHE);
-#if defined(HAVE_BUILTIN___CLEAR_CACHE)
-	__builtin___clear_cache((void *)l3_data, (void *)l3_data_end);
-#endif
+	stress_cpu_data_cache_flush((void *)l3_data, l3_data_size);
 
 	/* Benchmark loop */
 	ptr = l3_data;
-	pre_ptr = l3_data + prefetch_info[i].offset;
+	pre_ptr = STRESS_PTRU64_ADD(l3_data, prefetch_info[i].offset);
 	t1 = stress_time_now();
 	while (ptr < l3_data_end) {
-		ptr += 8;
-		pre_ptr += 8;
+		ptr = STRESS_PTRU64_ADD(ptr, STRESS_CACHE_LINE_SIZE);
+		pre_ptr = STRESS_PTRU64_ADD(pre_ptr, STRESS_CACHE_LINE_SIZE);
 		stress_asm_mb();
 	}
 	t2 = stress_time_now();
 	stress_void_ptr_put((volatile void *)ptr);
 	stress_void_ptr_put((volatile void *)pre_ptr);
 
-	shim_cacheflush((char *)l3_data, (int)l3_data_size, SHIM_DCACHE);
-#if defined(HAVE_BUILTIN___CLEAR_CACHE)
-	__builtin___clear_cache((void *)l3_data, (void *)l3_data_end);
-#endif
+	stress_cpu_data_cache_flush((void *)l3_data, l3_data_size);
 
 	ptr = l3_data;
 	pre_ptr = l3_data + prefetch_info[i].offset;
@@ -312,14 +304,48 @@ static inline void OPTIMIZE3 stress_prefetch_benchmark(
 			STRESS_PREFETCH_LOOP(stress_asm_x86_prefetchnta, "x86 prefetchnta");
 			break;
 #endif
-#if defined(HAVE_ASM_PPC64_DCBT)
+#if defined(STRESS_ARCH_PPC64) &&	\
+    defined(HAVE_ASM_PPC64_DCBT)
 		case STRESS_PREFETCH_PPC64_DCBT:
 			STRESS_PREFETCH_LOOP(stress_asm_ppc64_dcbt, "ppc64 dcbt");
 			break;
 #endif
-#if defined(HAVE_ASM_PPC64_DCBTST)
+#if defined(STRESS_ARCH_PPC64) &&	\
+    defined(HAVE_ASM_PPC64_DCBTST)
 		case STRESS_PREFETCH_PPC64_DCBTST:
 			STRESS_PREFETCH_LOOP(stress_asm_ppc64_dcbtst, "ppc64 dcbtst");
+			break;
+#endif
+#if defined(HAVE_ASM_ARM_PRFM)
+		case STRESS_PREFETCH_ARM_PRFM_PLDL1KEEP:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl1keep, "arm prfm pldl1keep");
+			break;
+		case STRESS_PREFETCH_ARM_PRFM_PLDL2KEEP:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl2keep, "arm prfm pldl2keep");
+			break;
+		case STRESS_PREFETCH_ARM_PRFM_PLDL3KEEP:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl3keep, "arm prfm pldl3keep");
+			break;
+		case STRESS_PREFETCH_ARM_PRFM_PLDL1STRM:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl1strm, "arm prfm pldl1strm");
+			break;
+		case STRESS_PREFETCH_ARM_PRFM_PLDL2STRM:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl2strm, "arm prfm pldl2strm");
+			break;
+		case STRESS_PREFETCH_ARM_PRFM_PLDL3STRM:
+			STRESS_PREFETCH_LOOP(stress_asm_arm_prfm_pldl3strm, "arm prfm pldl3strm");
+			break;
+#endif
+#if defined(STRESS_ARCH_PPC) &&	\
+    defined(HAVE_ASM_PPC_DCBT)
+		case STRESS_PREFETCH_PPC_DCBT:
+			STRESS_PREFETCH_LOOP(stress_asm_ppc_dcbt, "ppc dcbt");
+			break;
+#endif
+#if defined(STRESS_ARCH_PPC) &&	\
+    defined(HAVE_ASM_PPC_DCBTST)
+		case STRESS_PREFETCH_PPC_DCBTST:
+			STRESS_PREFETCH_LOOP(stress_asm_ppc_dcbtst, "ppc dcbtst");
 			break;
 #endif
 		}
@@ -347,7 +373,7 @@ static uint64_t stress_prefetch_data_set(uint64_t *l3_data, const uint64_t *l3_d
 		seed = (a * seed + c);
 		val = seed;
 		seed = (a * seed + c);
-		val |= (uint64_t)seed << 32;;
+		val |= (uint64_t)seed << 32;
 
 		*(l3_data++) = val;
 		checksum += val;
@@ -397,12 +423,15 @@ static int stress_prefetch(stress_args_t *args)
 #endif
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (l3_data == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate %zu bytes, skipping stressor\n",
-			args->name, l3_data_mmap_size);
+		pr_inf_skip("%s: cannot mmap %zu bytes%s, errno=%d (%s), "
+			"skipping stressor\n",
+			args->name, l3_data_mmap_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(l3_data, l3_data_mmap_size, "l3data");
 
-	l3_data_end = (uint64_t *)((uintptr_t)l3_data + l3_data_size);
+	l3_data_end = STRESS_PTRU64_ADD(l3_data, l3_data_size);
 	checksum_sane = stress_prefetch_data_set(l3_data, l3_data_end);
 
 	for (i = 0; i < SIZEOF_ARRAY(prefetch_info); i++) {
@@ -412,11 +441,13 @@ static int stress_prefetch(stress_args_t *args)
 		prefetch_info[i].bytes = 0.0;
 		prefetch_info[i].rate = 0.0;
 	}
-	if (args->instance == 0) {
-		pr_inf("%s: using a %zd KB L3 cache with prefetch method '%s'\n",
+	if (stress_instance_zero(args)) {
+		pr_inf("%s: using a %zdK L3 cache with prefetch method '%s'\n",
 		args->name, l3_data_size >> 10, prefetch_methods[prefetch_method].name);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -425,7 +456,7 @@ static int stress_prefetch(stress_args_t *args)
 				prefetch_method, i, checksum_sane,
 				l3_data, l3_data_end, &total_count,
 				verify, &success);
-			if (!success)
+			if (UNLIKELY(!success))
 				break;
 		}
 		stress_bogo_inc(args);
@@ -447,7 +478,7 @@ static int stress_prefetch(stress_args_t *args)
 
 	non_prefetch_rate = prefetch_info[0].rate / (double)GB;
 	stress_metrics_set(args, 0, "GB per sec non-prefetch read rate",
-		non_prefetch_rate, STRESS_HARMONIC_MEAN);
+		non_prefetch_rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	if (best_rate > 0.0)
 		ns = STRESS_DBL_NANOSECOND * (double)prefetch_info[best].offset / best_rate;
@@ -460,7 +491,7 @@ static int stress_prefetch(stress_args_t *args)
 
 	best_rate /= (double)GB;
 	stress_metrics_set(args, 1, "GB per sec best read rate",
-		best_rate, STRESS_HARMONIC_MEAN);
+		best_rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	/* sanity check prefetch rates */
 	if (verify && check_prefetch_rate && (best_rate < non_prefetch_rate)) {
@@ -477,16 +508,21 @@ static int stress_prefetch(stress_args_t *args)
 	return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_prefetch_l3_size,	stress_set_prefetch_L3_size },
-	{ OPT_prefetch_method,	stress_set_prefetch_method  },
-	{ 0,			NULL }
+static const char *stress_prefetch_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(prefetch_methods)) ? prefetch_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_prefetch_l3_size,	"prefetch-l3-size", TYPE_ID_SIZE_T_BYTES_VM, MIN_PREFETCH_L3_SIZE, MAX_PREFETCH_L3_SIZE, NULL },
+	{ OPT_prefetch_method,	"prefetch-method",  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_prefetch_method },
+	END_OPT,
 };
 
-stressor_info_t stress_prefetch_info = {
+const stressor_info_t stress_prefetch_info = {
 	.stressor = stress_prefetch,
-	.class = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

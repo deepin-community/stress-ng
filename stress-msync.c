@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -37,19 +37,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		 NULL }
 };
 
-static int stress_set_msync_bytes(const char *opt)
-{
-	size_t msync_bytes;
-
-	msync_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("msync-bytes", msync_bytes,
-		MIN_MSYNC_BYTES, MAX_MSYNC_BYTES);
-	return stress_set_setting("msync-bytes", TYPE_ID_SIZE_T, &msync_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_msync_bytes,	stress_set_msync_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_msync_bytes, "msync-bytes", TYPE_ID_SIZE_T_BYTES_FS, MIN_MSYNC_BYTES, MAX_MSYNC_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MSYNC)
@@ -111,7 +101,7 @@ static int stress_msync(stress_args_t *args)
 	uint8_t *data = NULL;
 	const size_t page_size = args->page_size;
 	const size_t min_size = 2 * page_size;
-	size_t msync_bytes = DEFAULT_MSYNC_BYTES;
+	size_t msync_bytes, msync_bytes_total = DEFAULT_MSYNC_BYTES;
 	NOCLOBBER size_t sz;
 	ssize_t ret;
 	NOCLOBBER ssize_t rc = EXIT_SUCCESS;
@@ -126,17 +116,19 @@ static int stress_msync(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGBUS, stress_sigbus_handler, NULL) < 0)
 		return EXIT_FAILURE;
 
-	if (!stress_get_setting("msync-bytes", &msync_bytes)) {
+	if (!stress_get_setting("msync-bytes", &msync_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			msync_bytes = MAXIMIZED_FILE_SIZE;
+			msync_bytes_total = MAXIMIZED_FILE_SIZE;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			msync_bytes = MIN_MSYNC_BYTES;
+			msync_bytes_total = MIN_MSYNC_BYTES;
 	}
-	msync_bytes /= args->num_instances;
+	msync_bytes = msync_bytes_total / args->instances;
 	if (msync_bytes < MIN_MSYNC_BYTES)
 		msync_bytes = MIN_MSYNC_BYTES;
 	if (msync_bytes < page_size)
 		msync_bytes = page_size;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, msync_bytes, msync_bytes_total);
 	sz = msync_bytes & ~(page_size - 1);
 	if (sz < min_size)
 		sz = min_size;
@@ -174,20 +166,25 @@ static int stress_msync(stress_args_t *args)
 	buf = (uint8_t *)stress_mmap_populate(NULL, sz,
 		PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (buf == MAP_FAILED) {
-		pr_err("%s: failed to mmap memory of size %zu, errno=%d (%s)\n",
-			args->name, sz, errno, strerror(errno));
+		pr_err("%s: failed to mmap memory of size %zu bytes%s, errno=%d (%s)\n",
+			args->name, sz,
+			stress_get_memfree_str(), errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto err;
 	}
 	data = (uint8_t *)stress_mmap_populate(NULL, page_size,
 		PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (data == MAP_FAILED) {
-		pr_err("%s: failed to mmap memory of size %zu, errno=%d (%s)\n",
-			args->name, page_size, errno, strerror(errno));
+		pr_err("%s: failed to mmap memory of size %zu bytes%s, errno=%d (%s)\n",
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto err_unmap;
 	}
+	stress_set_vma_anon_name(data, page_size, "read-buffer");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -207,16 +204,16 @@ static int stress_msync(stress_args_t *args)
 
 		(void)shim_memset(buf + offset, val, page_size);
 		ret = shim_msync(buf + offset, page_size, MS_SYNC);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: msync MS_SYNC on "
-				"offset %jd failed, errno=%d (%s)\n",
+				"offset %" PRIdMAX " failed, errno=%d (%s)\n",
 				args->name, (intmax_t)offset, errno,
 				strerror(errno));
 			goto do_invalidate;
 		}
 		ret = lseek(fd, offset, SEEK_SET);
-		if (ret == (off_t)-1) {
-			pr_err("%s: cannot seet to offset %jd, "
+		if (UNLIKELY(ret == (off_t)-1)) {
+			pr_err("%s: cannot seet to offset %" PRIdMAX ", "
 				"errno=%d (%s)\n",
 				args->name, (intmax_t)offset, errno,
 				strerror(errno));
@@ -224,12 +221,12 @@ static int stress_msync(stress_args_t *args)
 			break;
 		}
 		ret = read(fd, data, page_size);
-		if (ret < (ssize_t)page_size) {
+		if (UNLIKELY(ret < (ssize_t)page_size)) {
 			pr_fail("%s: read failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto do_invalidate;
 		}
-		if (stress_page_check(data, val, page_size) < 0) {
+		if (UNLIKELY(stress_page_check(data, val, page_size) < 0)) {
 			pr_fail("%s: msync'd data in file different "
 				"to data in memory\n", args->name);
 		}
@@ -244,28 +241,28 @@ do_invalidate:
 		(void)shim_memset(buf + offset, val, page_size);
 
 		ret = lseek(fd, offset, SEEK_SET);
-		if (ret == (off_t)-1) {
-			pr_err("%s: cannot seet to offset %jd, errno=%d (%s)\n",
+		if (UNLIKELY(ret == (off_t)-1)) {
+			pr_err("%s: cannot seet to offset %" PRIdMAX ", errno=%d (%s)\n",
 				args->name, (intmax_t)offset, errno,
 				strerror(errno));
 			rc = EXIT_NO_RESOURCE;
 			break;
 		}
 		ret = read(fd, data, page_size);
-		if (ret < (ssize_t)page_size) {
+		if (UNLIKELY(ret < (ssize_t)page_size)) {
 			pr_fail("%s: read failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto do_next;
 		}
 		ret = shim_msync(buf + offset, page_size, MS_INVALIDATE);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			pr_fail("%s: msync MS_INVALIDATE on "
-				"offset %jd failed, errno=%d (%s)\n",
+				"offset %" PRIdMAX " failed, errno=%d (%s)\n",
 				args->name, (intmax_t)offset, errno,
 				strerror(errno));
 			goto do_next;
 		}
-		if (stress_page_check(buf + offset, val, page_size) < 0) {
+		if (UNLIKELY(stress_page_check(buf + offset, val, page_size) < 0)) {
 			pr_fail("%s: msync'd data in memory "
 				"different to data in file\n", args->name);
 		}
@@ -285,7 +282,7 @@ do_invalidate:
     defined(MS_INVALIDATE)
 		/* Force EBUSY when invalidating on a locked page */
 		ret = shim_mlock(buf + offset, page_size);
-		if (ret == 0) {
+		if (LIKELY(ret == 0)) {
 			VOID_RET(int, shim_msync(buf + offset, page_size, MS_INVALIDATE));
 			VOID_RET(int, shim_munlock(buf + offset, page_size));
 		}
@@ -312,18 +309,18 @@ err:
 	return (int)rc;
 }
 
-stressor_info_t stress_msync_info = {
+const stressor_info_t stress_msync_info = {
 	.stressor = stress_msync,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_msync_info = {
+const stressor_info_t stress_msync_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without msync() system call support"

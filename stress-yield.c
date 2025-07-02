@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,18 +18,170 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-killpid.h"
+#include "core-sched.h"
 
 #include <sched.h>
 
+#define MIN_YIELD_PROCS	(1)
+#define MAX_YIELD_PROCS	(65536)
+
 static const stress_help_t help[] = {
-	{ "y N", "yield N",	"start N workers doing sched_yield() calls" },
-	{ NULL,	 "yield-ops N",	"stop after N bogo yield operations" },
-	{ NULL,	 NULL,		NULL }
+	{ "y N", "yield N",	  "start N workers doing sched_yield() calls" },
+	{ NULL,	 "yield-ops N",	  "stop after N bogo yield operations" },
+	{ NULL,	 "yield-procs N", "specify number of yield processes per stressor" },
+	{ NULL,  "yield-sched P", "select scheduler policy [idle, fifo, rr, other, batch, deadline]" },
+	{ NULL,	 NULL,		  NULL }
 };
 
-#if defined(_POSIX_PRIORITY_SCHEDULING) &&	\
-    !defined(__minix__)
+static const char *stress_yield_sched(const size_t i)
+{
+	return (i < stress_sched_types_length) ? stress_sched_types[i].sched_name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_yield_procs, "yield-procs", TYPE_ID_UINT32, MIN_YIELD_PROCS, MAX_YIELD_PROCS, NULL },
+	{ OPT_yield_sched, "yield-sched", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_yield_sched },
+	END_OPT,
+};
+
+#if defined(HAVE_SCHED_SETAFFINITY) &&		\
+    (defined(_POSIX_PRIORITY_SCHEDULING) || 	\
+     defined(__linux__)) &&			\
+    (defined(SCHED_BATCH) ||			\
+     defined(SCHED_DEADLINE) ||			\
+     defined(SCHED_IDLE) ||			\
+     defined(SCHED_FIFO) ||			\
+     defined(SCHED_OTHER) ||			\
+     defined(SCHED_RR)) &&			\
+    !defined(__OpenBSD__) &&			\
+    !defined(__minix__) &&			\
+    !defined(__APPLE__)
+/*
+ *  stress_yield_sched_policy()
+ *	attempt to apply a scheduling policy, ignore if yield_sched out of bounds
+ *	or if policy cannot be applied (e.g. not enough privilege).
+ */
+static void stress_yield_sched_policy(stress_args_t *args, const size_t yield_sched)
+{
+	struct sched_param param;
+	int ret = 0;
+	int max_prio, min_prio, rng_prio, policy;
+	const char *policy_name;
+
+	if (UNLIKELY(yield_sched >= stress_sched_types_length))
+		return;
+
+	policy = stress_sched_types[yield_sched].sched;
+	policy_name = stress_sched_types[yield_sched].sched_name;
+
+	errno = 0;
+	switch (policy) {
+#if defined(SCHED_DEADLINE) &&		\
+    defined(HAVE_SCHED_GETATTR) &&	\
+    defined(HAVE_SCHED_SETATTR)
+	case SCHED_DEADLINE:
+		/*
+		 *  Only have 1 RT deadline instance running
+		 */
+		if (stress_instance_zero(args)) {
+			struct shim_sched_attr attr;
+
+			(void)shim_memset(&attr, 0, sizeof(attr));
+			attr.size = sizeof(attr);
+			attr.sched_flags = 0;
+			attr.sched_nice = 0;
+			attr.sched_priority = 0;
+			attr.sched_policy = SCHED_DEADLINE;
+			/* runtime <= deadline <= period */
+			attr.sched_runtime = 40 * 100000;
+			attr.sched_deadline = 80 * 100000;
+			attr.sched_period = 160 * 100000;
+
+			ret = shim_sched_setattr(0, &attr, 0);
+			break;
+		}
+		goto case_sched_other;
+#endif
+#if defined(SCHED_IDLE)
+	case SCHED_IDLE:
+		goto case_sched_other;
+#endif
+#if defined(SCHED_BATCH)
+	case SCHED_BATCH:
+		goto case_sched_other;
+#endif
+#if defined(SCHED_OTHER)
+	case SCHED_OTHER:
+#endif
+#if (defined(SCHED_DEADLINE) &&		\
+     defined(HAVE_SCHED_GETATTR) &&	\
+     defined(HAVE_SCHED_SETATTR)) ||	\
+     defined(SCHED_IDLE) ||		\
+     defined(SCHED_BATCH)
+case_sched_other:
+#endif
+		param.sched_priority = 0;
+		ret = sched_setscheduler(0, policy, &param);
+		break;
+#if defined(SCHED_RR)
+	case SCHED_RR:
+#if defined(HAVE_SCHED_RR_GET_INTERVAL)
+		{
+			struct timespec t;
+
+			VOID_RET(int, sched_rr_get_interval(0, &t));
+		}
+#endif
+		goto case_sched_fifo;
+#endif
+#if defined(SCHED_FIFO)
+	case SCHED_FIFO:
+#endif
+case_sched_fifo:
+		min_prio = sched_get_priority_min(policy);
+		max_prio = sched_get_priority_max(policy);
+
+		/* Check if min/max is supported or not */
+		if (UNLIKELY((min_prio == -1) || (max_prio == -1)))
+			return;
+
+		rng_prio = max_prio - min_prio;
+		if (UNLIKELY(rng_prio == 0)) {
+			pr_dbg("%s: invalid min/max priority "
+				"range for scheduling policy %s "
+				"(min=%d, max=%d)\n",
+				args->name,
+				policy_name,
+				min_prio, max_prio);
+			break;
+		}
+		param.sched_priority = (int)stress_mwc32modn(rng_prio) + min_prio;
+		ret = sched_setscheduler(0, policy, &param);
+		break;
+	default:
+		/* Should never get here */
+		break;
+	}
+	if (UNLIKELY(ret < 0)) {
+		/*
+		 *  Some systems return EINVAL for non-POSIX
+		 *  scheduling policies, silently ignore these
+		 *  failures.
+		 */
+		if ((errno != EINVAL) &&
+		    (errno != EINTR) &&
+		    (errno != ENOSYS) &&
+		    (errno != EBUSY)) {
+			pr_dbg("%s: sched_setscheduler "
+				"failed, errno=%d (%s) "
+				"for scheduler policy %s\n",
+				args->name, errno, strerror(errno),
+				policy_name);
+		}
+	}
+}
 
 /*
  *  stress on sched_yield()
@@ -41,14 +193,22 @@ static int stress_yield(stress_args_t *args)
 	size_t metrics_size;
 	uint64_t max_ops_per_yielder;
 	int32_t cpus = stress_get_processors_configured();
-	const uint32_t instances = args->num_instances;
-	uint32_t yielders = 2;
+	const uint32_t instances = args->instances;
+	uint32_t yielders = 2, yield_procs = 0;
 	double count, duration, ns;
 #if defined(HAVE_SCHED_GETAFFINITY)
 	cpu_set_t mask;
 #endif
 	pid_t *pids;
-	size_t i;
+	size_t i, yield_sched = SIZE_MAX;
+
+	if (!stress_get_setting("yield-procs", &yield_procs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			yield_procs = MAX_YIELD_PROCS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			yield_procs = MIN_YIELD_PROCS;
+	}
+	(void)stress_get_setting("yield-sched", &yield_sched);
 
 #if defined(HAVE_SCHED_GETAFFINITY)
 	/*
@@ -67,33 +227,36 @@ static int stress_yield(stress_args_t *args)
 			PRIu32 ")\n", args->name, cpus, (cpus == 1) ? "" : "s", args->instance);
 #endif
 	}
-#else
-	UNEXPECTED
 #endif
 
-	/*
-	 *  Ensure we always have at least 2 yielders per
-	 *  CPU available to force context switching on yields
-	 */
-	if (cpus > 0) {
-		cpus *= 2;
-		yielders = cpus / instances;
-		if (yielders < 1)
-			yielders = 1;
-		if (!args->instance) {
-			/* residual may be -ve, ensure it is signed */
-			int32_t residual = cpus - (int32_t)(yielders * instances);
+	if (yield_procs == 0) {
+		/*
+		 *  Ensure we always have at least 2 yielders per
+		 *  CPU available to force context switching on yields
+		 */
+		if (cpus > 0) {
+			cpus *= 2;
+			yielders = cpus / instances;
+			if (yielders < 1)
+				yielders = 1;
+			if (!args->instance) {
+				/* residual may be -ve, ensure it is signed */
+				const int32_t residual = cpus - (int32_t)(yielders * instances);
 
-			if (residual > 0)
-				yielders += residual;
+				if (residual > 0)
+					yielders += residual;
+			}
 		}
+	} else {
+		yielders = yield_procs;
 	}
+	max_ops_per_yielder = args->bogo.max_ops / yielders;
 
-	max_ops_per_yielder = args->max_ops / yielders;
-	pids = calloc(yielders, sizeof(*pids));
+	pids = (pid_t *)calloc(yielders, sizeof(*pids));
 	if (!pids) {
-		pr_inf_skip("%s: calloc failed allocating %" PRIu32
-			" pids, skipping stressor\n", args->name, yielders);
+		pr_inf_skip("%s: failed to allocate %" PRIu32
+			" pids%s, skipping stressor\n",
+			args->name, yielders, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -103,34 +266,36 @@ static int stress_yield(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (metrics == MAP_FAILED) {
-		pr_err("%s: mmap failed, count not allocate %zd bytes, errno=%d (%s)\n",
-			args->name, metrics_size, errno, strerror(errno));
+		pr_err("%s: failed to mmap %zu bytes%s, errno=%d (%s)\n",
+			args->name, metrics_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		free(pids);
 		return EXIT_NO_RESOURCE;
 	}
-	for (i = 0; i < yielders; i++) {
-		metrics[i].count = 0.0;
-		metrics[i].duration = 0.0;
-	}
+	stress_set_vma_anon_name(metrics, metrics_size, "metrics");
+	stress_zero_metrics(metrics, yielders);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	for (i = 0; stress_continue_flag() && (i < yielders); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < yielders)); i++) {
 		pids[i] = fork();
 		if (pids[i] < 0) {
 			pr_dbg("%s: fork failed (instance %" PRIu32
-				", yielder %zd): errno=%d (%s)\n",
+				", yielder %zd), errno=%d (%s)\n",
 				args->name, args->instance, i, errno, strerror(errno));
 		} else if (pids[i] == 0) {
 			stress_parent_died_alarm();
 			(void)sched_settings_apply(true);
+			stress_yield_sched_policy(args, yield_sched);
 
 			do {
 				int ret;
 				double t = stress_time_now();
 
 				ret = shim_sched_yield();
-				if (ret == 0) {
+				if (LIKELY(ret == 0)) {
 					metrics[i].count += 1.0;
 					metrics[i].duration += (stress_time_now() - t);
 				} else if ((ret < 0) && (g_opt_flags & OPT_FLAGS_VERIFY)) {
@@ -144,10 +309,10 @@ static int stress_yield(stress_args_t *args)
 
 	do {
 #if defined(__FreeBSD__)
-		VOID_RET(int, shim_sched_yield());
+		(void)shim_sched_yield();
 		stress_bogo_inc(args);
 #else
-		VOID_RET(int, shim_usleep(100000));
+		(void)shim_usleep(100000);
 #endif
 	} while (stress_continue(args));
 
@@ -165,7 +330,7 @@ static int stress_yield(stress_args_t *args)
 
 	ns = count > 0.0 ? (STRESS_DBL_NANOSECOND * duration) / count : 0.0;
 	stress_metrics_set(args, 0, "ns duration per sched_yield call",
-		ns, STRESS_HARMONIC_MEAN);
+		ns, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)metrics, metrics_size);
 	free(pids);
@@ -173,16 +338,18 @@ static int stress_yield(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_yield_info = {
+const stressor_info_t stress_yield_info = {
 	.stressor = stress_yield,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_yield_info = {
+const stressor_info_t stress_yield_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without scheduling support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -38,19 +38,9 @@ static const stress_help_t help[] = {
 	{ NULL, NULL,		    NULL }
 };
 
-static int stress_set_lease_breakers(const char *opt)
-{
-	uint64_t lease_breakers;
-
-	lease_breakers = stress_get_uint64(opt);
-	stress_check_range("lease-breakers", lease_breakers,
-		MIN_LEASE_BREAKERS, MAX_LEASE_BREAKERS);
-	return stress_set_setting("lease-breakers", TYPE_ID_UINT64, &lease_breakers);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_lease_breakers,	stress_set_lease_breakers },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_lease_breakers, "lease-breakers", TYPE_ID_UINT64, MIN_LEASE_BREAKERS, MAX_LEASE_BREAKERS, NULL },
+	END_OPT,
 };
 
 #if defined(F_SETLEASE) &&	\
@@ -108,7 +98,7 @@ again:
 			if (fd < 0) {
 				if ((errno != EWOULDBLOCK) &&
                                     (errno != EACCES)) {
-					pr_dbg("%s: open failed (child): errno=%d: (%s)\n",
+					pr_dbg("%s: open failed (child), errno=%d: (%s)\n",
 						args->name, errno, strerror(errno));
 					if (count++ > 3)
 						break;
@@ -135,14 +125,14 @@ static int stress_try_lease(
 	const int flags,
 	const int lock)
 {
-	int fd;
+	int fd, rc = EXIT_SUCCESS;
 
 	fd = open(filename, flags);
 	if (fd < 0) {
 		int ret;
 
 		ret = stress_exit_status(errno);
-		pr_err("%s: open failed (parent): errno=%d: (%s)\n",
+		pr_err("%s: open failed (parent), errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		return ret;
 	}
@@ -151,7 +141,7 @@ static int stress_try_lease(
 	 *  attempt a lease lock
 	 */
 	while (fcntl(fd, F_SETLEASE, lock) < 0) {
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			goto tidy;
 	}
 	(void)stress_get_lease(fd);
@@ -163,19 +153,20 @@ static int stress_try_lease(
 	 *  attempt a lease unlock
 	 */
 	while (fcntl(fd, F_SETLEASE, F_UNLCK) < 0) {
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		if (errno != EAGAIN) {
-			pr_fail("%s: fcntl failed: errno=%d: (%s)%s\n",
+			pr_fail("%s: fcntl failed, errno=%d: (%s)%s\n",
 				args->name, errno, strerror(errno),
 				stress_get_fs_type(filename));
+			rc = EXIT_FAILURE;
 			break;
 		}
 	}
 tidy:
 	(void)close(fd);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -211,7 +202,7 @@ static int stress_lease(stress_args_t *args)
 	fd = creat(filename, S_IRUSR | S_IWUSR);
 	if (fd < 0) {
 		ret = stress_exit_status(errno);
-		pr_err("%s: creat failed: errno=%d: (%s)\n",
+		pr_err("%s: creat failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)stress_temp_dir_rm_args(args);
 		return ret;
@@ -229,6 +220,8 @@ static int stress_lease(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t1 = stress_time_now();
@@ -257,24 +250,24 @@ reap:
 	dt = t2 - t1;
 	if (dt > 0.0) {
 		stress_metrics_set(args, 0, "lease sigio interrupts per sec",
-			(double)lease_sigio / dt, STRESS_HARMONIC_MEAN);
+			(double)lease_sigio / dt, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
 	return ret;
 }
 
-stressor_info_t stress_lease_info = {
+const stressor_info_t stress_lease_info = {
 	.stressor = stress_lease,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_lease_info = {
+const stressor_info_t stress_lease_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without fcntl() F_SETLEASE, F_WRLCK or F_UNLCK commands"

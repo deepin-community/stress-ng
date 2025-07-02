@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -64,19 +64,9 @@ typedef struct {
 
 #endif
 
-static int stress_set_vm_rw_bytes(const char *opt)
-{
-	size_t vm_rw_bytes;
-
-	vm_rw_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("vm-rw-bytes", vm_rw_bytes,
-		MIN_VM_RW_BYTES, MAX_VM_RW_BYTES);
-	return stress_set_setting("vm-rw-bytes", TYPE_ID_SIZE_T, &vm_rw_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_vm_rw_bytes,	stress_set_vm_rw_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_vm_rw_bytes, "vm-rw-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_VM_RW_BYTES, MAX_VM_RW_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_PROCESS_VM_READV) &&	\
@@ -91,7 +81,7 @@ static int OPTIMIZE3 stress_vm_child(void *arg)
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
 	uint8_t *buf;
-	int ret = EXIT_SUCCESS;
+	int rc = EXIT_SUCCESS;
 	stress_addr_msg_t msg_rd ALIGN64, msg_wr ALIGN64;
 
 	stress_parent_died_alarm();
@@ -103,11 +93,13 @@ static int OPTIMIZE3 stress_vm_child(void *arg)
 	buf = mmap(NULL, ctxt->sz, PROT_READ | PROT_WRITE,
 		MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buf == MAP_FAILED) {
-		ret = stress_exit_status(errno);
-		pr_fail("%s: mmap failed, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		rc = stress_exit_status(errno);
+		pr_fail("%s: failed to mmap %zu bytes%s, errno=%d (%s)\n",
+			args->name, ctxt->sz,
+			stress_get_memfree_str(), errno, strerror(errno));
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(buf, ctxt->sz, "context");
 
 	while (stress_continue_flag()) {
 		register uint8_t *ptr;
@@ -124,9 +116,11 @@ redo_wr1:
 		if (UNLIKELY(rwret < 0)) {
 			if ((errno == EAGAIN) || (errno == EINTR))
 				goto redo_wr1;
-			if (errno != EBADF)
+			if (errno != EBADF) {
 				pr_fail("%s: write failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+			}
 			break;
 		}
 redo_rd1:
@@ -137,6 +131,7 @@ redo_rd1:
 				goto redo_rd1;
 			pr_fail("%s: read failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			break;
 		}
 		if (UNLIKELY(rwret != sizeof(msg_rd))) {
@@ -144,6 +139,7 @@ redo_rd1:
 				break;
 			pr_fail("%s: read failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			break;
 		}
 
@@ -153,6 +149,7 @@ redo_rd1:
 				if (UNLIKELY(*ptr != msg_rd.val)) {
 					pr_fail("%s: memory at %p (offset %tx): %d vs %d\n",
 						args->name, (void *)ptr, ptr - buf, *ptr, msg_rd.val);
+					rc = EXIT_FAILURE;
 					goto cleanup;
 				}
 				*ptr = 0;
@@ -166,14 +163,14 @@ cleanup:
 	if (UNLIKELY(write(ctxt->pipe_wr[1], &msg_wr, sizeof(msg_wr)) <= 0)) {
 		if (errno != EBADF)
 			pr_dbg("%s: failed to write termination message "
-				"over pipe: errno=%d (%s)\n",
+				"over pipe, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 	}
 
 	(void)close(ctxt->pipe_wr[1]);
 	(void)close(ctxt->pipe_rd[0]);
-	(void)munmap(buf, ctxt->sz);
-	return ret;
+	(void)munmap((void *)buf, ctxt->sz);
+	return rc;
 }
 
 
@@ -190,8 +187,9 @@ static int OPTIMIZE3 stress_vm_parent(stress_context_t *ctxt)
 	localbuf = mmap(NULL, ctxt->sz, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (localbuf == MAP_FAILED) {
-		pr_fail("%s: mmap failed, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_fail("%s: failed to mmap %zu bytes%s, errno=%d (%s)\n",
+			args->name, ctxt->sz,
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)close(ctxt->pipe_wr[0]);
 		(void)close(ctxt->pipe_wr[1]);
 		(void)close(ctxt->pipe_rd[0]);
@@ -212,7 +210,7 @@ static int OPTIMIZE3 stress_vm_parent(stress_context_t *ctxt)
 
 		/* Wait for address of child's buffer */
 redo_rd2:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		rwret = read(ctxt->pipe_wr[0], &msg_rd, sizeof(msg_rd));
 		if (UNLIKELY(rwret < 0)) {
@@ -309,7 +307,7 @@ redo_rd2:
 		msg_wr.val = val;
 		val++;
 redo_wr2:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		/* Inform child that memory has been changed */
 		rwret = write(ctxt->pipe_rd[1], &msg_wr, sizeof(msg_wr));
@@ -347,14 +345,14 @@ fail:
 		if (errno != EBADF)
 			pr_dbg("%s: failed to write "
 				"termination message "
-				"over pipe: errno=%d (%s)\n",
+				"over pipe, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 	}
 	(void)close(ctxt->pipe_wr[0]);
 	(void)close(ctxt->pipe_rd[1]);
 	if (ctxt->pid > 1)
 		stress_kill_and_wait(args, ctxt->pid, SIGALRM, false);
-	(void)munmap(localbuf, ctxt->sz);
+	(void)munmap((void *)localbuf, ctxt->sz);
 
 	return EXIT_SUCCESS;
 }
@@ -368,20 +366,22 @@ static int stress_vm_rw(stress_args_t *args)
 	stress_context_t ctxt;
 	uint8_t stack[64*1024];
 	uint8_t *stack_top = (uint8_t *)stress_get_stack_top((void *)stack, STACK_SIZE);
-	size_t vm_rw_bytes = DEFAULT_VM_RW_BYTES;
+	size_t vm_rw_bytes, vm_rw_bytes_total = DEFAULT_VM_RW_BYTES;
 	int rc;
 
-	if (!stress_get_setting("vm-rw-bytes", &vm_rw_bytes)) {
+	if (!stress_get_setting("vm-rw-bytes", &vm_rw_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			vm_rw_bytes = MAX_32;
+			vm_rw_bytes_total = MAX_32;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			vm_rw_bytes = MIN_VM_RW_BYTES;
+			vm_rw_bytes_total = MIN_VM_RW_BYTES;
 	}
-	vm_rw_bytes /= args->num_instances;
+	vm_rw_bytes = vm_rw_bytes_total / args->instances;
 	if (vm_rw_bytes < MIN_VM_RW_BYTES)
 		vm_rw_bytes = MIN_VM_RW_BYTES;
 	if (vm_rw_bytes < args->page_size)
 		vm_rw_bytes = args->page_size;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, vm_rw_bytes, vm_rw_bytes * args->instances);
 	ctxt.args = args;
 	ctxt.sz = vm_rw_bytes & ~(args->page_size - 1);
 	ctxt.iov_count = (ctxt.sz + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -400,6 +400,9 @@ static int stress_vm_rw(stress_args_t *args)
 	}
 
 	(void)shim_memset(stack, 0, sizeof(stack));
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	ctxt.pid = clone(stress_vm_child, stress_align_stack(stack_top),
@@ -422,18 +425,18 @@ again:
 	return rc;
 }
 
-stressor_info_t stress_vm_rw_info = {
+const stressor_info_t stress_vm_rw_info = {
 	.stressor = stress_vm_rw,
-	.class = CLASS_VM | CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_vm_rw_info = {
+const stressor_info_t stress_vm_rw_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without process_vm_readv(), process_vm_writev(), clone() or CLONE_VM defined"

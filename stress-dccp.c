@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-killpid.h"
 #include "core-net.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_SYS_UN_H)
 #include <sys/un.h>
 #endif
@@ -35,8 +37,6 @@
 
 #define DCCP_BUF		(1024)	/* DCCP I/O buffer size */
 
-#define MIN_DCCP_PORT		(1024)
-#define MAX_DCCP_PORT		(65535)
 #define DEFAULT_DCCP_PORT	(10000)
 
 #define MIN_DCCP_MSGS		(1)
@@ -72,87 +72,22 @@ static const stress_dccp_opts_t dccp_options[] = {
 #if defined(HAVE_SENDMMSG)
 	{ "sendmmsg",	DCCP_OPT_SENDMMSG },
 #endif
-	{ NULL,		0 }
 };
 
-/*
- *  stress_set_dccp_opts()
- *	parse --dccp-opts
- */
-static int stress_set_dccp_opts(const char *opt)
+static const char *stress_dccp_options(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; dccp_options[i].optname; i++) {
-		if (!strcmp(opt, dccp_options[i].optname)) {
-			int dccp_opt = dccp_options[i].opt;
-
-			stress_set_setting("dccp-opts", TYPE_ID_INT, &dccp_opt);
-			return 0;
-		}
-	}
-	(void)fprintf(stderr, "dccp-opts option '%s' not known, options are:", opt);
-	for (i = 0; dccp_options[i].optname; i++) {
-		(void)fprintf(stderr, "%s %s",
-			i == 0 ? "" : ",", dccp_options[i].optname);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
+	return (i < SIZEOF_ARRAY(dccp_options)) ? dccp_options[i].optname: NULL;
 }
 
-/*
- *  stress_set_dccp_msgs()
- *	set number of messages to send per connection
- */
-static int stress_set_dccp_msgs(const char *opt)
-{
-	size_t dccp_msgs;
+static int dccp_domain_mask = DOMAIN_INET | DOMAIN_INET6;
 
-	dccp_msgs = (size_t)stress_get_uint64(opt);
-	stress_check_range("dccp-msgs", (uint64_t)dccp_msgs,
-                MIN_DCCP_MSGS, MAX_DCCP_MSGS);
-	return stress_set_setting("dccp-msgs", TYPE_ID_SIZE_T, &dccp_msgs);
-}
-
-/*
- *  stress_set_dccp_port()
- *	set port to use
- */
-static int stress_set_dccp_port(const char *opt)
-{
-	int dccp_port;
-
-	stress_set_net_port("dccp-port", opt,
-		MIN_DCCP_PORT, MAX_DCCP_PORT, &dccp_port);
-	return stress_set_setting("dccp-port", TYPE_ID_INT, &dccp_port);
-}
-
-/*
- *  stress_set_dccp_domain()
- *	set the socket domain option
- */
-static int stress_set_dccp_domain(const char *name)
-{
-	int ret, dccp_domain;
-
-	ret = stress_set_net_domain(DOMAIN_INET | DOMAIN_INET6,
-				"dccp-domain", name, &dccp_domain);
-	stress_set_setting("dccp-domain", TYPE_ID_INT, &dccp_domain);
-	return ret;
-}
-
-static int stress_set_dccp_if(const char *name)
-{
-        return stress_set_setting("dccp-if", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dccp_domain,	stress_set_dccp_domain },
-	{ OPT_dccp_if,		stress_set_dccp_if },
-	{ OPT_dccp_msgs,	stress_set_dccp_msgs },
-	{ OPT_dccp_opts,	stress_set_dccp_opts },
-	{ OPT_dccp_port,	stress_set_dccp_port },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_dccp_domain, "dccp-domain", TYPE_ID_INT_DOMAIN,    0, 0, &dccp_domain_mask },
+	{ OPT_dccp_if,     "dccp-if",     TYPE_ID_STR,           0, 0, NULL },
+	{ OPT_dccp_msgs,   "dccp-msgs",   TYPE_ID_SIZE_T,        MIN_DCCP_MSGS, MAX_DCCP_MSGS, NULL },
+	{ OPT_dccp_opts,   "dccp-opts",	  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_dccp_options },
+	{ OPT_dccp_port,   "dccp-port",   TYPE_ID_INT_PORT,      MIN_PORT, MAX_PORT, NULL },
+	END_OPT,
 };
 
 #if defined(SOCK_DCCP) &&	\
@@ -179,7 +114,7 @@ static int stress_dccp_client(
 		int retries = 0;
 		socklen_t addr_len = 0;
 retry:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			return EXIT_FAILURE;
 		if ((fd = socket(dccp_domain, SOCK_DCCP, IPPROTO_DCCP)) < 0) {
 			if ((errno == ESOCKTNOSUPPORT) ||
@@ -218,7 +153,8 @@ retry:
 		}
 
 		do {
-			ssize_t n = recv(fd, buf, sizeof(buf), 0);
+			const ssize_t n = recv(fd, buf, sizeof(buf), 0);
+
 			if (n == 0)
 				break;
 			if (n < 0) {
@@ -263,7 +199,12 @@ static int stress_dccp_server(
 	double t1 = 0.0, t2 = 0.0, dt;
 	size_t dccp_msgs = DEFAULT_DCCP_MSGS;
 
-	(void)stress_get_setting("dccp-msgs", &dccp_msgs);
+	if (!stress_get_setting("dccp-msgs", &dccp_msgs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			dccp_msgs = MAX_DCCP_MSGS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			dccp_msgs = MIN_DCCP_MSGS;
+	}
 
 	if (stress_sig_stop_stressing(args->name, SIGALRM) < 0) {
 		rc = EXIT_FAILURE;
@@ -276,7 +217,7 @@ static int stress_dccp_server(
 			 *  Protocol not supported - then return
 			 *  EXIT_NOT_IMPLEMENTED and skip the test
 			 */
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: DCCP protocol not supported, "
 					"skipping stressor\n", args->name);
 			return EXIT_NOT_IMPLEMENTED;
@@ -316,7 +257,7 @@ static int stress_dccp_server(
 	do {
 		int sfd;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		sfd = accept(fd, (struct sockaddr *)NULL, NULL);
@@ -365,7 +306,7 @@ again:
 							msgs++;
 					}
 					stress_bogo_inc(args);
-				} while (stress_continue(args) && (k < dccp_msgs));
+				} while (LIKELY(stress_continue(args) && (k < dccp_msgs)));
 				break;
 			case DCCP_OPT_SENDMSG:
 				do {
@@ -384,7 +325,7 @@ again:
 						msgs += j;
 					}
 					stress_bogo_inc(args);
-				} while (stress_continue(args) && (k < dccp_msgs));
+				} while (LIKELY(stress_continue(args) && (k < dccp_msgs)));
 				break;
 #if defined(HAVE_SENDMMSG)
 			case DCCP_OPT_SENDMMSG:
@@ -406,7 +347,7 @@ again:
 						msgs += (MSGVEC_SIZE * j);
 					}
 					stress_bogo_inc(args);
-				} while (stress_continue(args) && (k < dccp_msgs));
+				} while (LIKELY(stress_continue(args) && (k < dccp_msgs)));
 				break;
 #endif
 			default:
@@ -447,7 +388,7 @@ die:
 	dt = t2 - t1;
 	if (dt > 0.0)
 		stress_metrics_set(args, 0, "messages per sec",
-			(double)msgs / dt, STRESS_HARMONIC_MEAN);
+			(double)msgs / dt, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
@@ -486,6 +427,8 @@ static int stress_dccp(stress_args_t *args)
 	}
 
 	dccp_port += args->instance;
+	if (dccp_port > MAX_PORT)
+		dccp_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(dccp_port, dccp_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -497,6 +440,8 @@ static int stress_dccp(stress_args_t *args)
 	pr_dbg("%s: process [%d] using socket port %d\n",
 		args->name, (int)args->pid, dccp_port);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -504,7 +449,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_dbg("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -526,18 +471,18 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_dccp_info = {
+const stressor_info_t stress_dccp_info = {
 	.stressor = stress_dccp,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_dccp_info = {
+const stressor_info_t stress_dccp_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without IPPROTO_DCCP or SOCK_DCCP defined"

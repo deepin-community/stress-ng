@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,10 +21,19 @@
 #include "core-builtin.h"
 #include "core-killpid.h"
 
+#define MIN_MMAPFORK_BYTES     (4 * KB)
+#define MAX_MMAPFORK_BYTES     (MAX_MEM_LIMIT)
+
 static const stress_help_t help[] = {
-	{ NULL,	"mmapfork N",	  "start N workers stressing many forked mmaps/munmaps" },
-	{ NULL,	"mmapfork-ops N", "stop after N mmapfork bogo operations" },
-	{ NULL,	NULL,		  NULL }
+	{ NULL,	"mmapfork N",	    "start N workers stressing many forked mmaps/munmaps" },
+	{ NULL,	"mmapfork-ops N",   "stop after N mmapfork bogo operations" },
+	{ NULL,	"mmapfork-bytes N", "mmap and munmap N bytes by workers for each stress iteration" },
+	{ NULL,	NULL,		    NULL }
+};
+
+static const stress_opt_t opts[] = {
+	{ OPT_mmapfork_bytes, "mmapfork-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_MMAPFORK_BYTES, MAX_MMAPFORK_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_SYSINFO_H) &&	\
@@ -101,7 +110,7 @@ static bool stress_memory_is_not_zero(const uint8_t *ptr, const size_t size)
  */
 static int stress_mmapfork(stress_args_t *args)
 {
-	pid_t pids[MAX_PIDS];
+	stress_pid_t s_pids[MAX_PIDS];
 	struct sysinfo info;
 	void *ptr;
 	uint64_t segv_count = 0;
@@ -111,6 +120,7 @@ static int stress_mmapfork(stress_args_t *args)
 	const size_t wipe_size = args->page_size;
 	bool wipe_ok = false;
 #endif
+	bool report_size = (stress_instance_zero(args));
 
 #if defined(MADV_WIPEONFORK)
 	/*
@@ -119,30 +129,36 @@ static int stress_mmapfork(stress_args_t *args)
 	wipe_ptr = mmap(NULL, wipe_size, PROT_READ | PROT_WRITE,
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (wipe_ptr != MAP_FAILED) {
+		stress_set_vma_anon_name(wipe_ptr, wipe_size, "wipe-on-fork-data");
 		(void)shim_memset(wipe_ptr, 0xff, wipe_size);
 		if (shim_madvise(wipe_ptr, wipe_size, MADV_WIPEONFORK) == 0)
 			wipe_ok = true;
 	}
 #endif
+
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		size_t i, len;
 
 		for (i = 0; i < MAX_PIDS; i++)
-			pids[i] = -1;
+			s_pids[i].pid = -1;
 
 		for (i = 0; i < MAX_PIDS; i++) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
 
-			pids[i] = fork();
+			s_pids[i].pid = fork();
 			/* Out of resources for fork?, do a reap */
-			if (pids[i] < 0)
+			if (s_pids[i].pid < 0)
 				break;
-			if (pids[i] == 0) {
+			if (s_pids[i].pid == 0) {
 				/* Child */
 				const pid_t ppid = getppid();
+				size_t len_total;
 
 				stress_parent_died_alarm();
 				(void)sched_settings_apply(true);
@@ -151,11 +167,12 @@ static int stress_mmapfork(stress_args_t *args)
 					_exit(MMAPFORK_FAILURE);
 
 				(void)shim_memset(&info, 0, sizeof(info));
-				if (sysinfo(&info) < 0) {
+				if (UNLIKELY(sysinfo(&info) < 0)) {
 					pr_fail("%s: sysinfo failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 					_exit(MMAPFORK_FAILURE);
 				}
+
 #if defined(MADV_WIPEONFORK)
 				if (wipe_ok && (wipe_ptr != MAP_FAILED) &&
 				    stress_memory_is_not_zero(wipe_ptr, wipe_size)) {
@@ -164,8 +181,25 @@ static int stress_mmapfork(stress_args_t *args)
 					_exit(MMAPFORK_FAILURE);
 				}
 #endif
+				len_total = (size_t)info.freeram;
+				if (!stress_get_setting("mmapfork-bytes", &len_total)) {
+					if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+						len_total = MIN_MMAPFORK_BYTES;
+					if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+						len_total = MAX_32;
+				}
+				if (len_total < MIN_MMAPFORK_BYTES)
+					len_total = MIN_MMAPFORK_BYTES;
+				if (len_total < args->page_size)
+					len_total = args->page_size;
 
-				len = ((size_t)info.freeram / (args->num_instances * MAX_PIDS)) / 2;
+				len = (len_total / (args->instances * MAX_PIDS)) / 2;
+				if (len < args->page_size)
+					len = args->page_size;
+				if ((i == 0) && report_size) {
+					stress_usage_bytes(args, len, len_total);
+				}
+
 				segv_ret = MMAPFORK_SEGV_MMAP;
 				ptr = stress_mmap_populate(NULL, len, PROT_READ | PROT_WRITE,
 					MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -195,6 +229,7 @@ static int stress_mmapfork(stress_args_t *args)
 				}
 				_exit(EXIT_SUCCESS);
 			}
+			report_size = false;
 		}
 
 		/*
@@ -203,19 +238,19 @@ static int stress_mmapfork(stress_args_t *args)
 		for (i = 0; i < MAX_PIDS; i++) {
 			int status;
 
-			if (UNLIKELY(pids[i] < 0))
+			if (UNLIKELY(s_pids[i].pid < 0))
 				continue;
 
-			if (shim_waitpid(pids[i], &status, 0) < 0) {
-				if (errno != EINTR) {
-					pr_err("%s: waitpid errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+			if (shim_waitpid(s_pids[i].pid, &status, 0) < 0) {
+				if (UNLIKELY(errno != EINTR)) {
+					pr_err("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)s_pids[i].pid, errno, strerror(errno));
 				} else {
 					/* Probably an SIGARLM, force reap */
 					goto reap;
 				}
 			} else {
-				pids[i] = -1;
+				s_pids[i].pid = -1;
 				if (WIFEXITED(status)) {
 					int masked = WEXITSTATUS(status) & MMAPFORK_MASK;
 
@@ -227,7 +262,7 @@ static int stress_mmapfork(stress_args_t *args)
 			}
 		}
 reap:
-		stress_kill_and_wait_many(args, pids, MAX_PIDS, SIGALRM, false);
+		stress_kill_and_wait_many(args, s_pids, MAX_PIDS, SIGALRM, false);
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
@@ -235,7 +270,7 @@ reap:
 
 #if defined(MADV_WIPEONFORK)
 	if (wipe_ptr != MAP_FAILED)
-		(void)munmap(wipe_ptr, wipe_size);
+		(void)munmap((void *)wipe_ptr, wipe_size);
 #endif
 
 	if (segv_count) {
@@ -262,17 +297,20 @@ reap:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_mmapfork_info = {
+
+const stressor_info_t stress_mmapfork_info = {
 	.stressor = stress_mmapfork,
-	.class = CLASS_SCHEDULER | CLASS_VM | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_mmapfork_info = {
+const stressor_info_t stress_mmapfork_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_VM | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without sys/sysinfo_h or sysinfo() system call"
 };

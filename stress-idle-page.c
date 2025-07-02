@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -73,7 +73,7 @@ static int stress_idle_page(stress_args_t *args)
 
 	fd = open(bitmap_file, O_RDWR);
 	if (fd < 0) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("idle_page stressor will be skipped, "
 				"cannot access file %s\n", bitmap_file);
 		return EXIT_NO_RESOURCE;
@@ -81,6 +81,8 @@ static int stress_idle_page(stress_args_t *args)
 
 	(void)shim_memset(bitmap_set, 0xff, sizeof(bitmap_set));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -126,17 +128,17 @@ next:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_idle_page_info = {
+const stressor_info_t stress_idle_page_info = {
 	.stressor = stress_idle_page,
 	.supported = stress_idle_page_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help
 };
 #else
-stressor_info_t stress_idle_page_info = {
+const stressor_info_t stress_idle_page_info = {
 	.stressor = stress_unimplemented,
 	.supported = stress_idle_page_supported,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"
 };

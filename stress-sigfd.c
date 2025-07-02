@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,7 +36,6 @@ static const stress_help_t help[] = {
 
 #if defined(HAVE_SYS_SIGNALFD_H) && 	\
     defined(HAVE_SIGNALFD) &&		\
-    NEED_GLIBC(2,8,0) && 		\
     defined(HAVE_SIGQUEUE)
 
 #if defined(__NR_signalfd4) &&		\
@@ -60,7 +59,7 @@ static inline int shim_signalfd4(
 static int stress_sigfd(stress_args_t *args)
 {
 	pid_t pid, ppid = args->pid;
-	int sfd, parent_cpu;
+	int sfd, parent_cpu, rc = EXIT_SUCCESS;
 	const int bad_fd = stress_get_bad_fd();
 	sigset_t mask;
 
@@ -106,6 +105,8 @@ static int stress_sigfd(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -113,10 +114,11 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
+		(void)close(sfd);
 		return EXIT_FAILURE;
 	} else if (pid == 0) {
 		int val = 0;
@@ -133,7 +135,7 @@ again:
 
 			s.sival_int = val++;
 			ret = sigqueue(ppid, SIGRTMIN, s);
-			if ((ret < 0) && (errno != EAGAIN))
+			if (UNLIKELY((ret < 0) && (errno != EAGAIN)))
 				break;
 		}
 		(void)close(sfd);
@@ -154,8 +156,8 @@ again:
 				if (errno) {
 					pr_fail("%s: read failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
-					(void)close(sfd);
-					_exit(EXIT_FAILURE);
+					rc = EXIT_FAILURE;
+					break;
 				}
 				continue;
 			}
@@ -165,6 +167,7 @@ again:
 				if (UNLIKELY(fdsi.ssi_signo != (uint32_t)SIGRTMIN)) {
 					pr_fail("%s: unexpected signal %d\n",
 						args->name, fdsi.ssi_signo);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -184,21 +187,22 @@ again:
 	}
 
 finish:
+	(void)close(sfd);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_sigfd_info = {
+const stressor_info_t stress_sigfd_info = {
 	.stressor = stress_sigfd,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_sigfd_info = {
+const stressor_info_t stress_sigfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without sys/signalfd.h, signalfd() or sigqueue() system calls"

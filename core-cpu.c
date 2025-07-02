@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014-2020 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,13 @@
 #include "core-asm-x86.h"
 #include "core-builtin.h"
 #include "core-cpu.h"
+
+#if defined(XMMINTRIN_H)
+#include <ximmintrin.h>
+#endif
+
+#define X86_FP_DAZ		(0x0040UL)
+#define X86_FP_FTZ		(0x8000UL)
 
 	/* Name + dest reg */			/* Input -> Output */
 #define CPUID_sse3_ECX		(1U << 0)	/* EAX=0x1 -> ECX */
@@ -223,44 +230,74 @@ bool stress_cpu_is_x86(void)
 	 *  Kudos to https://en.wikipedia.org/wiki/CPUID
 	 */
 	static const char * const x86_id_str[] = {
-		"GenuineIntel",		/* Intel */
+		"AMD ISBETTER",		/* early engineering samples of AMD K5 processor */
 		"AMDisbetter!",		/* early engineering samples of AMD K5 processor */
 		"AuthenticAMD",		/* AMD */
 		"CentaurHauls",		/* IDT WinChip/Centaur (Including some VIA and Zhaoxin CPUs) */
-		"TransmetaCPU",		/* Transmeta */
+		"CyrixInstead",		/* Cyrix/early STMicroelectronics and IBM */
+		"E2K MACHINE\0",	/* MCST Elbrus */
+		"Genuine  RDC",		/* RDC Semiconductor Co. Ltd. */
+		"GenuineAO486",		/* ao486 CPU (old) */
+		"GenuineIntel",		/* Intel */
+		"GenuineIotel",		/* Intel (https://twitter.com/InstLatX64/status/1101230794364862464) */
 		"GenuineTMx86",		/* Transmeta */
 		"Geode by NSC",		/* National Semiconductor */
+		"HygonGenuine",		/* Hygon */
+		"MicrosoftXTA",		/* Microsoft x86-to-ARM */
+		"MiSTer AO486",		/* ao486 CPU */
 		"NexGenDriven",		/* NexGen */
 		"RiseRiseRise",		/* Rise */
 		"SiS SiS SiS ",		/* SiS */
+		"TransmetaCPU",		/* Transmeta */
 		"UMC UMC UMC ",		/* UMC */
+		"VIA VIA VIA ",		/* VIA */
+		"VirtualApple",		/* Newer versions of Apple Rosetta 2 */
 		"Vortex86 SoC",		/* DM&P Vortex86 */
 		"  Shanghai  ",		/* Zhaoxin */
-		"HygonGenuine",		/* Hygon */
-		"Genuine  RDC",		/* RDC Semiconductor Co. Ltd. */
-		"E2K MACHINE\0",	/* MCST Elbrus */
-		"MiSTer AO486",		/* ao486 CPU */
-		"bhyve bhyve ",		/* bhyve VM */
-		"KVMKVMKVM\0\0\0",	/* KVM */
-		"TCGTCGTCGTCG",		/* QEMU */
-		"Microsoft Hv",		/* Microsoft Hyper-V or Windows Virtual PC */
-		"MicrosoftXTA",		/* Microsoft x86-to-ARM */
-		" lrpepyh  vr",		/* Parallels */
-		"VMwareVMware",		/* VMWare */
-		"XenVMMXenVMM",		/* XEN HVM */
-		"ACRNACRNACRN",		/* Project ACRN */
-		" QNXQVMBSQG ",		/* QNX Hypervisor */
-		"VirtualApple",		/* Newer versions of Apple Rosetta 2 */
 	};
 
-	uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+	static const char * const x86_virt_id_str[] = {
+		" lrpepyh  vr",		/* Parallels */
+		" QNXQVMBSQG ",		/* QNX Hypervisor */
+		"ACRNACRNACRN",		/* Project ACRN */
+		"bhyve bhyve ",		/* bhyve VM */
+		"BHyVE BHyVE",		/* bhyve VM */
+		"EVMMEVMMEVMM",		/* Intel KGT (Trusty) */
+		"HAXMHAXMHAXM",		/* Intel HAXM */
+		"Jailhouse\0\0\0",	/* Jailhouse */
+		"Microsoft Hv",		/* Microsoft Hyper-V or Windows Virtual PC */
+		"KVMKVMKVM\0\0\0",	/* Linux KVM */
+		"Linux KVM Hv",		/* Linux KVM Hyper-V emulation */
+		"OpenBSDVMM58",		/* OpenBSD VMM */
+		"XenVMMXenVMM",		/* XEN HVM */
+		"SRESRESRESRE",		/* Lockheed Martin LMHS */
+		"TCGTCGTCGTCG",		/* QEMU */
+		"UnisysSpar64",		/* Unisys s-Par */
+		"VMwareVMware",		/* VMWare */
+		"___ NVMM ___",		/* NetBSD NVMM */
+	};
+
+	uint32_t eax, ebx, ecx, edx;
 	size_t i;
 
+	eax = 0, ebx = 0, ecx = 0, edx = 0;
 	stress_asm_x86_cpuid(eax, ebx, ecx, edx);
 
 	/* Intel CPU? */
 	for (i = 0; i < SIZEOF_ARRAY(x86_id_str); i++) {
 		const char *str = x86_id_str[i];
+
+		if ((shim_memcmp(&ebx, str + 0, 4) == 0) &&
+		    (shim_memcmp(&edx, str + 4, 4) == 0) &&
+		    (shim_memcmp(&ecx, str + 8, 4) == 0))
+		return true;
+	}
+
+	/* Virtual machine? */
+	eax = 0x40000000, ebx = 0, ecx = 0, edx = 0;
+	stress_asm_x86_cpuid(eax, ebx, ecx, edx);
+	for (i = 0; i < SIZEOF_ARRAY(x86_virt_id_str); i++) {
+		const char *str = x86_virt_id_str[i];
 
 		if ((shim_memcmp(&ebx, str + 0, 4) == 0) &&
 		    (shim_memcmp(&edx, str + 4, 4) == 0) &&
@@ -343,6 +380,27 @@ bool stress_cpu_x86_has_cldemote(void)
 	return false;
 #endif
 }
+
+/*
+ *  stress_cpu_x86_has_prefetchwt1()
+ *	does x86 cpu support prefetchwt1?
+ */
+bool stress_cpu_x86_has_prefetchwt1(void)
+{
+#if defined(STRESS_ARCH_X86)
+	uint32_t ebx = 0, ecx = 0, edx = 0;
+
+	if (!stress_cpu_is_x86())
+		return false;
+
+	stress_cpu_x86_extended_features(ebx, ecx, edx);
+
+	return !!(ecx & CPUID_prefetchwt1_ECX);
+#else
+	return false;
+#endif
+}
+
 
 /*
  *  stress_cpu_x86_has_waitpkg()
@@ -661,6 +719,61 @@ bool stress_cpu_x86_has_avx512_bw(void)
 	stress_asm_x86_cpuid(eax, ebx, ecx, edx);
 
 	return !!(ebx & CPUID_avx512_bw_EBX);
+#else
+	return false;
+#endif
+}
+
+/*
+ *  stress_cpu_disable_fp_subnormals
+ *     Floating Point subnormals can be expensive and require
+ *     micro-ops from the Microcode Sequencer ROM. Disabling
+ *     these makes FP ops faster but not strictly IEEE compliant.
+ *     See https://en.wikipedia.org/wiki/Subnormal_number
+ */
+void stress_cpu_disable_fp_subnormals(void)
+{
+#if defined(STRESS_ARCH_X86) &&		\
+    defined(HAVE_IMMINTRIN_H) &&	\
+    defined(HAVE_MM_GETCSR) &&		\
+    defined(HAVE_MM_SETCSR)
+	if (stress_cpu_x86_has_sse())
+		_mm_setcsr(_mm_getcsr() | (X86_FP_DAZ | X86_FP_FTZ));
+#endif
+}
+
+/*
+ *  stress_cpu_enable_fp_subnormals
+ *     Floating Point subnormals can be expensive and require
+ *     micro-ops from the Microcode Sequencer ROM. Enable them to
+ *     be IEEE compliant and slower.
+ */
+void stress_cpu_enable_fp_subnormals(void)
+{
+#if defined(STRESS_ARCH_X86) &&		\
+    defined(HAVE_IMMINTRIN_H) &&	\
+    defined(HAVE_MM_GETCSR) &&		\
+    defined(HAVE_MM_SETCSR)
+	if (stress_cpu_x86_has_sse())
+		_mm_setcsr(_mm_getcsr() & ~(X86_FP_DAZ | X86_FP_FTZ));
+#endif
+}
+
+/*
+ *  stress_cpu_x86_has_movdiri()
+ *	does x86 cpu support movdiri
+ */
+bool stress_cpu_x86_has_movdiri(void)
+{
+#if defined(STRESS_ARCH_X86)
+	uint32_t eax = 0x7, ebx = 0, ecx = 0, edx = 0;
+
+	if (!stress_cpu_is_x86())
+		return false;
+
+	stress_asm_x86_cpuid(eax, ebx, ecx, edx);
+
+	return !!(ecx & CPUID_movdiri_ECX);
 #else
 	return false;
 #endif

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -39,7 +39,7 @@ typedef struct {
 	int	err;		/* copy of errno */
 } session_error_t;
 
-static char * PURE stress_session_error(int err)
+static char * PURE stress_session_error(const int err)
 {
 	switch (err) {
 	case STRESS_SESSION_SUCCESS:
@@ -85,22 +85,22 @@ static int stress_session_set_and_get(stress_args_t *args, const int fd)
 	pid_t sid, gsid;
 
 	sid = setsid();
-	if (sid == (pid_t)-1) {
+	if (UNLIKELY(sid == (pid_t)-1)) {
 		stress_session_return_status(fd, errno, STRESS_SESSION_SETSID_FAILED);
-		pr_inf("%s: setsid failed: errno=%d (%s)\n",
+		pr_inf("%s: setsid failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return STRESS_SESSION_SETSID_FAILED;
 	}
 
 	gsid = getsid(getpid());
-	if (gsid == (pid_t)-1) {
+	if (UNLIKELY(gsid == (pid_t)-1)) {
 		stress_session_return_status(fd, errno, STRESS_SESSION_GETSID_FAILED);
-		pr_inf("%s: getsid failed: errno=%d (%s)\n",
+		pr_inf("%s: getsid failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return STRESS_SESSION_GETSID_FAILED;
 	}
 
-	if (gsid != sid) {
+	if (UNLIKELY(gsid != sid)) {
 		stress_session_return_status(fd, errno, STRESS_SESSION_WRONGSID_FAILED);
 		pr_inf("%s getsid failed, got session ID %d, expected %d\n",
 			args->name, (int)gsid, (int)sid);
@@ -131,7 +131,7 @@ static int stress_session_child(stress_args_t *args, const int fd)
 			return STRESS_SESSION_SUCCESS;
 		}
 		stress_session_return_status(fd, errno, STRESS_SESSION_FORK_FAILED);
-		pr_err("%s: fork failed: errno=%d (%s)\n",
+		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return STRESS_SESSION_FORK_FAILED;
 	} else if (pid == 0) {
@@ -145,18 +145,19 @@ static int stress_session_child(stress_args_t *args, const int fd)
 		/* 25% of calls will be orphans */
 		stress_mwc_reseed();
 		if (stress_mwc8() >= 64) {
+			pid_t wret;
 #if defined(HAVE_WAIT4)
 			struct rusage usage;
 
 			if (stress_mwc1())
-				ret = shim_wait4(pid, &status, 0, &usage);
+				wret = shim_wait4(pid, &status, 0, &usage);
 			else
-				ret = shim_waitpid(pid, &status, 0);
+				wret = shim_waitpid(pid, &status, 0);
 #else
-			ret = shim_waitpid(pid, &status, 0);
+			wret = shim_waitpid(pid, &status, 0);
 #endif
-			if (ret < 0) {
-				if ((errno != EINTR) && (errno == ECHILD)) {
+			if (wret < 0) {
+				if (UNLIKELY((errno != EINTR) && (errno == ECHILD))) {
 					stress_session_return_status(fd, errno, STRESS_SESSION_WAITPID_FAILED);
 					return STRESS_SESSION_WAITPID_FAILED;
 				}
@@ -178,11 +179,13 @@ static int stress_session(stress_args_t *args)
 	int rc = EXIT_SUCCESS;
 
 	if (pipe(fds) < 0) {
-		pr_inf("%s: pipe failed: errno=%d (%s)\n",
+		pr_inf("%s: pipe failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue(args)) {
@@ -192,8 +195,10 @@ static int stress_session(stress_args_t *args)
 		if (pid < 0) {
 			if ((errno == EAGAIN) || (errno == ENOMEM))
 				continue;
-			pr_inf("%s: fork failed: errno=%d (%s)\n",
+			pr_inf("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			(void)close(fds[0]);
+			(void)close(fds[1]);
 			return EXIT_NO_RESOURCE;
 		} else if (pid == 0) {
 			/* Child */
@@ -220,7 +225,7 @@ static int stress_session(stress_args_t *args)
 						stress_session_error(WEXITSTATUS(status)));
 					rc = EXIT_FAILURE;
 				} else {
-					pr_fail("%s: failure in child, %s: errno=%d (%s)\n",
+					pr_fail("%s: failure in child, %s, errno=%d (%s)\n",
 						args->name,
 						stress_session_error(error.status),
 						error.err, strerror(error.err));
@@ -237,9 +242,9 @@ static int stress_session(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_session_info = {
+const stressor_info_t stress_session_info = {
 	.stressor = stress_session,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = session_help
 };

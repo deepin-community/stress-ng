@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
@@ -76,7 +78,7 @@ static int stress_verity(stress_args_t *args)
 	size_t hash = 0;
 
 	if (SIZEOF_ARRAY(hash_algorithms) == (0)) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: no hash algorithms defined, skipping stressor\n",
 				args->name);
 		return EXIT_NO_RESOURCE;
@@ -88,6 +90,8 @@ static int stress_verity(stress_args_t *args)
 
 	(void)stress_temp_filename_args(args, filename, sizeof(filename), stress_mwc32());
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -161,7 +165,7 @@ static int stress_verity(stress_args_t *args)
 			case ENOTTY:
 			case EOPNOTSUPP:
 			case ENOSYS:
-				if (args->instance == 0)
+				if (stress_instance_zero(args))
 					pr_inf_skip("%s: verity is not supported on the "
 						"file system or by the kernel, skipping stress test\n",
 						args->name);
@@ -284,16 +288,16 @@ clean:
 	return ret;
 }
 
-stressor_info_t stress_verity_info = {
+const stressor_info_t stress_verity_info = {
 	.stressor = stress_verity,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_verity_info = {
+const stressor_info_t stress_verity_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/fsverity.h or verity ioctl() commands"

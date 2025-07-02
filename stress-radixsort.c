@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -120,12 +120,12 @@ static int radixsort_nonlibc(
 	if (nmemb < 2)
 		return 0;
 
-	b = malloc(sizeof(*b) * nmemb);
+	b = (const unsigned char **)malloc(sizeof(*b) * nmemb);
 	if (!b) {
 		errno = ENOMEM;
 		return -1;
 	}
-	lengths = malloc(sizeof(*lengths) * nmemb);
+	lengths = (unsigned short int *)malloc(sizeof(*lengths) * nmemb);
 	if (!lengths) {
 		free(b);
 		errno = ENOMEM;
@@ -158,25 +158,6 @@ static const stress_radixsort_method_t stress_radixsort_methods[] = {
 	{ "radixsort-nonlibc",	radixsort_nonlibc },
 };
 
-static int stress_set_radixsort_method(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_radixsort_methods); i++) {
-		if (strcmp(opt, stress_radixsort_methods[i].name) == 0) {
-			stress_set_setting("radixsort-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "radixsort-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_radixsort_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_radixsort_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
 /*
  *  stress_radixsort_handler()
  *	SIGALRM generic handler
@@ -191,24 +172,15 @@ static void MLOCKED_TEXT stress_radixsort_handler(int signum)
 	}
 }
 
-/*
- *  stress_set_radixsort_size()
- *	set radixsort size
- */
-static int stress_set_radixsort_size(const char *opt)
+static const char *stress_radixsort_method(const size_t i)
 {
-	uint64_t radixsort_size;
-
-	radixsort_size = stress_get_uint64(opt);
-	stress_check_range("radixsort-size", radixsort_size,
-		MIN_RADIXSORT_SIZE, MAX_RADIXSORT_SIZE);
-	return stress_set_setting("radixsort-size", TYPE_ID_UINT64, &radixsort_size);
+	return (i < SIZEOF_ARRAY(stress_radixsort_methods)) ? stress_radixsort_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_radixsort_method,	stress_set_radixsort_method },
-	{ OPT_radixsort_size,	stress_set_radixsort_size },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_radixsort_method,	"radixsort-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_radixsort_method },
+	{ OPT_radixsort_size,	"radixsort-size",   TYPE_ID_UINT64, MIN_RADIXSORT_SIZE, MAX_RADIXSORT_SIZE, NULL },
+	END_OPT,
 };
 
 /*
@@ -225,13 +197,14 @@ static int stress_radixsort(stress_args_t *args)
 	int ret;
 	unsigned char revtable[256];
 	size_t radixsort_method = 0;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 
 	radixsort_func_t radixsort_func;
 
 	(void)stress_get_setting("radixsort-method", &radixsort_method);
 
 	radixsort_func = stress_radixsort_methods[radixsort_method].radixsort_func;
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf("%s: using method '%s'\n",
 			args->name, stress_radixsort_methods[radixsort_method].name);
 
@@ -243,16 +216,18 @@ static int stress_radixsort(stress_args_t *args)
 	}
 	n = (int)radixsort_size;
 
-	text = calloc((size_t)n, STR_SIZE);
+	text = (unsigned char *)calloc((size_t)n, STR_SIZE);
 	if (!text) {
-		pr_inf_skip("%s: calloc failed allocating %d strings, "
-			"skipping stressor\n", args->name, n);
+		pr_inf_skip("%s: calloc failed allocating %d strings%s, "
+			"skipping stressor\n", args->name, n,
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	data = calloc((size_t)n, sizeof(*data));
+	data = (const unsigned char **)calloc((size_t)n, sizeof(*data));
 	if (!data) {
-		pr_inf_skip("%s: calloc failed allocating %d string pointers, "
-			"skipping stressor\n", args->name, n);
+		pr_inf_skip("%s: calloc failed allocating %d string pointers%s, "
+			"skipping stressor\n", args->name, n,
+			stress_get_memfree_str());
 		free(text);
 		return EXIT_NO_RESOURCE;
 	}
@@ -281,12 +256,14 @@ static int stress_radixsort(stress_args_t *args)
 		stress_rndstr((char *)ptr, STR_SIZE);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		/* Sort "random" data */
 		(void)radixsort_func(data, n, NULL, 0);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		if (g_opt_flags & OPT_FLAGS_VERIFY) {
@@ -295,6 +272,7 @@ static int stress_radixsort(stress_args_t *args)
 					pr_fail("%s: sort error "
 						"detected, incorrect ordering "
 						"found\n", args->name);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -309,6 +287,7 @@ static int stress_radixsort(stress_args_t *args)
 					pr_fail("%s: sort error "
 						"detected, incorrect ordering "
 						"found\n", args->name);
+					rc = EXIT_FAILURE;
 					break;
 				}
 			}
@@ -319,7 +298,7 @@ static int stress_radixsort(stress_args_t *args)
 			*ptr = 'a' + stress_mwc8modn(26);
 
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	do_jmp = false;
 	(void)stress_sigrestore(args->name, SIGALRM, &old_action);
@@ -329,13 +308,13 @@ tidy:
 	free(data);
 	free(text);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_radixsort_info = {
+const stressor_info_t stress_radixsort_info = {
 	.stressor = stress_radixsort,
-	.class = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_CPU | CLASS_MEMORY | CLASS_SORT,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

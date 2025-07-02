@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,6 +24,8 @@
 #include "core-killpid.h"
 #include "core-pragma.h"
 
+#include <math.h>
+
 #if defined(HAVE_LINUX_AUDIT_H)
 #include <linux/audit.h>
 #endif
@@ -44,7 +46,7 @@ static const stress_help_t help[] = {
 	{ NULL,	"opcode N",		"start N workers exercising random opcodes" },
 	{ NULL,	"opcode-method M",	"set opcode stress method (M = random, inc, mixed, text)" },
 	{ NULL,	"opcode-ops N",		"stop after N opcode bogo operations" },
-	{ NULL, NULL,		   NULL }
+	{ NULL, NULL,		   	NULL }
 };
 
 #if defined(HAVE_LINUX_SECCOMP_H) &&	\
@@ -56,6 +58,7 @@ static const stress_help_t help[] = {
 #if defined(__NR_rt_sigreturn)	&&	\
     defined(__NR_rt_sigprocmask)
 #define STRESS_OPCODE_USE_SIGLONGJMP
+static bool jmp_env_set;
 static sigjmp_buf jmp_env;
 #endif
 
@@ -153,12 +156,12 @@ static struct sock_filter filter[] = {
 };
 
 static struct sock_fprog prog = {
-	.len = (unsigned short)SIZEOF_ARRAY(filter),
+	.len = (unsigned short int)SIZEOF_ARRAY(filter),
 	.filter = filter
 };
 #endif
 
-static void MLOCKED_TEXT stress_badhandler(int signum)
+static void MLOCKED_TEXT stress_opcode_child_sighandler(int signum)
 {
 	if ((signum >= 0) && (signum < MAX_SIGS)) {
 		volatile stress_opcode_state_t *vstate = (volatile stress_opcode_state_t *)state;
@@ -185,7 +188,8 @@ static void MLOCKED_TEXT stress_badhandler(int signum)
 	 *  try to continue for less significant signals
 	 *  such as SIGFPE and SIGTRAP
 	 */
-	siglongjmp(jmp_env, 1);
+	if (jmp_env_set)
+		siglongjmp(jmp_env, 1);
 #else
 	_exit(1);
 #endif
@@ -197,14 +201,54 @@ static inline void OPTIMIZE3 stress_opcode_random(
 	const void *ops_end,
 	const volatile uint64_t *op)
 {
-	register uint32_t *ops = (uint32_t *)ops_begin;
+#if defined(STRESS_ARCH_X86)
+	static const uint8_t x86_prefixes[] = {
+		0xf0,	/* lock */
+		0xf1,	/* repne/repnz */
+		0xf3,	/* rep or repe/repz */
+		0x2e,	/* CS segment override */
+		0x36,	/* SS segment override */
+		0x3e,	/* DS segment override */
+		0x26,	/* ES segment override */
+		0x64,	/* FS segment override */
+		0x65,	/* GS segment override */
+		0x2e,	/* branch not taken */
+		0x3e,	/* branch taken */
+		0x66,	/* operand size override */
+		0x67,	/* address size override */
+	};
+
+	static const uint8_t x86_prefix_length[] = {
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1, 1,
+		2, 2, 2, 2, 2, 2, 2, 2,
+		3, 3, 3, 3, 4, 4, 8, 14,
+		15, 16, 17
+	};
+	uint32_t rnd;
+#endif
+	register uint32_t *ops32 = (uint32_t *)ops_begin;
 
 	(void)op;
 	(void)page_size;
 
 PRAGMA_UNROLL_N(8)
-	while (ops < (const uint32_t *)ops_end)
-		*(ops++) = stress_mwc32();
+	while (ops32 < (const uint32_t *)ops_end)
+		*(ops32++) = stress_mwc32();
+
+#if defined(STRESS_ARCH_X86)
+	rnd = stress_mwc32();
+	if ((rnd & 0xff) < 8) {
+		register uint8_t *ops8 = (uint8_t *)ops_begin;
+		int i, n = x86_prefix_length[stress_mwc8modn(SIZEOF_ARRAY(x86_prefix_length))];
+
+		for (i = 0; (i < n) && (ops8 < (const uint8_t *)ops_end); i++)
+			*(ops8++) = x86_prefixes[stress_mwc8modn(SIZEOF_ARRAY(x86_prefixes))];
+	}
+#endif
 }
 
 #if !defined(STRESS_OPCODE_SIZE)
@@ -222,7 +266,7 @@ static void OPTIMIZE3 stress_opcode_inc(
 {
 	switch (STRESS_OPCODE_SIZE) {
 	case 8:	{
-			register uint8_t tmp8 = *op & 0xff;
+			register const uint8_t tmp8 = *op & 0xff;
 			register uint8_t *ops = (uint8_t *)ops_begin;
 			register ssize_t i = (ssize_t)page_size;
 
@@ -232,7 +276,7 @@ static void OPTIMIZE3 stress_opcode_inc(
 		}
 		break;
 	case 16: {
-			register uint16_t tmp16 = *op & 0xffff;
+			register const uint16_t tmp16 = *op & 0xffff;
 			register uint16_t *ops = (uint16_t *)ops_begin;
 			register ssize_t i = (ssize_t)(page_size >> 1);
 
@@ -243,7 +287,7 @@ static void OPTIMIZE3 stress_opcode_inc(
 		break;
 	default:
 	case 32: {
-			register uint32_t tmp32 = *op & 0xffffffffL;
+			register const uint32_t tmp32 = *op & 0xffffffffL;
 			register uint32_t *ops = (uint32_t *)ops_begin;
 			register size_t i = (ssize_t)(page_size >> 2);
 
@@ -254,7 +298,7 @@ static void OPTIMIZE3 stress_opcode_inc(
 		break;
 	case 48:
 		{
-			register uint64_t tmp64 = *op;
+			register const uint64_t tmp64 = *op;
 			register uint8_t *ops = (uint8_t *)ops_begin;
 			register size_t i = (ssize_t)(page_size / 6);
 
@@ -272,7 +316,7 @@ static void OPTIMIZE3 stress_opcode_inc(
 		}
 		break;
 	case 64: {
-			register uint64_t tmp64 = *op;
+			register const uint64_t tmp64 = *op;
 			register uint64_t *ops = (uint64_t *)ops_begin;
 			register size_t i = (ssize_t)(page_size >> 3);
 
@@ -289,7 +333,7 @@ static void OPTIMIZE3 stress_opcode_mixed(
 	const void *ops_end,
 	const volatile uint64_t *op)
 {
-	register uint64_t tmp = *op;
+	register const uint64_t tmp = *op;
 	register uint64_t *ops = (uint64_t *)ops_begin;
 
 	(void)page_size;
@@ -316,9 +360,17 @@ static void stress_opcode_text(
 {
 	char *text_start, *text_end;
 	const size_t ops_len = (uintptr_t)ops_end - (uintptr_t)ops_begin;
-	const size_t text_len = stress_exec_text_addr(&text_start, &text_end) - 8;
+	size_t text_len = stress_exec_text_addr(&text_start, &text_end);
 	uint8_t *ops;
 	size_t offset;
+
+	/*
+	 *  Don't access last 8 bytes to avoid 64 bit accesses off
+	 *  the end.
+	 */
+	if (text_len <= 8)
+		return;
+	text_len -= 8;
 
 	if (text_len < ops_len) {
 		stress_opcode_random(page_size, ops_begin, ops_end, op);
@@ -328,11 +380,12 @@ static void stress_opcode_text(
 	offset = stress_mwc64modn(text_len - ops_len) & ~(0x7ULL);
 	(void)shim_memcpy(ops_begin, text_start + offset, ops_len);
 	for (ops = (uint8_t *)ops_begin; ops < (const uint8_t *)ops_end; ops++) {
-		const uint8_t rnd = stress_mwc8();
+		register const uint8_t rnd = stress_mwc8();
 
 		/* 1 in 8 chance of random bit corruption */
 		if (rnd < 32) {
-			uint8_t bit = (uint8_t)(1 << (rnd & 7));
+			register const uint8_t bit = (uint8_t)(1 << (rnd & 7));
+
 			*ops ^= bit;
 		}
 	}
@@ -344,30 +397,6 @@ static const stress_opcode_method_info_t stress_opcode_methods[] = {
 	{ "inc",	stress_opcode_inc },
 	{ "mixed",	stress_opcode_mixed },
 };
-
-/*
- *  stress_set_opcode_method()
- *      set default opcode stress method
- */
-static int stress_set_opcode_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_opcode_methods); i++) {
-		if (!strcmp(stress_opcode_methods[i].name, name)) {
-			stress_set_setting("opcode-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "opcode-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_opcode_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_opcode_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
 
 /*
  *  stress_opcode
@@ -402,31 +431,37 @@ static int stress_opcode(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (state == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of %zu bytes failed, errno=%d (%s) "
+		pr_inf_skip("%s: mmap of %zu bytes failed%s, errno=%d (%s) "
 			"skipping stressor\n",
-			args->name, args->page_size, errno, strerror(errno));
+			args->name, args->page_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(state, sizeof(*state), "state");
 	vstate = (volatile stress_opcode_state_t *)state;
 
-	opcodes = (void *)stress_mmap_populate(NULL, page_size * PAGES,
+	opcodes = (void *)stress_mmap_populate(NULL, page_size * (PAGES + 2),
 				PROT_READ | PROT_WRITE,
 				MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (opcodes == MAP_FAILED) {
-		pr_fail("%s: mmap failed, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_fail("%s: mmap of %zu bytes failed%s, errno=%d (%s)\n",
+			args->name, page_size * (PAGES + 2),
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)munmap((void *)state, sizeof(*state));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(opcodes, page_size * (PAGES + 2), "opcodes");
 	/* Force pages resident */
-	(void)shim_memset(opcodes, 0x00, page_size * PAGES);
+	(void)shim_memset(opcodes, 0x00, page_size * (PAGES + 2));
 
 	(void)stress_get_setting("opcode-method", &opcode_method);
 	method = &stress_opcode_methods[opcode_method];
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	op_start = (num_opcodes * (double)args->instance) / args->num_instances;
+	op_start = (num_opcodes * (double)args->instance) / args->instances;
 	vstate->opcode = (uint64_t)op_start;
 
 	t = stress_time_now();
@@ -446,11 +481,12 @@ static int stress_opcode(stress_args_t *args)
 			stress_set_proc_name(buf);
 		}
 again:
+		jmp_env_set = false;
 		pid = fork();
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
 			pr_fail("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -459,11 +495,17 @@ again:
 		}
 		if (pid == 0) {
 			struct itimerval it;
-			void *ops_begin = (uint8_t *)((uintptr_t)opcodes + page_size);
-			void *ops_end = (uint8_t *)((uintptr_t)opcodes + (page_size * (PAGES - 1)));
+			const size_t ops_size = page_size * PAGES;
+			void *ops_begin = (void *)((uint8_t *)opcodes + page_size);
+			void *ops_end = (void *)((uint8_t *)ops_begin + ops_size);
 			NOCLOBBER void *ops_ptr;
 
 			(void)sched_settings_apply(true);
+
+			for (i = 0; i < SIZEOF_ARRAY(sigs); i++) {
+				if (stress_sighandler(args->name, sigs[i], stress_opcode_child_sighandler, NULL) < 0)
+					_exit(EXIT_FAILURE);
+			}
 
 			/* We don't want bad ops clobbering this region */
 			stress_shared_readonly();
@@ -475,20 +517,16 @@ again:
 			if (stress_drop_capabilities(args->name) < 0) {
 				_exit(EXIT_NO_RESOURCE);
 			}
-			for (i = 0; i < SIZEOF_ARRAY(sigs); i++) {
-				if (stress_sighandler(args->name, sigs[i], stress_badhandler, NULL) < 0)
-					_exit(EXIT_FAILURE);
-			}
 
 			(void)mprotect((void *)opcodes, page_size, PROT_NONE);
 			(void)mprotect((void *)ops_end, page_size, PROT_NONE);
-			(void)mprotect((void *)ops_begin, page_size, PROT_WRITE);
+			(void)mprotect((void *)ops_begin, ops_size, PROT_WRITE);
 
 			/* Populate with opcodes */
 			method->func(page_size, ops_begin, ops_end, &vstate->opcode);
 
 			/* Make read-only executable and force I$ flush */
-			(void)mprotect((void *)ops_begin, page_size, PROT_READ | PROT_EXEC);
+			(void)mprotect((void *)ops_begin, ops_size, PROT_READ | PROT_EXEC);
 			shim_flush_icache((char *)ops_begin, (char *)ops_end);
 
 			stress_parent_died_alarm();
@@ -518,6 +556,9 @@ again:
 			 * corruption since the child will
 			 * die soon anyhow
 			 */
+			(void)fflush(stdout);
+			(void)fflush(stderr);
+
 			(void)fclose(stdin);
 			(void)fclose(stdout);
 			(void)fclose(stderr);
@@ -529,6 +570,7 @@ again:
 				ret = sigsetjmp(jmp_env, 1);
 				if (ret == 1)
 					goto exercise;
+				jmp_env_set = true;
 			}
 #endif
 #if defined(HAVE_LINUX_SECCOMP_H) &&	\
@@ -560,14 +602,15 @@ exercise:
 			_exit(0);
 		}
 		if (pid > 0) {
-			int ret, status;
+			pid_t ret;
+			int status;
 
 			forks++;
 			ret = shim_waitpid(pid, &status, 0);
 			if (ret < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX" failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 				(void)stress_kill_pid_wait(pid, NULL);
 			}
 			stress_bogo_inc(args);
@@ -580,10 +623,10 @@ finish:
 
 	if ((duration > 0.0) &&
 	    (vstate->ops_attempted > 0.0) &&
-	    (args->instance == 0) &&
-	    (args->num_instances > 0)) {
+	    stress_instance_zero(args) &&
+	    (args->instances > 0)) {
 		const double secs_in_tropical_year = 365.2422 * 24.0 * 60.0 * 60.0;
-		double estimated_duration = (duration * num_opcodes / vstate->ops_attempted) / args->num_instances;
+		double estimated_duration = (duration * num_opcodes / vstate->ops_attempted) / args->instances;
 
 		if (estimated_duration > secs_in_tropical_year * 5) {
 			estimated_duration = round(estimated_duration / secs_in_tropical_year);
@@ -594,79 +637,69 @@ finish:
 				args->name, estimated_duration);
 		} else {
 			pr_dbg("%s: estimated time to cover all op-codes: %s\n",
-				args->name, stress_duration_to_str(estimated_duration, false));
+				args->name, stress_duration_to_str(estimated_duration, false, false));
 		}
 	}
 
 	rate = (duration > 0.0) ? (double)vstate->ops_attempted / duration : 0.0;
 	stress_metrics_set(args, 0, "opcodes exercised per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->ops_ok / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 1, "% opcodes successfully executed",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->sig_count[SIGILL] / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 2, "% illegal opcodes executed",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->sig_count[SIGBUS] / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 3, "% opcodes generated SIGBUS",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->sig_count[SIGSEGV] / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 4, "% opcodes generated SIGSEGV",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->sig_count[SIGFPE] / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 5, "% opcodes generated SIGFPE",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	percent = (vstate->ops_attempted > 0.0) ? 100.0 * (double)vstate->sig_count[SIGTRAP] / (double)vstate->ops_attempted : 0.0;
 	stress_metrics_set(args, 6, "% opcodes generated SIGTRAP",
-		percent, STRESS_GEOMETRIC_MEAN);
+		percent, STRESS_METRIC_GEOMETRIC_MEAN);
 	rate = (duration > 0.0) ? (double)forks / duration : 0.0;
 	stress_metrics_set(args, 7, "forks per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 err:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	(void)munmap((void *)opcodes, page_size * PAGES);
+	(void)munmap((void *)opcodes, page_size * (PAGES + 2));
 	(void)munmap((void *)state, sizeof(*state));
 	return rc;
 }
 
-static void stress_opcode_set_default(void)
+static const char *stress_opcode_method(const size_t i)
 {
-	stress_set_opcode_method("random");
+	return (i < SIZEOF_ARRAY(stress_opcode_methods)) ? stress_opcode_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_opcode_method,	stress_set_opcode_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_opcode_method, "opcode-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_opcode_method },
+	END_OPT,
 };
 
-stressor_info_t stress_opcode_info = {
+const stressor_info_t stress_opcode_info = {
 	.stressor = stress_opcode,
-	.set_default = stress_opcode_set_default,
-	.class = CLASS_CPU | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
 
-static int stress_set_opcode_method(const char *name)
-{
-	(void)name;
-
-	(void)fprintf(stderr, "opcode-method not implemented");
-
-	return -1;
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_opcode_method,	stress_set_opcode_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_opcode_method, "opcode-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_unimplemented_method },
+	END_OPT,
 };
 
-stressor_info_t stress_opcode_info = {
+const stressor_info_t stress_opcode_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without linux/seccomp.h, linux/audit.h, linux/filter.h, sys/prctl.h or mprotect()"
 };

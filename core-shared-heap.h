@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,10 +19,10 @@
 #ifndef CORE_SHARED_HEAP_H
 #define CORE_SHARED_HEAP_H
 
-#include "stress-ng.h"
+#include "core-setting.h"
 
 extern WARN_UNUSED void *stress_shared_heap_init(void);
-extern void stress_shared_heap_deinit(void);
+extern void stress_shared_heap_free(void);
 extern WARN_UNUSED void *stress_shared_heap_malloc(const size_t size);
 extern WARN_UNUSED char *stress_shared_heap_dup_const(const char *str);
 

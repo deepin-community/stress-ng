@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -35,7 +35,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		   NULL }
 };
 
-
 #define	MIN_BLKSZ	((int)512)
 #define	MAX_BLKSZ	((int)(128 * KB))
 
@@ -60,7 +59,7 @@ typedef struct {
 static int stress_rawdev_supported(const char *name)
 {
 	if (geteuid() != 0) {
-		pr_inf_skip("%s rawdev stressor will be skipped, "
+		pr_inf_skip("%s stressor will be skipped, "
 			"need to be running as root for this stressor\n", name);
 		return -1;
 	}
@@ -71,7 +70,7 @@ static int stress_rawdev_supported(const char *name)
  *  shift_ul()
  *	shift v by shift bits, always return non-zero
  */
-static inline unsigned long shift_ul(unsigned long v, unsigned int shift)
+static inline unsigned long int shift_ul(unsigned long int v, unsigned int shift)
 {
 	v >>= shift;
 	return (v == 0) ? 1 : v;
@@ -93,14 +92,14 @@ static int stress_rawdev_sweep(
 	ssize_t ret;
 	double t;
 
-	for (i = 0; (i < blks) && stress_continue(args); i += shift_ul(blks, 8)) {
+	for (i = 0; LIKELY((i < blks) && stress_continue(args)); i += shift_ul(blks, 8)) {
 		const off_t offset = (off_t)i * (off_t)blksz;
 
 		t = stress_time_now();
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -110,14 +109,14 @@ static int stress_rawdev_sweep(
 			stress_bogo_inc(args);
 		}
 	}
-	for (; (i > 0) && stress_continue(args); i -= shift_ul(blks, 8)) {
+	for (; LIKELY((i > 0) && stress_continue(args)); i -= shift_ul(blks, 8)) {
 		const off_t offset = (off_t)i * (off_t)blksz;
 
 		t = stress_time_now();
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -145,10 +144,10 @@ static int stress_rawdev_wiggle(
 	size_t i;
 	ssize_t ret;
 
-	for (i = shift_ul(blks, 8); (i < blks) && stress_continue(args); i += shift_ul(blks, 8)) {
-		unsigned long j;
+	for (i = shift_ul(blks, 8); LIKELY((i < blks) && stress_continue(args)); i += shift_ul(blks, 8)) {
+		unsigned long int j;
 
-		for (j = 0; (j < shift_ul(blks, 8)) && stress_continue(args); j += shift_ul(blks, 10)) {
+		for (j = 0; LIKELY((j < shift_ul(blks, 8)) && stress_continue(args)); j += shift_ul(blks, 10)) {
 			const off_t offset = (off_t)(i - j) * (off_t)blksz;
 			double t;
 
@@ -156,7 +155,7 @@ static int stress_rawdev_wiggle(
 			ret = pread(fd, buffer, blksz, offset);
 			if (UNLIKELY(ret < 0)) {
 				if (errno != EINTR) {
-					pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+					pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 						args->name, (intmax_t)offset, errno, strerror(errno));
 					return -1;
 				}
@@ -195,7 +194,7 @@ static int stress_rawdev_ends(
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -210,7 +209,7 @@ static int stress_rawdev_ends(
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -238,7 +237,7 @@ static int stress_rawdev_random(
 {
 	size_t i;
 
-	for (i = 0; (i < 256) && stress_continue(args); i++) {
+	for (i = 0; LIKELY((i < 256) && stress_continue(args)); i++) {
 		ssize_t ret;
 		const off_t offset = (off_t)blksz * stress_mwc64modn(blks);
 		double t;
@@ -247,7 +246,7 @@ static int stress_rawdev_random(
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -275,7 +274,7 @@ static int stress_rawdev_burst(
 	int i;
 	off_t blk = (off_t)stress_mwc64modn(blks);
 
-	for (i = 0; (i < 256) && stress_continue(args); i++) {
+	for (i = 0; LIKELY((i < 256) && stress_continue(args)); i++) {
 		ssize_t ret;
 		const off_t offset = blk * (off_t)blksz;
 		double t;
@@ -284,7 +283,7 @@ static int stress_rawdev_burst(
 		ret = pread(fd, buffer, blksz, offset);
 		if (UNLIKELY(ret < 0)) {
 			if (errno != EINTR) {
-				pr_fail("%s: pread at %ju failed, errno=%d (%s)\n",
+				pr_fail("%s: pread at %" PRIdMAX " failed, errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				return -1;
 			}
@@ -347,47 +346,24 @@ static int stress_rawdev_all(
 	return ret;
 }
 
-/*
- *  stress_set_rawdev_method()
- *	set the default rawdev method
- */
-static int stress_set_rawdev_method(const char *name)
+static const char *stress_rawdev_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(rawdev_methods); i++) {
-		if (!strcmp(rawdev_methods[i].name, name)) {
-			stress_set_setting("rawdev-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "rawdev-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(rawdev_methods); i++) {
-		(void)fprintf(stderr, " %s", rawdev_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	return (i < SIZEOF_ARRAY(rawdev_methods)) ? rawdev_methods[i].name : NULL;
 }
-#else
-/*
- *  stress_set_rawdev_method()
- *	set the default rawdev method
- */
-static int stress_set_rawdev_method(const char *name)
-{
-	(void)name;
 
-	(void)fprintf(stderr, "option --rawdev-method not supported\n");
-	return -1;
-}
-#endif
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_rawdev_method,	stress_set_rawdev_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_rawdev_method, "rawdev-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_rawdev_method },
+	END_OPT,
 };
+
+#else
+
+static const stress_opt_t opts[] = {
+	{ OPT_rawdev_method, "rawdev-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_unimplemented_method },
+	END_OPT,
+};
+
+#endif
 
 #if defined(HAVE_SYS_SYSMACROS_H) &&	\
     defined(BLKGETSIZE) && 		\
@@ -395,7 +371,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
 
 static int stress_rawdev(stress_args_t *args)
 {
-	int ret, fd;
+	int ret, fd, rc = EXIT_SUCCESS;
 	char *devpath, *buffer;
 	const char *path = stress_get_temp_path();
 	size_t blks, blksz = 0, mmapsz;
@@ -404,17 +380,16 @@ static int stress_rawdev(stress_args_t *args)
 	stress_rawdev_func func;
 	stress_metrics_t *metrics;
 
-	metrics = calloc(SIZEOF_ARRAY(rawdev_methods), sizeof(*metrics));
+	metrics = (stress_metrics_t *)calloc(SIZEOF_ARRAY(rawdev_methods), sizeof(*metrics));
 	if (!metrics) {
-		pr_inf_skip("%s: cannot allocate metrics table, skipping stressor\n",
-			args->name);
+		pr_inf_skip("%s: cannot allocate %zu byte metrics table%s, "
+			"skipping stressor\n",
+			args->name, SIZEOF_ARRAY(rawdev_methods),
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
-	for (i = 0; i < SIZEOF_ARRAY(rawdev_methods); i++) {
-		metrics[i].duration = 0.0;
-		metrics[i].count = 0.0;
-	}
+	stress_zero_metrics(metrics, SIZEOF_ARRAY(rawdev_methods));
 
 	if (!path) {
 		pr_inf("%s: cannot determine temporary path\n",
@@ -435,14 +410,14 @@ static int stress_rawdev(stress_args_t *args)
 
 	fd = open(devpath, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) {
-		pr_inf("%s: cannot open raw block device: errno=%d (%s)\n",
+		pr_inf("%s: cannot open raw block device, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		free(metrics);
 		return EXIT_NO_RESOURCE;
 	}
 	ret = ioctl(fd, BLKGETSIZE, &blks);
 	if (ret < 0) {
-		pr_inf("%s: cannot get block size: errno=%d (%s)\n",
+		pr_inf("%s: cannot get block size, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(fd);
 		free(metrics);
@@ -450,7 +425,7 @@ static int stress_rawdev(stress_args_t *args)
 	}
 	ret = ioctl(fd, BLKSSZGET, &blksz);
 	if (ret < 0) {
-		pr_inf("%s: cannot get block size: errno=%d (%s)\n",
+		pr_inf("%s: cannot get block size, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(fd);
 		free(metrics);
@@ -467,32 +442,37 @@ static int stress_rawdev(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffer == MAP_FAILED) {
-		pr_inf("%s: cannot allocate buffer of %zd bytes with %zd allocation\n",
-			args->name, blksz, mmapsz);
+		pr_inf("%s: failed to mmap buffer of %zu bytes with %zu allocations%s\n",
+			args->name, blksz, mmapsz, stress_get_memfree_str());
 		(void)close(fd);
 		free(metrics);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffer, mmapsz, "io-buffer");
 
 	(void)close(fd);
 	fd = open(devpath, O_RDONLY | O_DIRECT);
 	if (fd < 0) {
-		pr_inf("%s: cannot open raw block device: errno=%d (%s)\n",
+		pr_inf("%s: cannot open raw block device, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)munmap((void *)buffer, mmapsz);
 		free(metrics);
 		return EXIT_NO_RESOURCE;
 	}
 
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: exercising %s (%zd blocks of size %zd bytes)\n",
 			args->name, devpath, blks, blksz);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		if (func(args, fd, buffer, blks, blksz, &metrics[rawdev_method]) < 0)
+		if (func(args, fd, buffer, blks, blksz, &metrics[rawdev_method]) < 0) {
+			rc = EXIT_FAILURE;
 			break;
+		}
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -506,7 +486,7 @@ static int stress_rawdev(stress_args_t *args)
 
 			(void)snprintf(str, sizeof(str), "MB per sec read rate (%s)", rawdev_methods[i].name);
 			stress_metrics_set(args, j, str,
-				rate, STRESS_HARMONIC_MEAN);
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
@@ -515,22 +495,22 @@ static int stress_rawdev(stress_args_t *args)
 	(void)close(fd);
 	free(metrics);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_rawdev_info = {
+const stressor_info_t stress_rawdev_info = {
 	.stressor = stress_rawdev,
 	.supported = stress_rawdev_supported,
-	.class = CLASS_IO,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_rawdev_info = {
+const stressor_info_t stress_rawdev_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_IO,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/sysmacros.h or undefined BLKGETSIZE, BLKSSZGET"

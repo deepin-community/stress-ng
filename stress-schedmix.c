@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,8 +21,11 @@
 #include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-killpid.h"
+#include "core-sched.h"
 
 #include <sched.h>
+#include <time.h>
+#include <sys/times.h>
 
 #if defined(HAVE_LINUX_MEMBARRIER_H)
 #include <linux/membarrier.h>
@@ -30,13 +33,8 @@
 #if defined(HAVE_SEMAPHORE_H)
 #include <semaphore.h>
 #endif
-
-#if defined(__NR_sched_getattr)
-#define HAVE_SCHED_GETATTR
-#endif
-
-#if defined(__NR_sched_setattr)
-#define HAVE_SCHED_SETATTR
+#if defined(HAVE_SYS_SELECT_H)
+#include <sys/select.h>
 #endif
 
 #if defined(HAVE_SEMAPHORE_H) && \
@@ -57,29 +55,16 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_schedmix_procs()
- *	set maximum number of processes allowed
- */
-static int stress_set_schedmix_procs(const char *opt)
-{
-	size_t schedmix_procs;
-
-	schedmix_procs = stress_get_uint32(opt);
-	stress_check_range("schedmix-procs", (uint64_t)schedmix_procs,
-		MIN_SCHEDMIX_PROCS, MAX_SCHEDMIX_PROCS);
-	return stress_set_setting("schedmix-procs", TYPE_ID_SIZE_T, &schedmix_procs);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-        { OPT_schedmix_procs,	stress_set_schedmix_procs },
-        { 0,			NULL }
+static const stress_opt_t opts[] = {
+        { OPT_schedmix_procs, "schedmix-procs", TYPE_ID_SIZE_T, MIN_SCHEDMIX_PROCS, MAX_SCHEDMIX_PROCS, NULL },
+	END_OPT,
 };
 
 #if (defined(_POSIX_PRIORITY_SCHEDULING) || defined(__linux__)) &&	\
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 
 #if defined(HAVE_SCHEDMIX_SEM)
@@ -91,35 +76,11 @@ typedef struct {
 static stress_schedmix_sem_t *schedmix_sem;
 #endif
 
-static const int policies[] = {
-#if defined(SCHED_IDLE)
-	SCHED_IDLE,
-#endif
-#if defined(SCHED_FIFO)
-	SCHED_FIFO,
-#endif
-#if defined(SCHED_RR)
-	SCHED_RR,
-#endif
-#if defined(SCHED_OTHER)
-	SCHED_OTHER,
-#endif
-#if defined(SCHED_BATCH)
-	SCHED_BATCH,
-#endif
-#if defined(SCHED_DEADLINE)
-	SCHED_DEADLINE,
-#endif
-};
-
 static inline void stress_schedmix_waste_time(stress_args_t *args)
 {
 	int i, n, status;
 	pid_t pid;
 	double min1, min5, min15;
-#if defined(__linux__)
-	char buf[256];
-#endif
 	struct tms tms_buf;
 #if defined(HAVE_GETRUSAGE) &&	\
     (defined(RUSAGE_SELF) || defined(RUSAGE_CHILDREN))
@@ -128,85 +89,99 @@ static inline void stress_schedmix_waste_time(stress_args_t *args)
 #if defined(HAVE_SCHEDMIX_SEM)
 	struct timespec timeout;
 #endif
-
+#if defined(HAVE_SYS_SELECT_H) &&       \
+    (defined(HAVE_SELECT) ||		\
+     defined(HAVE_PSELECT))
+	fd_set rfds;
+	const int fdstdin = fileno(stdin);
+#endif
+#if defined(HAVE_SYS_SELECT_H) &&       \
+    defined(HAVE_SELECT)
+	struct timeval tv;
+#endif
+#if defined(HAVE_SYS_SELECT_H) &&       \
+    defined(HAVE_PSELECT)
+	struct timespec ts;
+	sigset_t sigmask;
+#endif
 redo:
-	n = stress_mwc8modn(25);
+	n = stress_mwc8modn(27);
 	switch (n) {
 	case 0:
-		shim_sched_yield();
+		(void)shim_sched_yield();
 		break;
 	case 1:
 		n = stress_mwc16();
-		for (i = 0; stress_continue(args) && (i < n); i++)
-			shim_sched_yield();
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
+			(void)shim_sched_yield();
 		break;
 	case 2:
-		shim_nanosleep_uint64(stress_mwc32modn(1000000));
+		(void)shim_nanosleep_uint64(stress_mwc32modn(1000000));
 		break;
 	case 3:
 		n = stress_mwc8();
-		for (i = 0; stress_continue(args) && (i < n); i++)
-			shim_nanosleep_uint64(stress_mwc32modn(10000));
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
+			(void)shim_nanosleep_uint64(stress_mwc32modn(10000));
 		break;
 	case 4:
-		for (i = 0; stress_continue(args) && (i < 1000000); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < 1000000)); i++)
 			stress_asm_nop();
 		break;
 	case 5:
 		n = stress_mwc32modn(1000000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
 			stress_asm_nop();
 		break;
 	case 6:
-		for (i = 0; stress_continue(args) && (i < 10000); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < 10000)); i++)
 			VOID_RET(double, stress_time_now());
 		break;
 	case 7:
 		n = stress_mwc16modn(10000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
 			VOID_RET(double, stress_time_now());
 		break;
 	case 8:
-		for (i = 0; stress_continue(args) && (i < 1000); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < 1000)); i++)
 			VOID_RET(int, nice(0));
 		break;
 	case 9:
 		n = stress_mwc16modn(1000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
 			VOID_RET(int, nice(0));
 		break;
 	case 10:
-		for (i = 0; stress_continue(args) && (i < 10); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < 10)); i++)
 			VOID_RET(uint64_t, stress_get_prime64(stress_mwc8()));
 		break;
 	case 11:
-		for (i = 0; stress_continue(args) && (i < 1000); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < 1000)); i++)
 			getpid();
 		break;
 	case 12:
 		n = stress_mwc16modn(1000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
 			getpid();
 		break;
 	case 13:
-		for (i = 0; stress_continue(args) && (i < 1000); i++)
-			sleep(0);
+		for (i = 0; LIKELY(stress_continue(args) && (i < 1000)); i++)
+			(void)sleep(0);
 		break;
 	case 14:
 		n = stress_mwc16modn(1000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
-			sleep(0);
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
+			(void)sleep(0);
 		break;
 	case 15:
 		n = stress_mwc16modn(1000);
-		for (i = 0; stress_continue(args) && (i < n); i++)
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
 			getpid();
 		break;
 	case 16:
 		getpid();
 		break;
 	case 17:
-		VOID_RET(int, shim_usleep_interruptible(1000));
+		(void)shim_usleep_interruptible(1000);
 		break;
 	case 18:
 #if defined(HAVE_LINUX_MEMBARRIER_H) &&	\
@@ -224,7 +199,7 @@ redo:
 		if (pid == 0) {
 			_exit(0);
 		} else if (pid > 0) {
-			VOID_RET(int, shim_waitpid(pid, &status, 0));
+			VOID_RET(pid_t, shim_waitpid(pid, &status, 0));
 		}
 		break;
 	case 21:
@@ -240,22 +215,22 @@ redo:
 		break;
 #if defined(__linux__)
 	case 22:
-		VOID_RET(ssize_t, stress_system_read("/proc/pressure/cpu", buf, sizeof(buf)));
+		(void)stress_system_discard("/proc/pressure/cpu");
 		break;
 	case 23:
-		VOID_RET(ssize_t, stress_system_read("/proc/self/schedstat", buf, sizeof(buf)));
+		(void)stress_system_discard("/proc/self/schedstat");
 		break;
 #endif
 #if defined(HAVE_SCHEDMIX_SEM)
 	case 24:
-		if (clock_gettime(CLOCK_REALTIME, &timeout) < 0)
+		if (UNLIKELY(clock_gettime(CLOCK_REALTIME, &timeout) < 0))
 			break;
 		timeout.tv_nsec += 1000000;
 		if (timeout.tv_nsec > 1000000000) {
 			timeout.tv_nsec -= 1000000000;
 			timeout.tv_sec++;
 		}
-		if (sem_timedwait(&schedmix_sem->sem, &timeout) < 0) {
+		if (UNLIKELY(sem_timedwait(&schedmix_sem->sem, &timeout) < 0)) {
 			/*
 			 *  can't get semaphore, then stop/continue process
 			 *  that currently holds it
@@ -263,7 +238,7 @@ redo:
 			pid = schedmix_sem->owner;
 			if (pid > 1) {
 				(void)kill(pid, SIGSTOP);
-				shim_sched_yield();
+				(void)shim_sched_yield();
 				(void)kill(pid, SIGCONT);
 			}
 		} else {
@@ -272,11 +247,32 @@ redo:
 			 */
 			schedmix_sem->owner = getpid();
 			n = stress_mwc16();
-			for (i = 0; stress_continue(args) && (i < n); i++)
-				shim_sched_yield();
+			for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++)
+				(void)shim_sched_yield();
 			schedmix_sem->owner = -1;
 			(void)sem_post(&schedmix_sem->sem);
 		}
+		break;
+#endif
+#if defined(HAVE_SYS_SELECT_H) &&       \
+    defined(HAVE_SELECT)
+	case 25:
+		FD_ZERO(&rfds);
+		FD_SET(fdstdin, &rfds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100;
+		(void)select(fdstdin + 1, &rfds, NULL, NULL, &tv);
+		break;
+#endif
+#if defined(HAVE_SYS_SELECT_H) &&       \
+    defined(HAVE_PSELECT)
+	case 26:
+		FD_ZERO(&rfds);
+		FD_SET(fdstdin, &rfds);
+		ts.tv_sec = 0;
+		ts.tv_nsec = 100000;
+		(void)sigemptyset(&sigmask);
+		(void)pselect(fdstdin + 1, &rfds, NULL, NULL, &ts, &sigmask);
 		break;
 #endif
 	default:
@@ -301,7 +297,7 @@ static inline void stress_schedmix_itimer_clear(void)
 {
 	struct itimerval timer;
 
-	(void)memset(&timer, 0, sizeof(timer));
+	(void)shim_memset(&timer, 0, sizeof(timer));
 	VOID_RET(int, setitimer(ITIMER_PROF, &timer, NULL));
 }
 
@@ -315,7 +311,7 @@ static void stress_schedmix_itimer_handler(int signum)
 
 static int stress_schedmix_child(stress_args_t *args)
 {
-	int old_policy = -1;
+	int old_policy = -1, rc = EXIT_SUCCESS;
 
 #if defined(HAVE_SETITIMER) &&	\
     defined(ITIMER_PROF)
@@ -342,14 +338,14 @@ static int stress_schedmix_child(stress_args_t *args)
 		 *  as the previous old policy
 		 */
 		do {
-			policy = stress_mwc8modn((uint8_t)SIZEOF_ARRAY(policies));
+			policy = stress_mwc8modn((uint8_t)stress_sched_types_length);
 		} while (policy == old_policy);
 		old_policy = policy;
 
-		new_policy = policies[policy];
-		new_policy_name = stress_get_sched_name(new_policy);
+		new_policy = stress_sched_types[policy].sched;
+		new_policy_name = stress_sched_types[policy].sched_name;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		errno = 0;
@@ -361,7 +357,9 @@ static int stress_schedmix_child(stress_args_t *args)
 			/*
 			 *  Only have 1 RT deadline instance running
 			 */
-			if (args->instance == 0) {
+			if (stress_instance_zero(args)) {
+				uint64_t rndtime = (uint64_t)stress_mwc8modn(64) + 32;
+
 				(void)shim_memset(&attr, 0, sizeof(attr));
 				attr.size = sizeof(attr);
 				attr.sched_flags = 0;
@@ -369,9 +367,9 @@ static int stress_schedmix_child(stress_args_t *args)
 				attr.sched_priority = 0;
 				attr.sched_policy = SCHED_DEADLINE;
 				/* runtime <= deadline <= period */
-				attr.sched_runtime = 64 * 1000000;
-				attr.sched_deadline = 128 * 1000000;
-				attr.sched_period = 256 * 1000000;
+				attr.sched_runtime = rndtime * 1000000;
+				attr.sched_deadline = rndtime * 2000000;
+				attr.sched_period = rndtime * 4000000;
 
 				ret = shim_sched_setattr(0, &attr, 0);
 				break;
@@ -384,6 +382,10 @@ static int stress_schedmix_child(stress_args_t *args)
 #endif
 #if defined(SCHED_BATCH)
 		case SCHED_BATCH:
+			goto case_sched_other;
+#endif
+#if defined(SCHED_EXT)
+		case SCHED_EXT:
 			goto case_sched_other;
 #endif
 #if defined(SCHED_OTHER)
@@ -439,7 +441,7 @@ case_sched_fifo:
 			/* Should never get here */
 			break;
 		}
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			/*
 			 *  Some systems return EINVAL for non-POSIX
 			 *  scheduling policies, silently ignore these
@@ -451,10 +453,11 @@ case_sched_fifo:
 			    (errno != ENOSYS) &&
 			    (errno != EBUSY)) {
 				pr_fail("%s: sched_setscheduler "
-					"failed: errno=%d (%s) "
+					"failed, errno=%d (%s) "
 					"for scheduler policy %s\n",
 					args->name, errno, strerror(errno),
 					new_policy_name);
+				rc = EXIT_FAILURE;
 			}
 		}
 		stress_schedmix_waste_time(args);
@@ -466,23 +469,31 @@ case_sched_fifo:
 	stress_schedmix_itimer_clear();
 #endif
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 static int stress_schedmix(stress_args_t *args)
 {
-	pid_t pids[MAX_SCHEDMIX_PROCS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	size_t i;
 	size_t schedmix_procs = DEFAULT_SCHEDMIX_PROCS;
+	int rc;
 	const int parent_cpu = stress_get_cpu();
 
-	if (SIZEOF_ARRAY(policies) == (0)) {
-		if (args->instance == 0) {
+	if (stress_sched_types_length == (0)) {
+		if (stress_instance_zero(args)) {
 			pr_inf_skip("%s: no scheduling policies "
 				"available, skipping test\n",
 				args->name);
 		}
 		return EXIT_NOT_IMPLEMENTED;
+	}
+
+	s_pids = stress_sync_s_pids_mmap(MAX_SCHEDMIX_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, MAX_SCHEDMIX_PROCS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
 	}
 
 #if defined(HAVE_SCHEDMIX_SEM)
@@ -491,6 +502,7 @@ static int stress_schedmix(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (schedmix_sem != MAP_FAILED) {
+		stress_set_vma_anon_name(schedmix_sem, sizeof(*schedmix_sem), "semaphores");
 		if (sem_init(&schedmix_sem->sem, 0, 1) < 0) {
 			(void)munmap((void *)schedmix_sem, sizeof(*schedmix_sem));
 			schedmix_sem = NULL;
@@ -502,21 +514,31 @@ static int stress_schedmix(stress_args_t *args)
 
 	(void)stress_get_setting("schedmix-procs", &schedmix_procs);
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-
 	for (i = 0; i < schedmix_procs; i++) {
+		stress_sync_start_init(&s_pids[i]);
+
 		stress_mwc_reseed();
 
-		pids[i] = fork();
-		if (pids[i] < 0) {
+		s_pids[i].pid = fork();
+		if (s_pids[i].pid < 0) {
 			continue;
-		} else if (pids[i] == 0) {
+		} else if (s_pids[i].pid == 0) {
+			s_pids[i].pid = getpid();
+			stress_sync_start_wait_s_pid(&s_pids[i]);
+
 			VOID_RET(int, nice(stress_mwc8modn(7)));
 			stress_parent_died_alarm();
 			(void)stress_change_cpu(args, parent_cpu);
 			_exit(stress_schedmix_child(args));
+		} else {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		pause();
@@ -531,21 +553,25 @@ static int stress_schedmix(stress_args_t *args)
 	}
 #endif
 
-	return stress_kill_and_wait_many(args, pids, schedmix_procs, SIGALRM, true);
+	rc = stress_kill_and_wait_many(args, s_pids, schedmix_procs, SIGALRM, true);
+
+	(void)stress_sync_s_pids_munmap(s_pids, MAX_SCHEDMIX_PROCS);
+
+	return rc;
 }
 
-stressor_info_t stress_schedmix_info = {
+const stressor_info_t stress_schedmix_info = {
 	.stressor = stress_schedmix,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_schedmix_info = {
+const stressor_info_t stress_schedmix_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without Linux scheduling support"

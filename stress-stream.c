@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2016-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,6 +36,8 @@
 #include "core-pragma.h"
 #include "core-target-clones.h"
 
+#include <math.h>
+
 #define MIN_STREAM_L3_SIZE	(4 * KB)
 #define MAX_STREAM_L3_SIZE	(MAX_MEM_LIMIT)
 #define DEFAULT_STREAM_L3_SIZE	(4 * MB)
@@ -62,7 +64,10 @@ static const stress_help_t help[] = {
 };
 
 static const stress_stream_madvise_info_t stream_madvise_info[] = {
-#if defined(HAVE_MADVISE)
+#if !defined(HAVE_MADVISE)
+	/* No MADVISE, default to normal, ignored */
+	{ "normal",	0 },
+#else
 #if defined(MADV_HUGEPAGE)
 	{ "hugepage",	MADV_HUGEPAGE },
 #endif
@@ -75,54 +80,8 @@ static const stress_stream_madvise_info_t stream_madvise_info[] = {
 #if defined(MADV_NORMAL)
 	{ "normal",	MADV_NORMAL },
 #endif
-#else
-	/* No MADVISE, default to normal, ignored */
-	{ "normal",	0 },
 #endif
-	{ NULL,         0 },
 };
-
-static int stress_set_stream_mlock(const char *opt)
-{
-	return stress_set_setting_true("stream-mlock", opt);
-}
-
-static int stress_set_stream_L3_size(const char *opt)
-{
-	uint64_t stream_L3_size;
-
-	stream_L3_size = stress_get_uint64_byte(opt);
-	stress_check_range_bytes("stream-L3-size", stream_L3_size,
-		MIN_STREAM_L3_SIZE, MAX_STREAM_L3_SIZE);
-	return stress_set_setting("stream-L3-size", TYPE_ID_UINT64, &stream_L3_size);
-}
-
-static int stress_set_stream_madvise(const char *opt)
-{
-	const stress_stream_madvise_info_t *info;
-
-	for (info = stream_madvise_info; info->name; info++) {
-		if (!strcmp(opt, info->name)) {
-			stress_set_setting("stream-madvise", TYPE_ID_INT, &info->advice);
-			return 0;
-		}
-	}
-	(void)fprintf(stderr, "invalid stream-madvise advice '%s', allowed advice options are:", opt);
-	for (info = stream_madvise_info; info->name; info++) {
-		(void)fprintf(stderr, " %s", info->name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-static int stress_set_stream_index(const char *opt)
-{
-	uint32_t stream_index;
-
-	stream_index = stress_get_uint32(opt);
-	stress_check_range("stream-index", (uint64_t)stream_index, 0, 3);
-	return stress_set_setting("stream-index", TYPE_ID_UINT32, &stream_index);
-}
 
 /*
  *  stress_stream_checksum_to_hexstr()
@@ -137,10 +96,10 @@ static void stress_stream_checksum_to_hexstr(char *str, const size_t len, const 
 	for (i = 0, j = 0; (i < sizeof(checksum)) && (j < len); i++, j += 2) {
 		(void)snprintf(str + j, 3, "%2.2x", ptr[i]);
 	}
-	str[i] = '\0';
+	str[j] = '\0';
 }
 
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_copy_index0(
+static inline void ALWAYS_INLINE stress_stream_copy_index0(
 	double *const RESTRICT c,
 	const double *const RESTRICT a,
 	const uint64_t n,
@@ -165,7 +124,7 @@ PRAGMA_UNROLL_N(8)
 }
 
 #if defined(HAVE_NT_STORE_DOUBLE)
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_copy_index0_nt(
+static inline void ALWAYS_INLINE stress_stream_copy_index0_nt(
 	double *const RESTRICT c,
 	const double *const RESTRICT a,
 	const uint64_t n,
@@ -189,7 +148,7 @@ PRAGMA_UNROLL_N(8)
 }
 #endif
 
-static inline void OPTIMIZE3 stress_stream_copy_index1(
+static inline void ALWAYS_INLINE stress_stream_copy_index1(
 	double *const RESTRICT c,
 	const double *const RESTRICT a,
 	const size_t *const RESTRICT idx1,
@@ -213,7 +172,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += 0.0;
 }
 
-static inline void OPTIMIZE3 stress_stream_copy_index2(
+static inline void ALWAYS_INLINE stress_stream_copy_index2(
 	double *const RESTRICT c,
 	const double *const RESTRICT a,
 	const size_t *const RESTRICT idx1,
@@ -235,7 +194,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += 0.0;
 }
 
-static inline void OPTIMIZE3 stress_stream_copy_index3(
+static inline void ALWAYS_INLINE stress_stream_copy_index3(
 	double *const RESTRICT c,
 	const double *const RESTRICT a,
 	const size_t *const RESTRICT idx1,
@@ -258,7 +217,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += 0.0;
 }
 
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_scale_index0(
+static inline void ALWAYS_INLINE stress_stream_scale_index0(
 	double *const RESTRICT b,
 	const double *const RESTRICT c,
 	const double q,
@@ -284,7 +243,7 @@ PRAGMA_UNROLL_N(8)
 }
 
 #if defined(HAVE_NT_STORE_DOUBLE)
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_scale_index0_nt(
+static inline void ALWAYS_INLINE stress_stream_scale_index0_nt(
 	double *const RESTRICT b,
 	const double *const RESTRICT c,
 	const double q,
@@ -309,7 +268,7 @@ PRAGMA_UNROLL_N(8)
 }
 #endif
 
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_scale_index1(
+static inline void ALWAYS_INLINE stress_stream_scale_index1(
 	double *const RESTRICT b,
 	const double *const RESTRICT c,
 	const double q,
@@ -334,7 +293,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 stress_stream_scale_index2(
+static inline void ALWAYS_INLINE stress_stream_scale_index2(
 	double *const RESTRICT b,
 	const double *const RESTRICT c,
 	const double q,
@@ -357,7 +316,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 stress_stream_scale_index3(
+static inline void ALWAYS_INLINE stress_stream_scale_index3(
 	double *const RESTRICT b,
 	const double *const RESTRICT c,
 	const double q,
@@ -381,7 +340,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_add_index0(
+static inline void ALWAYS_INLINE stress_stream_add_index0(
 	const double *const RESTRICT a,
 	const double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -407,7 +366,7 @@ PRAGMA_UNROLL_N(8)
 }
 
 #if defined(HAVE_NT_STORE_DOUBLE)
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_add_index0_nt(
+static inline void ALWAYS_INLINE stress_stream_add_index0_nt(
 	const double *const RESTRICT a,
 	const double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -432,7 +391,7 @@ PRAGMA_UNROLL_N(8)
 }
 #endif
 
-static inline void OPTIMIZE3 stress_stream_add_index1(
+static inline void ALWAYS_INLINE stress_stream_add_index1(
 	const double *const RESTRICT a,
 	const double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -457,7 +416,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 stress_stream_add_index2(
+static inline void ALWAYS_INLINE stress_stream_add_index2(
 	const double *const RESTRICT a,
 	const double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -483,7 +442,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 stress_stream_add_index3(
+static inline void ALWAYS_INLINE stress_stream_add_index3(
 	const double *const RESTRICT a,
 	const double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -507,7 +466,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n;
 }
 
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_triad_index0(
+static inline void ALWAYS_INLINE stress_stream_triad_index0(
 	double *const RESTRICT a,
 	const double *const RESTRICT b,
 	const double *const RESTRICT c,
@@ -534,7 +493,7 @@ PRAGMA_UNROLL_N(8)
 }
 
 #if defined(HAVE_NT_STORE_DOUBLE)
-static inline void OPTIMIZE3 TARGET_CLONES stress_stream_triad_index0_nt(
+static inline void ALWAYS_INLINE stress_stream_triad_index0_nt(
 	double *const RESTRICT a,
 	const double *const RESTRICT b,
 	const double *const RESTRICT c,
@@ -560,7 +519,7 @@ PRAGMA_UNROLL_N(8)
 }
 #endif
 
-static inline void OPTIMIZE3 stress_stream_triad_index1(
+static inline void ALWAYS_INLINE stress_stream_triad_index1(
 	double *const RESTRICT a,
 	const double *const RESTRICT b,
 	const double *const RESTRICT c,
@@ -585,7 +544,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n * 2.0;
 }
 
-static inline void OPTIMIZE3 stress_stream_triad_index2(
+static inline void ALWAYS_INLINE stress_stream_triad_index2(
 	double *const RESTRICT a,
 	const double *const RESTRICT b,
 	const double *const RESTRICT c,
@@ -612,7 +571,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n * 2.0;
 }
 
-static inline void OPTIMIZE3 stress_stream_triad_index3(
+static inline void ALWAYS_INLINE stress_stream_triad_index3(
 	double *const RESTRICT a,
 	const double *const RESTRICT b,
 	const double *const RESTRICT c,
@@ -637,7 +596,7 @@ PRAGMA_UNROLL_N(8)
 	*fp_ops += (double)n * 2.0;
 }
 
-static inline TARGET_CLONES OPTIMIZE3 void stress_stream_init_data(
+static inline ALWAYS_INLINE void stress_stream_init_data(
 	double *const RESTRICT a,
 	double *const RESTRICT b,
 	double *const RESTRICT c,
@@ -710,16 +669,20 @@ static inline void *stress_stream_mmap(
 		MAP_ANONYMOUS, -1, 0);
 	/* Coverity Scan believes NULL can be returned, doh */
 	if (!ptr || (ptr == MAP_FAILED)) {
-		pr_err("%s: cannot allocate %" PRIu64 " bytes\n",
-			args->name, sz);
+		pr_err("%s: failed to mmap %" PRIu64 " bytes%s, errno=%d (%s)\n",
+			args->name, sz,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ptr = MAP_FAILED;
 	} else {
+		stress_set_vma_anon_name(ptr, sz, "stream-buffer");
 		if (stream_mlock)
 			(void)shim_mlock(ptr, (size_t)sz);
 #if defined(HAVE_MADVISE)
+		size_t stream_madvise;
 		int advice = MADV_NORMAL;
 
-		(void)stress_get_setting("stream-madvise", &advice);
+		if (stress_get_setting("stream-madvise", &stream_madvise))
+			advice = stream_madvise_info[stream_madvise].advice;
 
 		VOID_RET(int, madvise(ptr, (size_t)sz, advice));
 #else
@@ -732,7 +695,6 @@ static inline void *stress_stream_mmap(
 static inline uint64_t get_stream_L3_size(stress_args_t *args)
 {
 	uint64_t cache_size = 2 * MB;
-#if defined(__linux__)
 	stress_cpu_cache_cpus_t *cpu_caches;
 	stress_cpu_cache_t *cache = NULL;
 	uint16_t max_cache_level;
@@ -768,19 +730,12 @@ static inline uint64_t get_stream_L3_size(stress_args_t *args)
 	cache_size = cache->size;
 
 	stress_free_cpu_caches(cpu_caches);
-#else
-	if (!args->instance)
-		pr_inf("%s: using built-in defaults as unable to "
-			"determine cache details\n", args->name);
-#endif
 
-#if defined(__linux__)
 report_size:
 	cache_size *= numa_nodes;
-	if ((args->instance == 0) && (numa_nodes > 1))
+	if (stress_instance_zero(args) && (numa_nodes > 1))
 		pr_inf("%s: scaling L3 cache size by number of numa nodes %d to %" PRIu64 "K\n",
 			args->name, numa_nodes, cache_size / 1024);
-#endif
 	return cache_size;
 }
 
@@ -802,6 +757,103 @@ static void stress_stream_init_index(
 	}
 }
 
+static void OPTIMIZE3 TARGET_CLONES stress_stream_exercise(
+	double *const RESTRICT dt,
+	double *const RESTRICT a,
+	double *const RESTRICT b,
+	double *const RESTRICT c,
+	const size_t *const RESTRICT idx1,
+	const size_t *const RESTRICT idx2,
+	const size_t *const RESTRICT idx3,
+	double *const RESTRICT rd_bytes,
+	double *const RESTRICT wr_bytes,
+	double *const RESTRICT fp_ops,
+	const double q,
+	const uint64_t n,
+	const uint32_t stream_index,
+	const bool has_sse2)
+{
+	double t1, t2;
+
+	switch (stream_index) {
+	case 3:
+		t1 = stress_time_now();
+		stress_stream_copy_index3(c, a, idx1, idx2, idx3, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_scale_index3(b, c, q, idx1, idx2, idx3, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_add_index3(c, b, a, idx1, idx2, idx3, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_triad_index3(a, b, c, q, idx1, idx2, idx3, n, rd_bytes, wr_bytes, fp_ops);
+		t2 = stress_time_now();
+		break;
+	case 2:
+		t1 = stress_time_now();
+		stress_stream_copy_index2(c, a, idx1, idx2, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_scale_index2(b, c, q, idx1, idx2, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_add_index2(c, b, a, idx1, idx2, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_triad_index2(a, b, c, q, idx1, idx2, n, rd_bytes, wr_bytes, fp_ops);
+		t2 = stress_time_now();
+		break;
+	case 1:
+		t1 = stress_time_now();
+		stress_stream_copy_index1(c, a, idx1, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_scale_index1(b, c, q, idx1, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_add_index1(c, b, a, idx1, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_triad_index1(a, b, c, q, idx1, n, rd_bytes, wr_bytes, fp_ops);
+		t2 = stress_time_now();
+		break;
+	case 0:
+	default:
+#if defined(HAVE_NT_STORE_DOUBLE)
+		if (has_sse2) {
+			t1 = stress_time_now();
+			stress_stream_copy_index0_nt(c, a, n, rd_bytes, wr_bytes, fp_ops);
+			stress_stream_scale_index0_nt(b, c, q, n, rd_bytes, wr_bytes, fp_ops);
+			stress_stream_add_index0_nt(c, b, a, n,  rd_bytes, wr_bytes, fp_ops);
+			stress_stream_triad_index0_nt(a, b, c, q, n, rd_bytes, wr_bytes, fp_ops);
+			t2 = stress_time_now();
+			break;
+		}
+#else
+		(void)has_sse2;
+#endif
+		t1 = stress_time_now();
+		stress_stream_copy_index0(c, a, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_scale_index0(b, c, q, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_add_index0(c, b, a, n, rd_bytes, wr_bytes, fp_ops);
+		stress_stream_triad_index0(a, b, c, q, n, rd_bytes, wr_bytes, fp_ops);
+		t2 = stress_time_now();
+		break;
+	}
+	(*dt) += (t2 - t1);
+}
+
+static int OPTIMIZE3 TARGET_CLONES stress_stream_verify(
+	stress_args_t *RESTRICT args,
+	double *const RESTRICT old_checksum,
+	const double *const RESTRICT a,
+	const double *const RESTRICT b,
+	const double *const RESTRICT c,
+	const uint64_t n)
+{
+	double new_checksum;
+
+	new_checksum = stress_stream_checksum_data(a, b, c, n);
+	if ((*old_checksum > 0.0) && (fabs(new_checksum - *old_checksum) > 0.001)) {
+		char new_str[32], old_str[32];
+
+		stress_stream_checksum_to_hexstr(new_str, sizeof(new_str), new_checksum);
+		stress_stream_checksum_to_hexstr(old_str, sizeof(old_str), *old_checksum);
+
+		if (strcmp(old_str, new_str)) {
+			pr_fail("%s: checksum failure, got 0x%s, expecting 0x%s\n",
+				args->name, new_str, old_str);
+			return EXIT_FAILURE;
+		}
+	} else {
+		*old_checksum = new_checksum;
+	}
+	return EXIT_SUCCESS;
+}
+
 /*
  *  stress_stream()
  *	stress cache/memory/CPU with stream stressors
@@ -813,7 +865,7 @@ static int stress_stream(stress_args_t *args)
 	size_t *idx1 = MAP_FAILED, *idx2 = MAP_FAILED, *idx3 = MAP_FAILED;
 	const double q = 3.0;
 	double old_checksum = -1.0;
-	double fp_ops = 0.0, t1, t2, dt;
+	double fp_ops = 0.0, dt;
 	uint32_t w, z, stream_index = 0;
 	uint64_t L3, sz, n, sz_idx;
 	uint64_t stream_L3_size = DEFAULT_STREAM_L3_SIZE;
@@ -822,6 +874,8 @@ static int stress_stream(stress_args_t *args)
 	bool stream_mlock = false;
 #if defined(HAVE_NT_STORE_DOUBLE)
 	const bool has_sse2 = stress_cpu_x86_has_sse2();
+#else
+	const bool has_sse2 = false;
 #endif
 	double rd_bytes = 0.0, wr_bytes = 0.0;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
@@ -830,7 +884,7 @@ static int stress_stream(stress_args_t *args)
 
 	(void)stress_get_setting("stream-mlock", &stream_mlock);
 
-	if (stress_get_setting("stream-L3-size", &stream_L3_size))
+	if (stress_get_setting("stream-l3-size", &stream_L3_size))
 		L3 = stream_L3_size;
 	else
 		L3 = get_stream_L3_size(args);
@@ -843,7 +897,7 @@ static int stress_stream(stress_args_t *args)
 		L3 = (uint64_t)stress_get_processors_configured() * DEFAULT_STREAM_L3_SIZE;
 	}
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: stressor loosely based on a variant of the "
 			"STREAM benchmark code\n", args->name);
 		pr_inf("%s: do NOT submit any of these results "
@@ -859,7 +913,7 @@ static int stress_stream(stress_args_t *args)
 	}
 
 	/* ..and shared amongst all the STREAM stressor instances */
-	L3 /= args->num_instances;
+	L3 /= args->instances;
 	if (L3 < args->page_size)
 		L3 = args->page_size;
 
@@ -874,6 +928,7 @@ static int stress_stream(stress_args_t *args)
 	 */
 	n = (n + 7) & ~(uint64_t)7;
 	sz = n * sizeof(*a);
+	sz_idx = n * sizeof(size_t);
 
 	a = stress_stream_mmap(args, sz, stream_mlock);
 	if (a == MAP_FAILED)
@@ -885,7 +940,6 @@ static int stress_stream(stress_args_t *args)
 	if (c == MAP_FAILED)
 		goto err_unmap;
 
-	sz_idx = n * sizeof(size_t);
 	switch (stream_index) {
 	case 3:
 		idx3 = stress_stream_mmap(args, sz_idx, stream_mlock);
@@ -917,8 +971,11 @@ case_stream_index_1:
 	init_counter = 0;
 	init_counter_max = verify ? 1 : 64;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
+	rc = EXIT_SUCCESS;
 	dt = 0.0;
 	do {
 		if (init_counter == 0) {
@@ -929,69 +986,13 @@ case_stream_index_1:
 		if (init_counter >= init_counter_max)
 			init_counter = 0;
 
-		switch (stream_index) {
-		case 3:
-			t1 = stress_time_now();
-			stress_stream_copy_index3(c, a, idx1, idx2, idx3, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_scale_index3(b, c, q, idx1, idx2, idx3, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_add_index3(c, b, a, idx1, idx2, idx3, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_triad_index3(a, b, c, q, idx1, idx2, idx3, n, &rd_bytes, &wr_bytes, &fp_ops);
-			t2 = stress_time_now();
-			break;
-		case 2:
-			t1 = stress_time_now();
-			stress_stream_copy_index2(c, a, idx1, idx2, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_scale_index2(b, c, q, idx1, idx2, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_add_index2(c, b, a, idx1, idx2, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_triad_index2(a, b, c, q, idx1, idx2, n, &rd_bytes, &wr_bytes, &fp_ops);
-			t2 = stress_time_now();
-			break;
-		case 1:
-			t1 = stress_time_now();
-			stress_stream_copy_index1(c, a, idx1, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_scale_index1(b, c, q, idx1, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_add_index1(c, b, a, idx1, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_triad_index1(a, b, c, q, idx1, n, &rd_bytes, &wr_bytes, &fp_ops);
-			t2 = stress_time_now();
-			break;
-		case 0:
-		default:
-#if defined(HAVE_NT_STORE_DOUBLE)
-			if (has_sse2) {
-				t1 = stress_time_now();
-				stress_stream_copy_index0_nt(c, a, n, &rd_bytes, &wr_bytes, &fp_ops);
-				stress_stream_scale_index0_nt(b, c, q, n, &rd_bytes, &wr_bytes, &fp_ops);
-				stress_stream_add_index0_nt(c, b, a, n,  &rd_bytes, &wr_bytes, &fp_ops);
-				stress_stream_triad_index0_nt(a, b, c, q, n, &rd_bytes, &wr_bytes, &fp_ops);
-				t2 = stress_time_now();
-				break;
-			}
-#endif
-			t1 = stress_time_now();
-			stress_stream_copy_index0(c, a, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_scale_index0(b, c, q, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_add_index0(c, b, a, n, &rd_bytes, &wr_bytes, &fp_ops);
-			stress_stream_triad_index0(a, b, c, q, n, &rd_bytes, &wr_bytes, &fp_ops);
-			t2 = stress_time_now();
-			break;
-		}
-		dt += (t2 - t1);
-
+		stress_stream_exercise(&dt, a, b, c, idx1, idx2, idx3,
+				       &rd_bytes, &wr_bytes, &fp_ops,
+				       q, n, stream_index, has_sse2);
 		if (verify) {
-			double new_checksum;
-
-			new_checksum = stress_stream_checksum_data(a, b, c, n);
-			if ((old_checksum > 0.0) && (fabs(new_checksum - old_checksum) > 0.001)) {
-				char new_str[32], old_str[32];
-
-				stress_stream_checksum_to_hexstr(new_str, sizeof(new_str), new_checksum);
-				stress_stream_checksum_to_hexstr(old_str, sizeof(old_str), old_checksum);
-
-				pr_fail("%s: checksum failure, got 0x%s, expecting 0x%s\n",
-					args->name, new_str, old_str);
-			} else {
-				old_checksum = new_checksum;
-			}
+			rc = stress_stream_verify(args, &old_checksum, a, b, c, n);
+			if (rc != EXIT_SUCCESS)
+				break;
 		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
@@ -1005,17 +1006,16 @@ case_stream_index_1:
 			" (instance %" PRIu32 ")\n",
 			args->name, mb_rd_rate, mb_wr_rate, fp_rate, args->instance);
 		stress_metrics_set(args, 0, "MB per sec memory read rate",
-			mb_rd_rate, STRESS_HARMONIC_MEAN);
+			mb_rd_rate, STRESS_METRIC_HARMONIC_MEAN);
 		stress_metrics_set(args, 1, "MB per sec memory write rate",
-			mb_wr_rate, STRESS_HARMONIC_MEAN);
+			mb_wr_rate, STRESS_METRIC_HARMONIC_MEAN);
 		stress_metrics_set(args, 2, "Mflop per sec (double precision) compute rate",
-			fp_rate, STRESS_HARMONIC_MEAN);
+			fp_rate, STRESS_METRIC_HARMONIC_MEAN);
 	} else {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf("%s: run duration too short to reliably determine memory rate\n", args->name);
 	}
 
-	rc = EXIT_SUCCESS;
 err_unmap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	if (idx3 != MAP_FAILED)
@@ -1033,18 +1033,23 @@ err_unmap:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_stream_index,	stress_set_stream_index },
-	{ OPT_stream_l3_size,	stress_set_stream_L3_size },
-	{ OPT_stream_madvise,	stress_set_stream_madvise },
-	{ OPT_stream_mlock,	stress_set_stream_mlock },
-	{ 0,			NULL }
+static const char *stress_stream_madvise(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stream_madvise_info)) ? stream_madvise_info[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_stream_index,   "stream-index",   TYPE_ID_UINT32, 0, 3, NULL },
+	{ OPT_stream_l3_size, "stream-l3-size", TYPE_ID_UINT64_BYTES_VM, MIN_STREAM_L3_SIZE, MAX_STREAM_L3_SIZE, NULL },
+	{ OPT_stream_madvise, "stream-madvise", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_stream_madvise },
+	{ OPT_stream_mlock,   "stream-mlock",   TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_stream_info = {
+const stressor_info_t stress_stream_info = {
 	.stressor = stress_stream,
-	.class = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_FP | CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

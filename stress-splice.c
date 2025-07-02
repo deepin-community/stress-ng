@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,19 +34,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_splice_bytes(const char *opt)
-{
-	size_t splice_bytes;
-
-	splice_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("splice-bytes", splice_bytes,
-		MIN_SPLICE_BYTES, MAX_MEM_LIMIT);
-	return stress_set_setting("splice-bytes", TYPE_ID_SIZE_T, &splice_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_splice_bytes,	stress_set_splice_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_splice_bytes, "splice-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_SPLICE_BYTES, MAX_MEM_LIMIT, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SPLICE)
@@ -144,7 +134,7 @@ static void stress_splice_looped_pipe(
 {
 	ssize_t ret;
 
-	if (!*use_splice_loop)
+	if (UNLIKELY(!*use_splice_loop))
 		return;
 
 	ret = splice(fds3[0], 0, fds4[1], 0, 4096, stress_splice_flag());
@@ -166,7 +156,7 @@ static void stress_splice_looped_pipe(
 static int stress_splice(stress_args_t *args)
 {
 	int fd_in, fd_out, fds1[2], fds2[2], fds3[2], fds4[2];
-	size_t splice_bytes = DEFAULT_SPLICE_BYTES;
+	size_t splice_bytes, splice_bytes_total = DEFAULT_SPLICE_BYTES;
 	int rc = EXIT_FAILURE;
 	int metrics_count = 0;
 	bool use_splice = true;
@@ -175,15 +165,17 @@ static int stress_splice(stress_args_t *args)
 	ssize_t buffer_len;
 	double duration = 0.0, bytes = 0.0, rate;
 
-	if (!stress_get_setting("splice-bytes", &splice_bytes)) {
+	if (!stress_get_setting("splice-bytes", &splice_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			splice_bytes = MAX_SPLICE_BYTES;
+			splice_bytes_total = MAX_SPLICE_BYTES;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			splice_bytes = MIN_SPLICE_BYTES;
+			splice_bytes_total = MIN_SPLICE_BYTES;
 	}
-	splice_bytes /= args->num_instances;
+	splice_bytes = splice_bytes_total / args->instances;
 	if (splice_bytes < MIN_SPLICE_BYTES)
 		splice_bytes = MIN_SPLICE_BYTES;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, splice_bytes, splice_bytes * args->instances);
 
 	buffer_len = (ssize_t)(splice_bytes > SPLICE_BUFFER_LEN ?
 				SPLICE_BUFFER_LEN : splice_bytes);
@@ -191,10 +183,12 @@ static int stress_splice(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffer == MAP_FAILED) {
-		pr_inf("%s: cannot allocate write buffer, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf("%s: failed to mmap %zu byte write buffer%s, errno=%d (%s)\n",
+			args->name, (size_t)buffer_len,
+			stress_get_memfree_str(), errno, strerror(errno));
 		goto close_done;
 	}
+	stress_set_vma_anon_name(buffer, buffer_len, "write-buffer");
 	(void)stress_madvise_mergeable(buffer, buffer_len);
 
 	if ((fd_in = open("/dev/zero", O_RDONLY)) < 0) {
@@ -254,6 +248,8 @@ static int stress_splice(stress_args_t *args)
 	 */
 	use_splice_loop = stress_splice_non_block_write_4K(fds3[1]);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -271,7 +267,7 @@ static int stress_splice(stress_args_t *args)
 				splice_bytes, stress_splice_flag());
 			if (UNLIKELY(ret < 0)) {
 				if (errno == EINVAL) {
-					if (args->instance == 0) {
+					if (stress_instance_zero(args)) {
 						pr_inf("%s: using direct write to pipe and not splicing "
 							"from /dev/zero as this is not supported in "
 							"this kernel\n", args->name);
@@ -363,7 +359,7 @@ static int stress_splice(stress_args_t *args)
 
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB per sec splice rate",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)close(fd_out);
 close_fds4:
@@ -393,17 +389,17 @@ close_done:
 	return rc;
 }
 
-stressor_info_t stress_splice_info = {
+const stressor_info_t stress_splice_info = {
 	.stressor = stress_splice,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_splice_info = {
+const stressor_info_t stress_splice_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without splice() system call"
 };

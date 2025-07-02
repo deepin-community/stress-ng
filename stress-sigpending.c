@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,6 +36,8 @@ static int stress_sigpending(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGUSR1, stress_sighandler_nop, NULL) < 0)
 		return EXIT_FAILURE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -91,9 +93,9 @@ static int stress_sigpending(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_sigpending_info = {
+const stressor_info_t stress_sigpending_info = {
 	.stressor = stress_sigpending,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

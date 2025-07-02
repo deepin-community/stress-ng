@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,16 +21,9 @@
 #include "core-affinity.h"
 #include "core-builtin.h"
 #include "core-capabilities.h"
+#include "core-sched.h"
 
 #include <sched.h>
-
-#if defined(__NR_sched_getattr)
-#define HAVE_SCHED_GETATTR
-#endif
-
-#if defined(__NR_sched_setattr)
-#define HAVE_SCHED_SETATTR
-#endif
 
 static const stress_help_t help[] = {
 	{ NULL,	"schedpolicy N",	"start N workers that exercise scheduling policy" },
@@ -39,47 +32,22 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_schedpolicy_rand(const char *opt)
-{
-	return stress_set_setting_true("schedpolicy-rand", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_schedpolicy_rand,	stress_set_schedpolicy_rand },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_schedpolicy_rand,	"schedpolicy-rand", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if (defined(_POSIX_PRIORITY_SCHEDULING) || defined(__linux__)) &&	\
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
-
-static const int policies[] = {
-#if defined(SCHED_IDLE)
-	SCHED_IDLE,
-#endif
-#if defined(SCHED_FIFO)
-	SCHED_FIFO,
-#endif
-#if defined(SCHED_RR)
-	SCHED_RR,
-#endif
-#if defined(SCHED_OTHER)
-	SCHED_OTHER,
-#endif
-#if defined(SCHED_BATCH)
-	SCHED_BATCH,
-#endif
-#if defined(SCHED_DEADLINE)
-	SCHED_DEADLINE,
-#endif
-};
 
 static int stress_schedpolicy(stress_args_t *args)
 {
-	int policy = args->instance % SIZEOF_ARRAY(policies);
-	int old_policy = -1;
+	int policy = args->instance % stress_sched_types_length;
+	int old_policy = -1, rc = EXIT_SUCCESS;
 	bool schedpolicy_rand = false;
 #if defined(_POSIX_PRIORITY_SCHEDULING)
 	const bool root_or_nice_capability = stress_check_capability(SHIM_CAP_SYS_NICE);
@@ -98,8 +66,8 @@ static int stress_schedpolicy(stress_args_t *args)
 
 	(void)stress_get_setting("schedpolicy-rand", &schedpolicy_rand);
 
-	if (SIZEOF_ARRAY(policies) == (0)) {
-		if (args->instance == 0) {
+	if (stress_sched_types_length == (0)) {
+		if (stress_instance_zero(args)) {
 			pr_inf_skip("%s: no scheduling policies "
 				"available, skipping test\n",
 				args->name);
@@ -107,6 +75,8 @@ static int stress_schedpolicy(stress_args_t *args)
 		return EXIT_NOT_IMPLEMENTED;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -128,18 +98,19 @@ static int stress_schedpolicy(stress_args_t *args)
 		 */
 		if (schedpolicy_rand) {
 			do {
-				policy = stress_mwc8modn((uint8_t)SIZEOF_ARRAY(policies));
+				policy = stress_mwc8modn((uint8_t)stress_sched_types_length);
 			} while (policy == old_policy);
 			old_policy = policy;
 		}
 
-		new_policy = policies[policy];
-		new_policy_name = stress_get_sched_name(new_policy);
 
-		if (!stress_continue(args))
+		new_policy = stress_sched_types[policy].sched;
+		new_policy_name = stress_sched_types[policy].sched_name;
+
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
-		shim_sched_yield();
+		(void)shim_sched_yield();
 		errno = 0;
 
 		switch (new_policy) {
@@ -150,7 +121,7 @@ static int stress_schedpolicy(stress_args_t *args)
 			/*
 			 *  Only have 1 RT deadline instance running
 			 */
-			if (args->instance == 0) {
+			if (stress_instance_zero(args)) {
 				(void)shim_memset(&attr, 0, sizeof(attr));
 				attr.size = sizeof(attr);
 				attr.sched_flags = 0;
@@ -173,6 +144,9 @@ static int stress_schedpolicy(stress_args_t *args)
 #endif
 #if defined(SCHED_BATCH)
 		case SCHED_BATCH:
+#endif
+#if defined(SCHED_EXT)
+		case SCHED_EXT:
 #endif
 #if defined(SCHED_OTHER)
 		case SCHED_OTHER:
@@ -217,7 +191,7 @@ case_sched_fifo:
 			max_prio = sched_get_priority_max(new_policy);
 
 			/* Check if min/max is supported or not */
-			if ((min_prio == -1) || (max_prio == -1))
+			if (UNLIKELY((min_prio == -1) || (max_prio == -1)))
 				continue;
 
 			rng_prio = max_prio - min_prio;
@@ -243,28 +217,33 @@ case_sched_fifo:
 			 *  scheduling policies, silently ignore these
 			 *  failures.
 			 */
-			if ((errno != EPERM) &&
-			    (errno != EINVAL) &&
-			    (errno != EINTR) &&
-			    (errno != ENOSYS) &&
-			    (errno != EBUSY)) {
+			if (UNLIKELY((errno != EPERM) &&
+				     (errno != EINVAL) &&
+				     (errno != EINTR) &&
+				     (errno != ENOSYS) &&
+				     (errno != EBUSY))) {
 				pr_fail("%s: sched_setscheduler "
-					"failed: errno=%d (%s) "
+					"failed, errno=%d (%s) "
 					"for scheduler policy %s\n",
 					args->name, errno, strerror(errno),
 					new_policy_name);
+				rc = EXIT_FAILURE;
+				break;
 			}
 		} else {
 			ret = sched_getscheduler(pid);
 			if (UNLIKELY(ret < 0)) {
 				pr_fail("%s: sched_getscheduler failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-			} else if (ret != policies[policy]) {
+			} else if (UNLIKELY(ret != stress_sched_types[policy].sched)) {
 				pr_fail("%s: sched_getscheduler "
-					"failed: PID %jd has policy %d (%s) "
-					"but function returned %d instead\n",
+					"failed, PID %" PRIdMAX " has policy %d (%s) "
+					"but function returned %d (%s) instead\n",
 					args->name, (intmax_t)pid, new_policy,
-					new_policy_name, ret);
+					new_policy_name, ret,
+					stress_get_sched_name(ret));
+				rc = EXIT_FAILURE;
+				break;
 			}
 		}
 #if defined(_POSIX_PRIORITY_SCHEDULING)
@@ -311,14 +290,20 @@ case_sched_fifo:
 
 		(void)shim_memset(&param, 0, sizeof(param));
 		ret = sched_getparam(pid, &param);
-		if (UNLIKELY((ret < 0) && ((errno != EINVAL) && (errno != EPERM))))
+		if (UNLIKELY((ret < 0) && ((errno != EINVAL) && (errno != EPERM)))) {
 			pr_fail("%s: sched_getparam failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
+			break;
+		}
 
 		ret = sched_setparam(pid, &param);
-		if (UNLIKELY((ret < 0) && ((errno != EINVAL) && (errno != EPERM))))
+		if (UNLIKELY((ret < 0) && ((errno != EINVAL) && (errno != EPERM)))) {
 			pr_fail("%s: sched_setparam failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
+			break;
+		}
 #endif
 
 #if defined(HAVE_SCHED_GETATTR) && \
@@ -328,7 +313,7 @@ case_sched_fifo:
 			const size_t large_attr_size = args->page_size + 16;
 			char *large_attr;
 
-			large_attr = calloc(large_attr_size, sizeof(*large_attr));
+			large_attr = (char *)calloc(large_attr_size, sizeof(*large_attr));
 			if (large_attr) {
 				(void)shim_memset(large_attr, 0, large_attr_size);
 
@@ -363,6 +348,8 @@ case_sched_fifo:
 			if (UNLIKELY(errno != ENOSYS)) {
 				pr_fail("%s: sched_getattr failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+				break;
 			}
 		}
 
@@ -396,10 +383,12 @@ case_sched_fifo:
 
 		attr.size = sizeof(attr);
 		ret = shim_sched_setattr(pid, &attr, 0);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (errno != ENOSYS) {
 				pr_fail("%s: sched_setattr failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
+				break;
 			}
 		}
 
@@ -417,28 +406,28 @@ case_sched_fifo:
 		UNEXPECTED
 #endif
 		policy++;
-		if (policy >= (int)SIZEOF_ARRAY(policies))
+		if (UNLIKELY(policy >= (int)stress_sched_types_length))
 			policy = 0;
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_schedpolicy_info = {
+const stressor_info_t stress_schedpolicy_info = {
 	.stressor = stress_schedpolicy,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_schedpolicy_info = {
+const stressor_info_t stress_schedpolicy_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without Linux scheduling support"

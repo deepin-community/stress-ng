@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,7 @@
 #include "core-madvise.h"
 #include "core-mincore.h"
 #include "core-mmap.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 
 #define DEFAULT_MREMAP_BYTES	(256 * MB)
@@ -31,29 +32,16 @@ static const stress_help_t help[] = {
 	{ NULL,	"mremap N",	  "start N workers stressing mremap" },
 	{ NULL,	"mremap-bytes N", "mremap N bytes maximum for each stress iteration" },
 	{ NULL, "mremap-mlock",	  "mlock remap pages, force pages to be unswappable" },
+	{ NULL, "mremap-numa",	  "bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	"mremap-ops N",	  "stop after N mremap bogo operations" },
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_mremap_bytes(const char *opt)
-{
-	size_t mremap_bytes;
-
-	mremap_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("mremap-bytes", mremap_bytes,
-		MIN_MREMAP_BYTES, MAX_MREMAP_BYTES);
-	return stress_set_setting("mremap-bytes", TYPE_ID_SIZE_T, &mremap_bytes);
-}
-
-static int stress_set_mremap_mlock(const char *opt)
-{
-	return stress_set_setting_true("mremap-mlock", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mremap_bytes,	stress_set_mremap_bytes },
-	{ OPT_mremap_mlock,	stress_set_mremap_mlock },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mremap_bytes, "mremap-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_MREMAP_BYTES, MAX_MREMAP_BYTES, NULL },
+	{ OPT_mremap_mlock, "mremap-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mremap_numa,  "mremap-numa",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MREMAP) &&	\
@@ -122,11 +110,10 @@ static int try_remap(
 	for (retry = 0; retry < 100; retry++) {
 		double t = 0.0;
 
-
 #if defined(MREMAP_FIXED)
 		void *addr = rand_mremap_addr(new_sz + args->page_size, flags);
 #endif
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			(void)stress_munmap_retry_enomem(*buf, old_sz);
 			*buf = 0;
 			return 0;
@@ -177,7 +164,7 @@ static int try_remap(
 #else
 			(void)mremap_mlock;
 #endif
-			if (metrics_counter++ > 500)
+			if (UNLIKELY(metrics_counter++ > 500))
 				metrics_counter = 0;
 
 			return 0;
@@ -210,40 +197,65 @@ static int try_remap(
 
 static int stress_mremap_child(stress_args_t *args, void *context)
 {
-	size_t new_sz, sz, mremap_bytes = DEFAULT_MREMAP_BYTES;
+	size_t new_sz, sz, mremap_bytes, mremap_bytes_total = DEFAULT_MREMAP_BYTES;
 	int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 	const size_t page_size = args->page_size;
 	bool mremap_mlock = false;
+	bool mremap_numa = false;
 	double duration = 0.0, count = 0.0, rate;
 	int ret = EXIT_SUCCESS;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask = NULL;
+	stress_numa_mask_t *numa_nodes = NULL;
+#endif
 
 #if defined(MAP_POPULATE)
 	flags |= MAP_POPULATE;
 #endif
 	(void)context;
 
-	if (!stress_get_setting("mremap-bytes", &mremap_bytes)) {
+	if (!stress_get_setting("mremap-bytes", &mremap_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			mremap_bytes = MAX_32;
+			mremap_bytes_total = MAX_32;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			mremap_bytes = MIN_MREMAP_BYTES;
+			mremap_bytes_total = MIN_MREMAP_BYTES;
 	}
-	mremap_bytes /= args->num_instances;
+	mremap_bytes = mremap_bytes_total / args->instances;
 	if (mremap_bytes < MIN_MREMAP_BYTES)
 		mremap_bytes = MIN_MREMAP_BYTES;
 	if (mremap_bytes < page_size)
 		mremap_bytes = page_size;
+	mremap_bytes_total = args->instances * mremap_bytes;
+	if (stress_instance_zero(args))
+		stress_usage_bytes(args, mremap_bytes, mremap_bytes_total);
+
 	new_sz = sz = mremap_bytes & ~(page_size - 1);
 
 	(void)stress_get_setting("mremap-mlock", &mremap_mlock);
+	(void)stress_get_setting("mremap-numa", &mremap_numa);
 
+	if (mremap_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &numa_nodes,
+						&numa_mask, "--mremap-numa",
+						&mremap_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --mremap-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		mremap_numa = false;
+#endif
+	}
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		uint8_t *buf = NULL, *ptr;
 		size_t old_sz;
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			goto deinit;
 
 		buf = mmap(NULL, new_sz, PROT_READ | PROT_WRITE, flags, -1, 0);
@@ -254,6 +266,10 @@ static int stress_mremap_child(stress_args_t *args, void *context)
 #endif
 			continue;	/* Try again */
 		}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		if (mremap_numa)
+			stress_numa_randomize_pages(args, numa_nodes, numa_mask, buf, sz, page_size);
+#endif
 		(void)stress_madvise_random(buf, new_sz);
 		(void)stress_madvise_mergeable(buf, new_sz);
 		(void)stress_mincore_touch_pages(buf, mremap_bytes);
@@ -261,7 +277,7 @@ static int stress_mremap_child(stress_args_t *args, void *context)
 		/* Ensure we can write to the mapped pages */
 		if (g_opt_flags & OPT_FLAGS_VERIFY) {
 			stress_mmap_set(buf, new_sz, page_size);
-			if (stress_mmap_check(buf, sz, page_size) < 0) {
+			if (UNLIKELY(stress_mmap_check(buf, sz, page_size) < 0)) {
 				pr_fail("%s: mmap'd region of %zu "
 					"bytes does not contain expected data\n",
 					args->name, sz);
@@ -274,16 +290,20 @@ static int stress_mremap_child(stress_args_t *args, void *context)
 		old_sz = new_sz;
 		new_sz >>= 1;
 		while (new_sz > page_size) {
-			if (try_remap(args, &buf, old_sz, new_sz, mremap_mlock, &duration, &count) < 0) {
+			if (UNLIKELY(try_remap(args, &buf, old_sz, new_sz, mremap_mlock, &duration, &count) < 0)) {
 				(void)stress_munmap_retry_enomem(buf, old_sz);
 				ret = EXIT_FAILURE;
 				goto deinit;
 			}
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto deinit;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			if (mremap_numa)
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, buf, page_size, new_sz);
+#endif
 			(void)stress_madvise_random(buf, new_sz);
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
-				if (stress_mmap_check(buf, new_sz, page_size) < 0) {
+				if (UNLIKELY(stress_mmap_check(buf, new_sz, page_size) < 0)) {
 					pr_fail("%s: mremap'd region "
 						"of %zu bytes does "
 						"not contain expected data\n",
@@ -299,13 +319,17 @@ static int stress_mremap_child(stress_args_t *args, void *context)
 
 		new_sz <<= 1;
 		while (new_sz < mremap_bytes) {
-			if (try_remap(args, &buf, old_sz, new_sz, mremap_mlock, &duration, &count) < 0) {
+			if (UNLIKELY(try_remap(args, &buf, old_sz, new_sz, mremap_mlock, &duration, &count) < 0)) {
 				(void)stress_munmap_retry_enomem(buf, old_sz);
 				ret = EXIT_FAILURE;
 				goto deinit;
 			}
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto deinit;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			if (mremap_numa)
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, buf, page_size, new_sz);
+#endif
 			(void)stress_madvise_random(buf, new_sz);
 			old_sz = new_sz;
 			new_sz <<= 1;
@@ -334,7 +358,14 @@ deinit:
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per mremap call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
+
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (numa_mask)
+		stress_numa_mask_free(numa_mask);
+	if (numa_nodes)
+		stress_numa_mask_free(numa_nodes);
+#endif
 
 	return ret;
 }
@@ -348,18 +379,18 @@ static int stress_mremap(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_mremap_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_mremap_info = {
+const stressor_info_t stress_mremap_info = {
 	.stressor = stress_mremap,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_mremap_info = {
+const stressor_info_t stress_mremap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without mremap() system call support"

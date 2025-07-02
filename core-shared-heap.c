@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,9 +29,9 @@
  *   a shared memory heap.
  */
 #if defined(HAVE_BUILTIN_CONSTANT_P)
-#define STRESS_MAX_SHARED_HEAP_SIZE		(16 * KB)
-#else
 #define STRESS_MAX_SHARED_HEAP_SIZE		(64 * KB)
+#else
+#define STRESS_MAX_SHARED_HEAP_SIZE		(256 * KB)
 #endif
 
 /* Used just to determine number of stressors via STRESS_MAX */
@@ -53,8 +53,8 @@ void *stress_shared_heap_init(void)
 {
 	const size_t page_size = stress_get_page_size();
 
-	/* Allocate enough heap for all stressor descriptions with 50% metrics allocated */
-	size_t size = (STRESS_MISC_METRICS_MAX * (32 + sizeof(void *)) * STRESS_MAX) / 2;
+	/* Allocate enough heap for all stressor descriptions with 100% metrics allocated */
+	size_t size = (STRESS_MISC_METRICS_MAX * (32 + sizeof(void *)) * STRESS_MAX);
 
 	size = STRESS_MINIMUM(size, STRESS_MAX_SHARED_HEAP_SIZE);
 	g_shared->shared_heap.out_of_memory = false;
@@ -63,13 +63,14 @@ void *stress_shared_heap_init(void)
 	g_shared->shared_heap.heap = stress_mmap_populate(NULL, size,
 					PROT_READ | PROT_WRITE,
 					MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-	if (g_shared->shared_heap.heap == MAP_FAILED) {
+	if (UNLIKELY(g_shared->shared_heap.heap == MAP_FAILED)) {
 		g_shared->shared_heap.lock = NULL;
 		return NULL;
 	}
+	stress_set_vma_anon_name(g_shared->shared_heap.heap, size, "shared-heap");
 	(void)stress_madvise_mergeable(g_shared->shared_heap.heap, size);
-	g_shared->shared_heap.lock = stress_lock_create();
-	if (!g_shared->shared_heap.lock) {
+	g_shared->shared_heap.lock = stress_lock_create("shared-heap");
+	if (UNLIKELY(!g_shared->shared_heap.lock)) {
 		(void)munmap((void *)g_shared->shared_heap.heap, g_shared->shared_heap.heap_size);
 		g_shared->shared_heap.heap = NULL;
 		return NULL;
@@ -78,10 +79,10 @@ void *stress_shared_heap_init(void)
 }
 
 /*
- *  stress_shared_heap_deinit()
+ *  stress_shared_heap_free()
  *	free shared heap
  */
-void stress_shared_heap_deinit(void)
+void stress_shared_heap_free(void)
 {
 	if (g_shared->shared_heap.out_of_memory) {
 		pr_inf("shared heap: out of memory duplicating some strings, increase STRESS_MAX_SHARED_HEAP_SIZE to fix this\n");
@@ -113,7 +114,7 @@ void *stress_shared_heap_malloc(const size_t size)
 	ssize_t heap_free;
 	void *ptr;
 
-	if (stress_lock_acquire(g_shared->shared_heap.lock) < 0)
+	if (UNLIKELY(stress_lock_acquire(g_shared->shared_heap.lock) < 0))
 		return NULL;
 
 	heap_free = g_shared->shared_heap.heap_size - g_shared->shared_heap.offset;
@@ -142,7 +143,7 @@ char *stress_shared_heap_dup_const(const char *str)
 	size_t len, str_len;
 	stress_shared_heap_str_t *heap_str;
 
-	if (stress_lock_acquire(g_shared->shared_heap.lock) < 0)
+	if (UNLIKELY(stress_lock_acquire(g_shared->shared_heap.lock) < 0))
 		return NULL;
 
 	for (heap_str = (stress_shared_heap_str_t *)g_shared->shared_heap.str_list_head; heap_str; heap_str = heap_str->next) {
@@ -155,7 +156,7 @@ char *stress_shared_heap_dup_const(const char *str)
 	str_len = strlen(str) + 1;
 	len = str_len + sizeof(void *);
 	heap_str = (stress_shared_heap_str_t *)stress_shared_heap_malloc(len);
-	if (!heap_str)
+	if (UNLIKELY(!heap_str))
 		return NULL;
 
 	(void)shim_strscpy(heap_str->str, str, str_len);
@@ -165,7 +166,7 @@ char *stress_shared_heap_dup_const(const char *str)
 	 *  We failed to acquire so we can't add to list, return dup'd string
 	 *  and skip adding it to the list, at least the dup worked!
 	 */
-	if (stress_lock_acquire(g_shared->shared_heap.lock) < 0)
+	if (UNLIKELY(stress_lock_acquire(g_shared->shared_heap.lock) < 0))
 		return heap_str->str;
 
 	/*

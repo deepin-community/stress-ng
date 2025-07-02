@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -39,19 +39,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-/*
- *  stress_set_chdir_dirs()
- *	set number of chdir directories from given option string
- */
-static int stress_set_chdir_dirs(const char *opt)
-{
-	uint32_t chdir_dirs;
-
-	chdir_dirs = stress_get_uint32(opt);
-	stress_check_range("chdir-dirs", (uint64_t)chdir_dirs,
-		MIN_CHDIR_DIRS, MAX_CHDIR_DIRS);
-	return stress_set_setting("chdir-dirs", TYPE_ID_UINT32, &chdir_dirs);
-}
+static const stress_opt_t opts[] = {
+	{ OPT_chdir_dirs, "chdir-dirs", TYPE_ID_UINT32, MIN_CHDIR_DIRS, MAX_CHDIR_DIRS, NULL },
+        END_OPT,
+};
 
 /*
  *  stress_chdir
@@ -69,8 +60,13 @@ static int stress_chdir(stress_args_t *args)
 	bool tidy_info = false;
 	double count = 0.0, duration = 0.0, rate, start_time;
 
-	(void)stress_get_setting("chdir-dirs", &chdir_dirs);
-	chdir_info = calloc(chdir_dirs, sizeof(*chdir_info));
+	if (!stress_get_setting("chdir-dirs", &chdir_dirs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			chdir_dirs = MAX_CHDIR_DIRS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			chdir_dirs = MIN_CHDIR_DIRS;
+	}
+	chdir_info = (stress_chdir_info_t *)calloc(chdir_dirs, sizeof(*chdir_info));
 	if (!chdir_info) {
 		pr_inf_skip("%s: out of memory allocating %" PRIu32 " chdir structs, "
 			    "skipping stressor\n", args->name, chdir_dirs);
@@ -103,7 +99,7 @@ static int stress_chdir(stress_args_t *args)
 	*path = '\0';	/* Keep static analysis tools happy */
 
 	/* Populate */
-	for (i = 0; stress_continue(args) && (i < chdir_dirs); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < chdir_dirs)); i++) {
 		const uint64_t rnd = (uint64_t)stress_mwc32() << 32;
 		const uint32_t gray_code = (i >> 1) ^ i;
 		int flags = O_RDONLY;
@@ -115,7 +111,7 @@ static int stress_chdir(stress_args_t *args)
 #endif
 		(void)stress_temp_filename_args(args,
 			path, sizeof(path), rnd | gray_code);
-		chdir_info[i].path = strdup(path);
+		chdir_info[i].path = shim_strdup(path);
 		if (chdir_info[i].path == NULL)
 			goto abort;
 		rc = mkdir(path, S_IRUSR | S_IWUSR | S_IXUSR);
@@ -150,10 +146,12 @@ static int stress_chdir(stress_args_t *args)
 		goto abort;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		for (i = 0; stress_continue(args) && (i < chdir_dirs); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < chdir_dirs)); i++) {
 			const uint32_t j = stress_mwc32modn(chdir_dirs);
 			const int fd = chdir_info[j].fd >= 0 ? chdir_info[j].fd : chdir_info[0].fd;
 			double t;
@@ -277,7 +275,7 @@ tidy:
 			free(chdir_info[i].path);
 		}
 		/* ..taking a while?, inform user */
-		if ((args->instance == 0) && !tidy_info &&
+		if (stress_instance_zero(args) && !tidy_info &&
 		    (stress_time_now() > start_time + 0.5)) {
 			tidy_info = true;
 			pr_tidy("%s: removing %" PRIu32 " directories\n", args->name, chdir_dirs);
@@ -287,7 +285,7 @@ tidy:
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "chdir calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 err:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	free(chdir_info);
@@ -295,15 +293,10 @@ err:
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_chdir_dirs,	stress_set_chdir_dirs },
-	{ 0,			NULL }
-};
-
-stressor_info_t stress_chdir_info = {
+const stressor_info_t stress_chdir_info = {
 	.stressor = stress_chdir,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

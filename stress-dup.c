@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -159,7 +159,7 @@ static int static_dup2_child(info_t *info)
 		int status;
 
 		(void)stress_kill_pid(info->pid_clone);
-		VOID_RET(int, waitpid(info->pid_clone, &status, (int)__WCLONE));
+		VOID_RET(pid_t, waitpid(info->pid_clone, &status, (int)__WCLONE));
 	}
 
 	(void)close(info->fd);
@@ -214,6 +214,7 @@ static int stress_dup(stress_args_t *args)
 		PROT_READ | PROT_WRITE,
 		MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (info != MAP_FAILED) {
+		stress_set_vma_anon_name(info, sizeof(*info), "dup-race-context");
 		if (stress_temp_dir_mk(args->name, args->pid, args->instance) < 0) {
 			rc = EXIT_NO_RESOURCE;
 			goto tidy_mmap;
@@ -234,6 +235,8 @@ static int stress_dup(stress_args_t *args)
 		goto tidy_fds;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -242,6 +245,11 @@ static int stress_dup(stress_args_t *args)
 		for (n = 1; n < max_fd; n++) {
 			int tmp;
 			double t;
+#if defined(O_CLOEXEC)
+			const int flags = O_CLOEXEC;
+#else
+			const int flags = 0;
+#endif
 
 			t = stress_time_now();
 			fds[n] = dup(fds[0]);
@@ -255,17 +263,17 @@ static int stress_dup(stress_args_t *args)
 			if (UNLIKELY(tmp >= 0))
 				(void)close(tmp);
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* do an invalid dup3 on an invalid fd */
-			tmp = shim_dup3(fds[0], bad_fd, O_CLOEXEC);
+			tmp = shim_dup3(fds[0], bad_fd, flags);
 			if (UNLIKELY(tmp >= 0))
 				(void)close(tmp);
 			else if (errno == ENOSYS)
 				do_dup3 = false;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* do an invalid dup3 with an invalid flag */
@@ -275,7 +283,7 @@ static int stress_dup(stress_args_t *args)
 			else if (errno == ENOSYS)
 				do_dup3 = false;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* do an invalid dup3 with an invalid fd */
@@ -285,24 +293,24 @@ static int stress_dup(stress_args_t *args)
 			else if (errno == ENOSYS)
 				do_dup3 = false;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* do an invalid dup3 with same oldfd and newfd */
-			tmp = shim_dup3(fds[0], fds[0], O_CLOEXEC);
+			tmp = shim_dup3(fds[0], fds[0], flags);
 			if (UNLIKELY(tmp >= 0))
 				(void)close(tmp);
 			else if (errno == ENOSYS)
 				do_dup3 = false;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			if (do_dup3 && stress_mwc1()) {
 				int fd;
 
 				t = stress_time_now();
-				fd = shim_dup3(fds[0], fds[n], O_CLOEXEC);
+				fd = shim_dup3(fds[0], fds[n], flags);
 				/* No dup3 support? then fallback to dup2 */
 				if ((fd < 0) && (errno == ENOSYS)) {
 					t = stress_time_now();
@@ -323,34 +331,39 @@ static int stress_dup(stress_args_t *args)
 				}
 			}
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
-			t = stress_time_now();
-			fds[n] = dup2(fds[0], fds[n]);
-			if (LIKELY(fds[n] >= 0)) {
-				dup_duration += stress_time_now() - t;
-				dup_count += 1;
-			} else {
-				break;
+			if (fds[n] > -1) {
+				t = stress_time_now();
+				fds[n] = dup2(fds[0], fds[n]);
+				if (LIKELY(fds[n] >= 0)) {
+					dup_duration += stress_time_now() - t;
+					dup_count += 1;
+				} else {
+					break;
+				}
 			}
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* dup2 on the same fd should be a no-op */
-			tmp = dup2(fds[n], fds[n]);
-			if (UNLIKELY(tmp != fds[n])) {
-				pr_fail("%s: dup2 failed with same fds, errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
-				break;
+			if (fds[n] > -1) {
+				tmp = dup2(fds[n], fds[n]);
+				if (UNLIKELY(tmp != fds[n])) {
+					pr_fail("%s: dup2 failed with same fds, errno=%d (%s)\n",
+						args->name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
+					break;
+				}
 			}
 			/* do an invalid dup2 on an invalid fd */
 			tmp = dup2(fds[0], bad_fd);
 			if (UNLIKELY(tmp >= 0))
 				(void)close(tmp);
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 #if defined(F_DUPFD)
@@ -366,7 +379,7 @@ static int stress_dup(stress_args_t *args)
 				break;
 			}
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 #endif
 
@@ -398,19 +411,21 @@ tidy_mmap:
 			args->name, info->race_count, info->try_count,
 			info->try_count > 0 ?
 				(double)info->race_count / (double)info->try_count * 100.0 : 0.0);
-		(void)munmap(info, sizeof(*info));
+		(void)munmap((void *)info, sizeof(*info));
 	}
 #endif
 	rate = (dup_count > 0.0) ? (double)dup_duration / dup_count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per dup call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
+	stress_metrics_set(args, 0, "dup calls",
+		dup_count, STRESS_METRIC_TOTAL);
 
 	return rc;
 }
 
-stressor_info_t stress_dup_info = {
+const stressor_info_t stress_dup_info = {
 	.stressor = stress_dup,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

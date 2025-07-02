@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,8 +20,8 @@
 #include "stress-ng.h"
 
 static const stress_help_t help[] = {
-	{ NULL,	"sigabrt N",	 "start N workers generating segmentation faults" },
-	{ NULL,	"sigabrt-ops N", "stop after N bogo segmentation faults" },
+	{ NULL,	"sigabrt N",	 "start N workers generating SIGABRT signals" },
+	{ NULL,	"sigabrt-ops N", "stop after N bogo SIGABRT operations" },
 	{ NULL,	NULL,		 NULL }
 };
 
@@ -33,7 +33,7 @@ typedef struct {
 	volatile double latency;
 } stress_sigabrt_info_t;
 
-static volatile stress_sigabrt_info_t *sigabrt_info;
+static stress_sigabrt_info_t *sigabrt_info;
 
 static void MLOCKED_TEXT stress_sigabrt_handler(int num)
 {
@@ -57,25 +57,28 @@ static void MLOCKED_TEXT stress_sigabrt_handler(int num)
  */
 static int stress_sigabrt(stress_args_t *args)
 {
-	void *sigabrt_mapping;
 	double rate;
+	int rc = EXIT_SUCCESS;
 
 	if (stress_sighandler(args->name, SIGABRT, stress_sigabrt_handler, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
-	sigabrt_mapping = mmap(NULL, args->page_size,
+	sigabrt_info = (stress_sigabrt_info_t *)mmap(NULL, sizeof(*sigabrt_info),
 				PROT_READ | PROT_WRITE,
 				MAP_SHARED | MAP_ANONYMOUS,
 				-1, 0);
-	if (sigabrt_mapping == MAP_FAILED) {
-		pr_inf_skip("%s: failed to mmap shared page, "
+	if (sigabrt_info == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu byte sigabort information%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, sizeof(*sigabrt_info),
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
-	sigabrt_info = (stress_sigabrt_info_t *)sigabrt_mapping;
+	stress_set_vma_anon_name((void *)sigabrt_info, sizeof(*sigabrt_info), "state");
 	sigabrt_info->count = 0.0;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -91,9 +94,9 @@ again:
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
-			pr_fail("%s: fork failed: %d (%s)\n",
+			pr_fail("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
 		} else if (pid == 0) {
@@ -119,7 +122,8 @@ again:
 
 			_exit(EXIT_FAILURE);
 		} else {
-			int ret, status;
+			pid_t ret;
+			int  status;
 
 rewait:
 			ret = shim_waitpid(pid, &status, 0);
@@ -127,45 +131,49 @@ rewait:
 				if (errno == EINTR) {
 					goto rewait;
 				}
-				pr_fail("%s: waitpid failed: %d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_fail("%s: waitpid() on PID %" PRIdMAX " failed, %d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 			} else {
 				if (WIFSIGNALED(status) &&
 				    (WTERMSIG(status) == SIGABRT)) {
 					if (sigabrt_info->handler_enabled) {
 						if (sigabrt_info->signalled == false) {
-							pr_fail("%s SIGABORT signal handler did not get called\n",
+							pr_fail("%s SIGABRT signal handler did not get called\n",
 								args->name);
+							rc = EXIT_FAILURE;
 						}
 					} else {
 						if (sigabrt_info->signalled == true) {
-							pr_fail("%s SIGABORT signal handler was unexpectedly called\n",
+							pr_fail("%s SIGABRT signal handler was unexpectedly called\n",
 								args->name);
+							rc = EXIT_FAILURE;
 						}
 					}
 					stress_bogo_inc(args);
 				} else if (WIFEXITED(status)) {
 					pr_fail("%s: child did not abort as expected\n",
 						args->name);
+					rc = EXIT_FAILURE;
 				}
 			}
 		}
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	rate = (sigabrt_info->count > 0.0) ? sigabrt_info->latency / sigabrt_info->count : 0.0;
 	stress_metrics_set(args, 0, "nanosec SIGABRT latency",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
-	(void)munmap((void *)sigabrt_mapping, args->page_size);
+	(void)munmap((void *)sigabrt_info, sizeof(*sigabrt_info));
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_sigabrt_info = {
+const stressor_info_t stress_sigabrt_info = {
 	.stressor = stress_sigabrt,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

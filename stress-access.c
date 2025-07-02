@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-capabilities.h"
 #include "core-killpid.h"
+
+#define STRESS_ACCESS_PROCS	(2)
 
 typedef struct {
 	const mode_t	chmod_mode;
@@ -153,23 +155,25 @@ static int shim_faccessat(int dir_fd, const char *pathname, int mode, int flags)
  */
 static pid_t stress_access_spawn(
 	stress_args_t *args,
-	const char *filename)
+	const char *filename,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid)
 {
-	pid_t pid;
-
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		pr_inf_skip("%s: fork failed %d (%s), skipping concurrent access stressing\n",
 			args->name, errno, strerror(errno));
 		return -1;
-	} else if (pid == 0) {
+	} else if (s_pid->pid == 0) {
 		/* Concurrent stressor */
-
 		size_t j = 0;
 
+		s_pid->pid = getpid();
+		stress_sync_start_wait_s_pid(s_pid);
+
 		stress_mwc_reseed();
-		shim_nice(1);
-		shim_nice(1);
+		(void)shim_nice(1);
+		(void)shim_nice(1);
 
 		do {
 			double t;
@@ -202,22 +206,35 @@ static pid_t stress_access_spawn(
 			metrics[1].duration += stress_time_now() - t;
 			metrics[1].count += 1.0;
 
+			if (g_opt_flags & OPT_FLAGS_AGGRESSIVE) {
+				t = stress_time_now();
+				VOID_RET(int, access(filename, modes[0].access_mode));
+				VOID_RET(int, access(filename, modes[j].access_mode));
+				VOID_RET(int, access(filename, modes[0].access_mode));
+				VOID_RET(int, access(filename, modes[j].access_mode));
+				metrics[1].duration += stress_time_now() - t;
+				metrics[1].count += 4.0;
+			} else {
+				(void)shim_sched_yield();
+			}
+
 			j++;
-			if (j >= SIZEOF_ARRAY(modes))
+			if (UNLIKELY(j >= SIZEOF_ARRAY(modes)))
 				j = 0;
-			shim_sched_yield();
-		} while(stress_continue(args));
+		} while (stress_continue(args));
 		_exit(0);
+	} else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
 
-static void stress_access_reap(pid_t *pid)
+static void stress_access_reap(stress_pid_t *s_pid)
 {
-	if (*pid == -1)
+	if (s_pid->pid == -1)
 		return;
-	(void)stress_kill_pid_wait(*pid, NULL);
-	*pid = -1;
+	(void)stress_kill_pid_wait(s_pid->pid, NULL);
+	s_pid->pid = -1;
 }
 
 /*
@@ -235,19 +252,31 @@ static int stress_access(stress_args_t *args)
 #endif
 	const bool is_root = stress_check_capability(SHIM_CAP_IS_ROOT);
 	const char *fs_type;
-	pid_t pid[2] = { -1, -1 };
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	uint32_t rnd32 = stress_mwc32();
 	/* 3 metrics, index 0 for parent, 1 for child, 2 for total */
 	size_t i, metrics_size = sizeof(*metrics) * 3;
 	double rate;
 	bool report_chmod_error = true;
-	static const char *ignore_chmod_fs[] = {
-		"exfat", "msdos", "hfs", "fuse"
+	static const char * const ignore_chmod_fs[] = {
+		"exfat",
+		"msdos",
+		"hfs",
+		"fuse"
 	};
 
+	s_pids = stress_sync_s_pids_mmap(STRESS_ACCESS_PROCS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, STRESS_ACCESS_PROCS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
+
 	ret = stress_temp_dir_mk_args(args);
-	if (ret < 0)
+	if (ret < 0) {
+		(void)stress_sync_s_pids_munmap(s_pids, STRESS_ACCESS_PROCS);
 		return stress_exit_status(-ret);
+	}
 
 	(void)stress_temp_filename_args(args,
 		filename1, sizeof(filename1), rnd32);
@@ -274,7 +303,7 @@ static int stress_access(stress_args_t *args)
 	 * due to limited mode bits in the underlying file system,
 	 * so silently ignore error reports on these
 	 */
-	for (i = 0; i > SIZEOF_ARRAY(ignore_chmod_fs); i++) {
+	for (i = 0; i < SIZEOF_ARRAY(ignore_chmod_fs); i++) {
 		if (strcmp(fs_type, ignore_chmod_fs[i]) == 0) {
 			report_chmod_error = false;
 			break;
@@ -286,24 +315,29 @@ static int stress_access(stress_args_t *args)
 			metrics_size, PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (metrics == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %zd bytes for metrics, skipping stressor\n",
-			args->name, metrics_size);
+		pr_inf_skip("%s: cannot mmap %zu bytes for metrics%s, skipping stressor\n",
+			args->name, metrics_size, stress_get_memfree_str());
 		rc = EXIT_NO_RESOURCE;
 		goto tidy;
 	}
+	stress_set_vma_anon_name(metrics, metrics_size, "metrics");
+	stress_zero_metrics(metrics, 2);
 
-	metrics[0].duration = 0.0;
-	metrics[0].count = 0.0;
-	metrics[1].duration = 0.0;
-	metrics[1].count = 0.0;
+	stress_sync_start_init(&s_pids[0]);
+	stress_sync_start_init(&s_pids[1]);
 
-	pid[0] = stress_access_spawn(args, filename2);
-	if (pid[0] >= 0) {
-		pid[1] = stress_access_spawn(args, filename2);
-		if (pid[1] < 0)
-			stress_access_reap(&pid[0]);
+	if (stress_access_spawn(args, filename2, &s_pids_head, &s_pids[0]) >= 0) {
+		if (stress_access_spawn(args, filename2, &s_pids_head, &s_pids[1]) < 0) {
+			stress_access_reap(&s_pids[0]);
+			pr_inf_skip("%s: cannot spawn access child process, skipping stressor\n", args->name);
+			rc = EXIT_NO_RESOURCE;
+			goto unmap;
+		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -314,10 +348,11 @@ static int stress_access(stress_args_t *args)
 #endif
 
 			ret = fchmod(fd1, modes[i].chmod_mode);
-			if (CHMOD_ERR(ret)) {
-				pr_fail("%s: fchmod %3.3o failed: %d (%s)%s\n",
+			if (UNLIKELY(CHMOD_ERR(ret))) {
+				pr_fail("%s: fchmod %3.3o failed, errno=%d (%s)%s\n",
 					args->name, (unsigned int)modes[i].chmod_mode,
 					errno, strerror(errno), fs_type);
+				rc = EXIT_FAILURE;
 				goto unmap;
 			}
 			t = stress_time_now();
@@ -327,11 +362,13 @@ static int stress_access(stress_args_t *args)
 				metrics[0].count += 1.0;
 			} else {
 				if (report_chmod_error) {
-					pr_fail("%s: access %3.3o on chmod mode %3.3o failed: %d (%s)%s\n",
+					pr_fail("%s: access %3.3o on chmod mode %3.3o failed, errno=%d (%s)%s\n",
 						args->name,
 						modes[i].access_mode,
 						(unsigned int)modes[i].chmod_mode,
 						errno, strerror(errno), fs_type);
+					rc = EXIT_FAILURE;
+					goto unmap;
 				}
 			}
 #if defined(HAVE_FACCESSAT)
@@ -342,11 +379,13 @@ static int stress_access(stress_args_t *args)
 				metrics[0].count += 1.0;
 			} else if (errno != ENOSYS) {
 				if (report_chmod_error) {
-					pr_fail("%s: faccessat %3.3o on chmod mode %3.3o failed: %d (%s)%s\n",
+					pr_fail("%s: faccessat %3.3o on chmod mode %3.3o failed, errno=%d (%s)%s\n",
 						args->name,
 						modes[i].access_mode,
 						(unsigned int)modes[i].chmod_mode,
 						errno, strerror(errno), fs_type);
+					rc = EXIT_FAILURE;
+					goto unmap;
 				}
 			}
 
@@ -375,11 +414,13 @@ static int stress_access(stress_args_t *args)
 				metrics[0].count += 1.0;
 			} else if (errno != ENOSYS) {
 				if (report_chmod_error) {
-					pr_fail("%s: faccessat2 %3.3o on chmod mode %3.3o failed: %d (%s)%s\n",
+					pr_fail("%s: faccessat2 %3.3o on chmod mode %3.3o failed, errno=%d (%s)%s\n",
 						args->name,
 						modes[i].access_mode,
 						(unsigned int)modes[i].chmod_mode,
 						errno, strerror(errno), fs_type);
+					rc = EXIT_FAILURE;
+					goto unmap;
 				}
 			}
 			/*
@@ -397,20 +438,24 @@ static int stress_access(stress_args_t *args)
 
 				ret = fchmod(fd1, chmod_mode);
 				if (CHMOD_ERR(ret)) {
-					pr_fail("%s: fchmod %3.3o failed: %d (%s)%s\n",
+					pr_fail("%s: fchmod %3.3o failed, errno=%d (%s)%s\n",
 						args->name, (unsigned int)chmod_mode,
 						errno, strerror(errno), fs_type);
+					rc = EXIT_FAILURE;
 					goto unmap;
 				}
 				t = stress_time_now();
+				errno = 0;
 				ret = access(filename1, modes[i].access_mode);
 				if (UNLIKELY((ret == 0) && dont_ignore)) {
 					if (report_chmod_error) {
-						pr_fail("%s: access %3.3o on chmod mode %3.3o was ok (not expected): %d (%s)%s\n",
+						pr_fail("%s: access %3.3o on chmod mode %3.3o was ok (not expected), errno=%d (%s)%s\n",
 							args->name,
 							modes[i].access_mode,
 							(unsigned int)chmod_mode,
 							errno, strerror(errno), fs_type);
+						rc = EXIT_FAILURE;
+						goto unmap;
 					}
 				} else {
 					metrics[0].duration = stress_time_now() - t;
@@ -418,15 +463,18 @@ static int stress_access(stress_args_t *args)
 				}
 #if defined(HAVE_FACCESSAT)
 				t = stress_time_now();
+				errno = 0;
 				ret = faccessat(AT_FDCWD, filename1, modes[i].access_mode,
 					AT_SYMLINK_NOFOLLOW);
 				if (UNLIKELY((ret == 0) && dont_ignore)) {
 					if (report_chmod_error) {
-						pr_fail("%s: faccessat %3.3o on chmod mode %3.3o was ok (not expected): %d (%s)%s\n",
+						pr_fail("%s: faccessat %3.3o on chmod mode %3.3o was ok (not expected), errno=%d (%s)%s\n",
 							args->name,
 							modes[i].access_mode,
 							(unsigned int)chmod_mode,
 							errno, strerror(errno), fs_type);
+						rc = EXIT_FAILURE;
+						goto unmap;
 					}
 				} else {
 					metrics[0].duration = stress_time_now() - t;
@@ -444,7 +492,7 @@ static int stress_access(stress_args_t *args)
 	metrics[2].count = metrics[0].count + metrics[1].count;
 
 	rate = (metrics[2].duration > 0.0) ? metrics[2].count / metrics[2].duration : 0.0;
-	stress_metrics_set(args, 0, "access calls per sec", rate, STRESS_HARMONIC_MEAN);
+	stress_metrics_set(args, 0, "access calls per sec", rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	rc = EXIT_SUCCESS;
 
@@ -453,8 +501,8 @@ unmap:
 tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	stress_access_reap(&pid[1]);
-	stress_access_reap(&pid[0]);
+	stress_access_reap(&s_pids[1]);
+	stress_access_reap(&s_pids[0]);
 
 	if (fd2 >= 0) {
 		(void)fchmod(fd2, S_IRUSR | S_IWUSR);
@@ -467,6 +515,7 @@ tidy:
 	(void)shim_unlink(filename2);
 	(void)shim_unlink(filename1);
 	(void)stress_temp_dir_rm_args(args);
+	(void)stress_sync_s_pids_munmap(s_pids, STRESS_ACCESS_PROCS);
 
 	return rc;
 }
@@ -477,9 +526,9 @@ static const stress_help_t help[] = {
 	{ NULL, NULL,		NULL }
 };
 
-stressor_info_t stress_access_info = {
+const stressor_info_t stress_access_info = {
 	.stressor = stress_access,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

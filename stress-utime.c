@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-pragma.h"
 
+#include <time.h>
+
 #if defined(HAVE_UTIME_H)
 #include <utime.h>
 #else
@@ -36,30 +38,25 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_utime_fsync(const char *opt)
-{
-	return stress_set_setting_true("utime-fsync", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_utime_fsync,	stress_set_utime_fsync },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_utime_fsync, "utime-fsync", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_UTIME_H)
 
-#if defined(HAVE_UTIME) &&	\
-    defined(HAVE_UTIMBUF)
-static inline int shim_utime(const char *filename, const struct utimbuf *times)
+static char *stress_utime_str(char *str, const size_t len, const time_t val)
 {
-#if defined(__NR_utime) &&	\
-    defined(HAVE_SYSCALL)
-	return (int)syscall(__NR_utime, filename, times);
-#else
-	return utime(filename, times);
-#endif
+	struct tm *tm = localtime(&val);
+
+	if (!tm) {
+		/* Just return time in secs since EPOCH */
+		(void)snprintf(str, len, "%jd", (intmax_t)val);
+		return str;
+	}
+	(void)strftime(str, len, "%d/%m/%Y %H:%M:%S", tm);
+	return str;
 }
-#endif
 
 /*
  *  stress_utime()
@@ -73,6 +70,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 	char path[PATH_MAX];
 #endif
 	int dir_fd = -1;
+	int rc = EXIT_SUCCESS;
 	char filename[PATH_MAX];
 	char hugename[PATH_MAX + 16];
 	int ret, fd;
@@ -104,7 +102,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		filename, sizeof(filename), stress_mwc32());
 	if ((fd = open(filename, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR)) < 0) {
 		ret = stress_exit_status(errno);
-		pr_err("%s: open failed: errno=%d (%s)\n",
+		pr_err("%s: open failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)stress_temp_dir_rm_args(args);
 		if (dir_fd >= 0) /* cppcheck-suppress knownConditionTrueFalse */
@@ -112,8 +110,14 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		return ret;
 	}
 
+#if defined(HAVE_PATHCONF) &&	\
+    defined(_PC_TIMESTAMP_RESOLUTION)
+	VOID_RET(long int, pathconf(filename, _PC_TIMESTAMP_RESOLUTION));
+#endif
 	stress_rndstr(hugename, sizeof(hugename));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -128,7 +132,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		timevals[1] = timevals[0];
 		if (LIKELY(metrics_count > 0)) {
 			if (UNLIKELY(utimes(filename, timevals) < 0)) {
-				pr_dbg("%s: utimes failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: utimes failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -136,7 +140,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		} else {
 			t = stress_time_now();
 			if (UNLIKELY(utimes(filename, timevals) < 0)) {
-				pr_dbg("%s: utimes failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: utimes failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -147,7 +151,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 
 		if (LIKELY(metrics_count > 0)) {
 			if (UNLIKELY(utimes(filename, NULL) < 0)) {
-				pr_dbg("%s: utimes failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: utimes failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -155,7 +159,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		} else {
 			t = stress_time_now();
 			if (UNLIKELY(utimes(filename, NULL) < 0)) {
-				pr_dbg("%s: utimes failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: utimes failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -205,7 +209,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 #if defined(HAVE_FUTIMENS)
 		if (LIKELY(metrics_count > 0)) {
 			if (UNLIKELY(futimens(fd, NULL) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -213,7 +217,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		} else {
 			t = stress_time_now();
 			if (UNLIKELY(futimens(fd, NULL) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -236,7 +240,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		ts[1].tv_nsec = UTIME_NOW;
 		if (LIKELY(metrics_count > 0)) {
 			if (UNLIKELY(futimens(fd, ts) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -244,7 +248,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		} else {
 			t = stress_time_now();
 			if (UNLIKELY(futimens(fd, ts) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -291,7 +295,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		ts[0].tv_nsec = UTIME_OMIT;
 		if (LIKELY(metrics_count > 0)) {
 			if (UNLIKELY(futimens(fd, ts) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -299,7 +303,7 @@ static int OPTIMIZE3 stress_utime(stress_args_t *args)
 		} else {
 			t = stress_time_now();
 			if (UNLIKELY(futimens(fd, ts) < 0)) {
-				pr_dbg("%s: futimens failed: errno=%d (%s)%s\n",
+				pr_dbg("%s: futimens failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno),
 					stress_get_fs_type(filename));
 				break;
@@ -392,24 +396,27 @@ STRESS_PRAGMA_POP
 		{
 			struct utimbuf utbuf;
 			struct timeval tv;
+			int i;
 
 			(void)gettimeofday(&tv, NULL);
 			utbuf.actime = (time_t)tv.tv_sec;
 			utbuf.modtime = utbuf.actime;
 
 			if (LIKELY(metrics_count > 0)) {
-				if (UNLIKELY(shim_utime(filename, &utbuf) < 0)) {
-					pr_fail("%s: utime failed: errno=%d (%s)%s\n",
+				if (UNLIKELY(utime(filename, &utbuf) < 0)) {
+					pr_fail("%s: utime failed, errno=%d (%s)%s\n",
 						args->name, errno, strerror(errno),
 						stress_get_fs_type(filename));
+					rc = EXIT_FAILURE;
 					break;
 				}
 			} else {
 				t = stress_time_now();
-				if (UNLIKELY(shim_utime(filename, &utbuf) < 0)) {
-					pr_fail("%s: utime failed: errno=%d (%s)%s\n",
+				if (UNLIKELY(utime(filename, &utbuf) < 0)) {
+					pr_fail("%s: utime failed, errno=%d (%s)%s\n",
 						args->name, errno, strerror(errno),
 						stress_get_fs_type(filename));
+					rc = EXIT_FAILURE;
 					break;
 				}
 				duration += stress_time_now() - t;
@@ -421,28 +428,42 @@ STRESS_PRAGMA_POP
 
 				if (shim_stat(filename, &statbuf) == 0) {
 					if (statbuf.st_atime < tv.tv_sec) {
-						pr_fail("%s: utime failed: access time is less than expected time\n",
-							args->name);
+						char t1[64], t2[64];
+
+						pr_fail("%s: utime failed, access time %s is less than expected time %s\n",
+							args->name,
+							stress_utime_str(t1, sizeof(t1), statbuf.st_atime),
+							stress_utime_str(t2, sizeof(t2), tv.tv_sec));
+						rc = EXIT_FAILURE;
+						break;
 					}
 					if (statbuf.st_mtime < tv.tv_sec) {
-						pr_fail("%s: utime failed: modified time is less than expected time\n",
-							args->name);
+						char t1[64], t2[64];
+
+						pr_fail("%s: utime failed, modified time %s is less than expected time %s\n",
+							args->name,
+							stress_utime_str(t1, sizeof(t1), statbuf.st_mtime),
+							stress_utime_str(t2, sizeof(t2), tv.tv_sec));
+						rc = EXIT_FAILURE;
+						break;
 					}
 				}
 			}
 			if (LIKELY(metrics_count > 0)) {
-				if (UNLIKELY(shim_utime(filename, NULL) < 0)) {
-					pr_fail("%s: utime failed: errno=%d (%s)%s\n",
+				if (UNLIKELY(utime(filename, NULL) < 0)) {
+					pr_fail("%s: utime failed, errno=%d (%s)%s\n",
 						args->name, errno, strerror(errno),
 						stress_get_fs_type(filename));
+					rc = EXIT_FAILURE;
 					break;
 				}
 			} else {
 				t = stress_time_now();
-				if (UNLIKELY(shim_utime(filename, NULL) < 0)) {
-					pr_fail("%s: utime failed: errno=%d (%s)%s\n",
+				if (UNLIKELY(utime(filename, NULL) < 0)) {
+					pr_fail("%s: utime failed, errno=%d (%s)%s\n",
 						args->name, errno, strerror(errno),
 						stress_get_fs_type(filename));
+					rc = EXIT_FAILURE;
 					break;
 				}
 				duration += stress_time_now() - t;
@@ -450,10 +471,24 @@ STRESS_PRAGMA_POP
 			}
 
 			/* Exercise invalid timename, ENOENT */
-			VOID_RET(int, shim_utime("", &utbuf));
+			VOID_RET(int, utime("", &utbuf));
 
 			/* Exercise huge filename, ENAMETOOLONG */
-			VOID_RET(int, shim_utime(hugename, &utbuf));
+			VOID_RET(int, utime(hugename, &utbuf));
+
+			/* Exercise ranges of +ve times */
+			utbuf.actime = (1ULL << ((sizeof(time_t) * 8) - 1)) - 1;
+			utbuf.modtime = utbuf.actime;
+			VOID_RET(int, utime(filename, &utbuf));
+			for (i = 0; utbuf.actime && (i < 64); i++) {
+				utbuf.actime >>= 1;
+				utbuf.modtime = utbuf.actime;
+				VOID_RET(int, utime(filename, &utbuf));
+			}
+
+			utbuf.actime = ~(time_t)0;
+			utbuf.modtime = utbuf.actime;
+			VOID_RET(int, utime(filename, &utbuf));
 		}
 		/* forces metadata writeback */
 		if (utime_fsync) {
@@ -462,7 +497,7 @@ STRESS_PRAGMA_POP
 #else
 		UNEXPECTED
 #endif
-		if (metrics_count++ > 1000)
+		if (UNLIKELY(metrics_count++ > 1000))
 			metrics_count = 0;
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
@@ -471,7 +506,7 @@ STRESS_PRAGMA_POP
 
 	rate = (duration > 0.0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "utime calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 #if defined(O_DIRECTORY) &&	\
     defined(O_PATH) &&		\
@@ -483,23 +518,23 @@ STRESS_PRAGMA_POP
 	(void)shim_unlink(filename);
 	(void)stress_temp_dir_rm_args(args);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_utime_info = {
+const stressor_info_t stress_utime_info = {
 	.stressor = stress_utime,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_utime_info = {
+const stressor_info_t stress_utime_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without utime.h"

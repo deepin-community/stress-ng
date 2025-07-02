@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,16 +36,14 @@
 #define TARGET_CLONE_MMX
 #endif
 
-#if defined(HAVE_TARGET_CLONES_AVX) &&	\
-    NEED_GNUC(8,0,0)
+#if defined(HAVE_TARGET_CLONES_AVX)
 #define TARGET_CLONE_AVX	"avx",
 #define TARGET_CLONE_USE
 #else
 #define TARGET_CLONE_AVX
 #endif
 
-#if defined(HAVE_TARGET_CLONES_AVX2) &&	\
-    NEED_GNUC(8,0,0)
+#if defined(HAVE_TARGET_CLONES_AVX2)
 #define TARGET_CLONE_AVX2	"avx2",
 #define TARGET_CLONE_USE
 #else
@@ -94,8 +92,7 @@
 #define TARGET_CLONE_SSE4_2
 #endif
 
-#if defined(HAVE_TARGET_CLONES_SKYLAKE_AVX512) &&	\
-    NEED_GNUC(8,0,0)
+#if defined(HAVE_TARGET_CLONES_SKYLAKE_AVX512)
 #define TARGET_CLONE_SKYLAKE_AVX512	"arch=skylake-avx512",
 #define TARGET_CLONE_USE
 #else
@@ -145,7 +142,15 @@
 #define TARGET_CLONE_GRANITERAPIDS
 #endif
 
-#if defined(HAVE_TARGET_CLONES_PANTHERLAKE) &&		\
+#if defined(HAVE_TARGET_CLONES_DIAMONDRAPIDS) &&	\
+    defined(HAVE_COMPILER_GCC_OR_MUSL)
+#define TARGET_CLONE_DIAMONDRAPIDS "arch=diamondrapids",
+#define TARGET_CLONE_USE
+#else
+#define TARGET_CLONE_DIAMONDRAPIDS
+#endif
+
+#if defined(HAVE_TARGET_CLONES_PANTHERLAKE) &&	\
     defined(HAVE_COMPILER_GCC_OR_MUSL)
 #define TARGET_CLONE_PANTHERLAKE "arch=pantherlake",
 #define TARGET_CLONE_USE
@@ -159,6 +164,14 @@
 #define TARGET_CLONE_USE
 #else
 #define TARGET_CLONE_ARROWLAKE
+#endif
+
+#if defined(HAVE_TARGET_CLONES_LUNARLAKE) &&		\
+    defined(HAVE_COMPILER_GCC_OR_MUSL)
+#define TARGET_CLONE_LUNARLAKE "arch=lunarlake",
+#define TARGET_CLONE_USE
+#else
+#define TARGET_CLONE_LUNARLAKE
 #endif
 
 #define TARGET_CLONES_ALL		\
@@ -179,7 +192,9 @@
 	TARGET_CLONE_ROCKETLAKE		\
 	TARGET_CLONE_GRANITERAPIDS	\
 	TARGET_CLONE_ARROWLAKE		\
+	TARGET_CLONE_LUNARLAKE		\
 	TARGET_CLONE_PANTHERLAKE	\
+	TARGET_CLONE_DIAMONDRAPIDS	\
 	"default"
 
 #if defined(TARGET_CLONE_USE)
@@ -187,12 +202,44 @@
 #endif
 #endif
 
-/* GCC5.0+ target_clones attribute, ppc64 */
+/* GCC5.0+ target_clones attributes, ppc64 */
 
 #if defined(STRESS_ARCH_PPC64) &&	\
-    defined(HAVE_TARGET_CLONES) && 	\
-    defined(HAVE_TARGET_CLONES_POWER9)
-#define TARGET_CLONES	__attribute__((target_clones("cpu=power9,default")))
+    defined(HAVE_TARGET_CLONES)
+
+#if defined(HAVE_TARGET_CLONES_POWER9) &&	\
+    defined(HAVE_BUILTIN_CPU_IS_POWER10)
+#define TARGET_CLONE_POWER9 "cpu=power9",
+#define TARGET_CLONE_USE
+#else
+#define TARGET_CLONE_POWER9
+#endif
+
+#if defined(HAVE_TARGET_CLONES_POWER10)	&&	\
+    defined(HAVE_BUILTIN_CPU_IS_POWER10)
+#define TARGET_CLONE_POWER10 "cpu=power10",
+#define TARGET_CLONE_USE
+#else
+#define TARGET_CLONE_POWER10
+#endif
+
+#if defined(HAVE_TARGET_CLONES_POWER11) &&	\
+    defined(HAVE_BUILTIN_CPU_IS_POWER11)
+#define TARGET_CLONE_POWER11 "cpu=power11",
+#define TARGET_CLONE_USE
+#else
+#define TARGET_CLONE_POWER11
+#endif
+
+#define TARGET_CLONES_ALL	\
+	TARGET_CLONE_POWER9	\
+	TARGET_CLONE_POWER10	\
+	TARGET_CLONE_POWER11	\
+	"default"
+
+#if defined(TARGET_CLONE_USE)
+#define TARGET_CLONES	__attribute__((target_clones(TARGET_CLONES_ALL)))
+#endif
 #endif
 
 #if !defined(TARGET_CLONES)

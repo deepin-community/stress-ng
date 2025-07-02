@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,8 +20,8 @@
 #define CORE_MMAP_H
 
 extern void stress_mmap_set(uint8_t *buf, const size_t sz, const size_t page_size);
-extern int stress_mmap_check( uint8_t *buf, const size_t sz, const size_t page_size);
+extern int stress_mmap_check(uint8_t *buf, const size_t sz, const size_t page_size);
 extern void stress_mmap_set_light(uint8_t *buf, const size_t sz, const size_t page_size);
-extern int stress_mmap_check_light( uint8_t *buf, const size_t sz, const size_t page_size);
+extern int stress_mmap_check_light(uint8_t *buf, const size_t sz, const size_t page_size);
 
 #endif

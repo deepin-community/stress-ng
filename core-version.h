@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,7 +21,7 @@
 #define STRESS_VERSION_H
 
 #define STRESS_VERSION_NUMBER(major, minor, patchlevel)		\
-	((major * 10000) + (minor * 100) + patchlevel)
+	(((major) * 10000) + ((minor) * 100) + (patchlevel))
 
 #if defined(__GLIBC__) &&	\
     defined(__GLIBC_MINOR__)

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 
+#include <ctype.h>
+
 #define MIN_DIRDEEP_BYTES	(0)
 #define MAX_DIRDEEP_BYTES	(MAX_FILE_LIMIT)
 
@@ -36,67 +38,24 @@ static const stress_help_t help[] = {
 static const char stress_dir_names[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /*
- *  stress_set_dirdeep_bytes()
- *      set size of files to be created
- */
-static int stress_set_dirdeep_bytes(const char *opt)
-{
-	off_t dirdeep_bytes;
-
-	dirdeep_bytes = (off_t)stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("dirdeep-bytes", (uint64_t)dirdeep_bytes,
-		MIN_DIRDEEP_BYTES, MAX_DIRDEEP_BYTES);
-	return stress_set_setting("dirdeep-bytes", TYPE_ID_OFF_T, &dirdeep_bytes);
-}
-
-/*
- *  stress_set_dirdeep_dirs()
- *      set number of dirdeep directories from given option string
- */
-static int stress_set_dirdeep_dirs(const char *opt)
-{
-	uint32_t dirdeep_dirs;
-
-	dirdeep_dirs = stress_get_uint32(opt);
-
-	stress_check_range("dirdeep-dirs", (uint64_t)dirdeep_dirs, 1, strlen(stress_dir_names));
-	return stress_set_setting("dirdeep-dirs", TYPE_ID_UINT32, &dirdeep_dirs);
-}
-
-/*
  *  stress_set_dirdeep_inodes()
  *      set max number of inodes to consume
  */
-static int stress_set_dirdeep_inodes(const char *opt)
+static void stress_dirdeep_inodes(const char *opt_name, const char *opt_arg, stress_type_id_t *type_id, void *value)
 {
 	uint64_t inodes = stress_get_filesystem_available_inodes();
-	uint64_t dirdeep_inodes;
+	uint64_t *dirdeep_inodes = (uint64_t *)value;
 
-
+	*type_id = TYPE_ID_UINT64;
 	if (inodes == 0) {
 		const char *type = stress_get_fs_type(stress_get_temp_path());
 
-		pr_inf("cannot determine number of available free inodes, defaulting to maximum allowed%s\n", type);
-		dirdeep_inodes = ~0ULL;
-		return stress_set_setting("dirdeep-inodes", TYPE_ID_UINT64, &dirdeep_inodes);
+		pr_inf("%s: cannot determine number of available free inodes, defaulting to maximum allowed%s\n", opt_name, type);
+		*dirdeep_inodes = ~0ULL;
+	} else {
+		*dirdeep_inodes = stress_get_uint64_percent(opt_arg, 1, inodes,
+			"cannot determine number of available free inodes");
 	}
-
-	dirdeep_inodes = stress_get_uint64_percent(opt, 1, inodes,
-		"cannot determine number of available free inodes");
-	return stress_set_setting("dirdeep-inodes", TYPE_ID_UINT64, &dirdeep_inodes);
-}
-
-/*
- *  stress_set_dirdeep_files()
- *      set max number of files to create per directory level
- */
-static int stress_set_dirdeep_files(const char *opt)
-{
-	uint32_t dirdeep_files;
-
-	dirdeep_files = stress_get_uint32(opt);
-	stress_check_range("dirdeep-files", (uint64_t)dirdeep_files, 0, 65535);
-	return stress_set_setting("dirdeep-files", TYPE_ID_UINT32, &dirdeep_files);
 }
 
 /*
@@ -138,7 +97,7 @@ static bool stress_dirdeep_make(
 	}
 	if (len + 2 >= path_len)
 		return true;
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return true;
 
 	errno = 0;
@@ -150,7 +109,6 @@ static bool stress_dirdeep_make(
 		}
 		pr_fail("%s: mkdir failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
-		printf("%s\n", path);
 		return true;
 	}
 	stress_bogo_inc(args);
@@ -182,7 +140,7 @@ static bool stress_dirdeep_make(
 	path[len + 1] = 'h';	/* hardlink */
 	VOID_RET(int, link(linkpath, path));
 
-	for (i = 0; stress_continue(args) && (i < dirdeep_dirs); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < dirdeep_dirs)); i++) {
 		uint32_t j;
 		bool finish;
 
@@ -193,7 +151,7 @@ static bool stress_dirdeep_make(
 				dirdeep_bytes, inodes_start, inodes_estimate, inodes_min,
 				depth + 1);
 		if (len + 6 < path_len) {
-			for (j = 0; stress_continue(args) && (j < dirdeep_files); j++) {
+			for (j = 0; LIKELY(stress_continue(args) && (j < dirdeep_files)); j++) {
 				int fd;
 
 				(void)snprintf(path + len, path_len - len, "/%-4.4" PRIx32, j);
@@ -206,7 +164,7 @@ static bool stress_dirdeep_make(
 #else
 					ret = shim_fallocate(fd, 0, (off_t)0, dirdeep_bytes);
 #endif
-					if (ret < 0) {
+					if (ret != 0) {
 						(void)close(fd);
 						break;
 					}
@@ -219,7 +177,7 @@ static bool stress_dirdeep_make(
 			break;
 	}
 	path[len] = '\0';
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return true;
 
 #if defined(HAVE_LINKAT) &&	\
@@ -312,7 +270,7 @@ static int stress_dir_exercise(
 		{ sec, nsec }
 	};
 #endif
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 
 	if (len + 2 >= path_len)
@@ -322,7 +280,7 @@ static int stress_dir_exercise(
 	if (n < 0)
 		return -1;
 
-	for (i = 0; (i < n) && stress_continue(args); i++) {
+	for (i = 0; LIKELY((i < n) && stress_continue(args)); i++) {
 		register int ch;
 
 		/* Sanity check */
@@ -337,7 +295,7 @@ static int stress_dir_exercise(
 		path[len + 1] = (char)ch;
 		path[len + 2] = '\0';
 
-		if (isdigit(ch) || isupper(ch)) {
+		if (isdigit((unsigned char)ch) || isupper((unsigned char)ch)) {
 			stress_dir_exercise(args, path, len + 2, path_len);
 		} else {
 			int fd;
@@ -397,14 +355,14 @@ static void stress_dir_tidy(
 	 * If recursive deletion is taking more than 1 second then
 	 * inform the user
 	 */
-	if ((args->instance == 0) && !tidy_info &&
+	if (stress_instance_zero(args) && !tidy_info &&
 	    (stress_time_now() > start_time + 1.0)) {
 		tidy_info = true;
 		pr_tidy("%s: removing directories\n", args->name);
 	}
 
 	while (n--) {
-		char *name = namelist[n]->d_name;
+		const char *name = namelist[n]->d_name;
 		register const int ch = (int)name[0];
 
 		if (ch == '.') {
@@ -413,7 +371,7 @@ static void stress_dir_tidy(
 		}
 
 		(void)snprintf(path + len, path_len - len, "/%s", name);
-		if (name[1] == '\0' && (isdigit(ch) || isupper(ch))) {
+		if (name[1] == '\0' && (isdigit((unsigned char)ch) || isupper((unsigned char)ch))) {
 			free(namelist[n]);
 			stress_dir_tidy(args, path, len + 2, path_len, start_time);
 		} else {
@@ -463,12 +421,12 @@ static int stress_dirdeep(stress_args_t *args)
 	if (inodes_start) {
 		if (dirdeep_inodes > inodes_start)
 			dirdeep_inodes = inodes_start;
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_dbg("%s: %" PRIu64 " inodes available, exercising up to %" PRIu64 " inodes\n",
 				args->name, inodes_start, dirdeep_inodes);
 		}
 	} else {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			if (dirdeep_inodes == ~0ULL) {
 				pr_dbg("%s: unknown inodes available, exercising potentially millions of inodes\n",
 					args->name);
@@ -481,7 +439,7 @@ static int stress_dirdeep(stress_args_t *args)
 
 	if ((dirdeep_bytes > 0) && (dirdeep_files == 0)) {
 		dirdeep_files = 5;
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_dbg("%s: file size was specified, defaulting to %" PRIu32 " files per directory\n",
 				args->name, dirdeep_files);
 		}
@@ -491,7 +449,10 @@ static int stress_dirdeep(stress_args_t *args)
 	inodes_estimate = 1;		/* created one for root */
 	inodes_min = inodes_start;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	stress_dirdeep_make(args, linkpath, path, path_len, sizeof(path),
 		dirdeep_dirs, dirdeep_inodes, dirdeep_files, dirdeep_bytes,
 		inodes_start, &inodes_estimate, &inodes_min, 0);
@@ -512,7 +473,7 @@ static int stress_dirdeep(stress_args_t *args)
 		args->name, inodes_exercised,
 		(inodes_start == 0) ? " (estimated)" : "");
 
-	if ((args->instance == 0) && (inodes_exercised < dirdeep_inodes))
+	if (stress_instance_zero(args) && (inodes_exercised < dirdeep_inodes))
 		pr_inf("%s: note: specifying a larger --dirdeep or --dirdeep-dirs settings or "
 			"running the stressor for longer will use more "
 			"inodes\n", args->name);
@@ -520,18 +481,18 @@ static int stress_dirdeep(stress_args_t *args)
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dirdeep_bytes,	stress_set_dirdeep_bytes },
-	{ OPT_dirdeep_dirs,	stress_set_dirdeep_dirs },
-	{ OPT_dirdeep_inodes,	stress_set_dirdeep_inodes },
-	{ OPT_dirdeep_files,	stress_set_dirdeep_files },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_dirdeep_bytes,  "dirdeep-bytes",  TYPE_ID_OFF_T,  MIN_DIRDEEP_BYTES, MAX_DIRDEEP_BYTES, NULL },
+	{ OPT_dirdeep_dirs,   "dirdeep-dirs",   TYPE_ID_UINT32, 1, sizeof(stress_dir_names) - 1, NULL },
+	{ OPT_dirdeep_inodes, "dirdeep-inodes", TYPE_ID_CALLBACK, 0, 0, stress_dirdeep_inodes },
+	{ OPT_dirdeep_files,  "dirdeep-files",  TYPE_ID_UINT32, 0, 65535, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_dirdeep_info = {
+const stressor_info_t stress_dirdeep_info = {
 	.stressor = stress_dirdeep,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

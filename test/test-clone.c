@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,7 +34,7 @@ static int clone_child(void *arg)
 int main(void)
 {
 	pid_t pid;
-	static unsigned long stack[STACK_SIZE];
+	static unsigned long int stack[STACK_SIZE];
 
 	pid = clone(clone_child, &stack[STACK_SIZE - 1], SIGCHLD | CLONE_VM, NULL);
 

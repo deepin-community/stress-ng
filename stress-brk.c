@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,39 +36,25 @@ static const stress_help_t help[] = {
 };
 
 typedef struct {
+	uint64_t out_of_memory;
+	uint64_t sbrk_expands;
+	uint64_t sbrk_shrinks;
+	double sbrk_exp_duration;
+	double sbrk_exp_count;
+	double sbrk_shr_duration;
+	double sbrk_shr_count;
+	size_t brk_bytes;
 	bool brk_mlock;
 	bool brk_notouch;
 } brk_context_t;
 
-/*
- *  stress_set_bigheap_bytes()
- *     Set maximum allocation amount in bytes
- */
-static int stress_set_brk_bytes(const char *opt)
-{
-	size_t brk_bytes;
+static brk_context_t *brk_context;
 
-	brk_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("brk-bytes", (uint64_t)brk_bytes,
-		MIN_BRK_BYTES, MAX_BRK_BYTES);
-	return stress_set_setting("brk-bytes", TYPE_ID_SIZE_T, &brk_bytes);
-}
-
-static int stress_set_brk_mlock(const char *opt)
-{
-	return stress_set_setting_true("brk-mlock", opt);
-}
-
-static int stress_set_brk_notouch(const char *opt)
-{
-	return stress_set_setting_true("brk-notouch", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_brk_bytes,	stress_set_brk_bytes },
-	{ OPT_brk_mlock,	stress_set_brk_mlock },
-	{ OPT_brk_notouch,	stress_set_brk_notouch },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_brk_bytes,   "brk-bytes",   TYPE_ID_SIZE_T_BYTES_VM, MIN_BRK_BYTES, MAX_BRK_BYTES, NULL },
+	{ OPT_brk_mlock,   "brk-mlock",   TYPE_ID_BOOL,            0,             1,             NULL },
+	{ OPT_brk_notouch, "brk-notouch", TYPE_ID_BOOL,            0,             1,             NULL },
+	END_OPT,
 };
 
 static int stress_brk_supported(const char *name)
@@ -134,18 +120,15 @@ static inline size_t PURE stress_brk_abs(const uint8_t *ptr1, const uint8_t *ptr
 
 static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 {
-	uint8_t *start_ptr, *unmap_ptr = NULL;
-	int i = 0;
-	size_t brk_bytes = DEFAULT_BRK_BYTES;
+	uint8_t *start_ptr, *new_start_ptr, *unmap_ptr = NULL;
+	const uint8_t *brk_failed_ptr = NULL;
+	int i = 0, brk_failed_count = 0;
 	const size_t page_size = args->page_size;
-	const brk_context_t *brk_context = (brk_context_t *)context;
-	double sbrk_exp_duration = 0.0, sbrk_exp_count = 0.0;
-	double sbrk_shr_duration = 0.0, sbrk_shr_count = 0.0;
-	double rate;
 	const bool brk_touch = !brk_context->brk_notouch;
+	bool reset_brk = false;
 	uint8_t *ptr;
 
-	(void)stress_get_setting("brk-bytes", &brk_bytes);
+	(void)context;
 
 	start_ptr = shim_sbrk(0);
 	if (start_ptr == (void *) -1) {
@@ -164,10 +147,44 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 
 	do {
 		double t;
+		int saved_errno = 0;
 
-		if (stress_brk_abs(ptr, start_ptr) > brk_bytes) {
-			ptr = start_ptr;
-			VOID_RET(int, shim_brk(ptr));
+		if (reset_brk || (stress_brk_abs(ptr, start_ptr) >= brk_context->brk_bytes)) {
+			intptr_t diff;
+
+			VOID_RET(int, shim_brk(start_ptr));
+			VOID_RET(void *, shim_sbrk(0));
+
+			/* Get brk address, should not fail */
+			ptr = shim_sbrk(0);
+			if (ptr == (void *)-1) {
+				pr_fail("%s: sbrk(0) failed, errno=%d (%s)\n",
+					args->name, errno, strerror(errno));
+				return EXIT_FAILURE;
+			}
+			diff = ptr - start_ptr;
+			/*
+			 *  Apply hammer to brk, really push it back
+			 *  to start
+			 */
+			if (diff > 0) {
+				ptr = shim_sbrk(-diff);
+				if (ptr == (void *)-1) {
+					pr_fail("%s: sbrk(%" PRIxPTR ") failed, errno=%d (%s)\n",
+						args->name, -diff, errno, strerror(errno));
+					return EXIT_FAILURE;
+				} else {
+					brk_context->sbrk_shrinks++;
+				}
+				/* Get brk address, should not fail */
+				ptr = shim_sbrk(0);
+				if (ptr == (void *)-1) {
+					pr_fail("%s: sbrk(0) failed, errno=%d (%s)\n",
+						args->name, errno, strerror(errno));
+					return EXIT_FAILURE;
+				}
+			}
+			reset_brk = false;
 			i = 0;
 		}
 
@@ -181,24 +198,43 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 		if (LIKELY(i < 8)) {
 			/* Expand brk by 1 page */
 			t = stress_time_now();
-			if (LIKELY(shim_sbrk((intptr_t)page_size) != (void *)-1)) {
+			new_start_ptr = shim_sbrk((intptr_t)page_size);
+			if (new_start_ptr != (void *)-1) {
 				uintptr_t *tmp;
 
-				sbrk_exp_duration += stress_time_now() - t;
-				sbrk_exp_count += 1.0;
+				brk_context->sbrk_expands++;
+				brk_context->sbrk_exp_duration += stress_time_now() - t;
+				brk_context->sbrk_exp_count += 1.0;
 
 				ptr += page_size;
+				brk_failed_ptr = NULL;
+				brk_failed_count = 0;
 				if (!unmap_ptr)
 					unmap_ptr = ptr;
+				if (new_start_ptr != (ptr - page_size))
+					ptr = new_start_ptr + page_size;
 				stress_brk_page_resident(ptr, page_size, brk_touch);
 
 				/* stash a check value */
 				tmp = (uintptr_t *)((uintptr_t)ptr - sizeof(uintptr_t));
 				*tmp = (uintptr_t)tmp;
+			} else {
+				brk_context->out_of_memory++;
+				saved_errno = errno;
+				if (brk_failed_ptr == ptr) {
+					brk_failed_count++;
+					if (brk_failed_count > 32) {
+						reset_brk = true;
+						continue;
+					}
+				}
+				i = 0;
+				brk_failed_ptr = ptr;
 			}
 		} else if (i < 9) {
 			/* brk to same brk position */
 			if (UNLIKELY(shim_brk(ptr) < 0)) {
+				saved_errno = errno;
 				ptr = start_ptr;
 				i = 0;
 			}
@@ -206,8 +242,10 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 			/* Shrink brk by 1 page */
 			t = stress_time_now();
 			if (LIKELY(shim_sbrk(-page_size) != (void *)-1)) {
-				sbrk_shr_duration += stress_time_now() - t;
-				sbrk_shr_count += 1.0;
+				brk_context->sbrk_shrinks++;
+				saved_errno = errno;
+				brk_context->sbrk_shr_duration += stress_time_now() - t;
+				brk_context->sbrk_shr_count += 1.0;
 				ptr -= page_size;
 			}
 			if (UNLIKELY(shim_brk(ptr) < 0)) {
@@ -223,6 +261,7 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 						"check value 0x%" PRIxPTR ", expected "
 						"0x%" PRIxPTR "\n",
 						args->name, tmp, *tmp, (uintptr_t)tmp);
+					return EXIT_FAILURE;
 				}
 			}
 		} else {
@@ -236,25 +275,18 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 		}
 
 		if (UNLIKELY(ptr == (void *)-1)) {
-			if (LIKELY((errno == ENOMEM) || (errno == EAGAIN))) {
+			if (LIKELY((saved_errno == ENOMEM) || (saved_errno == EAGAIN))) {
 				VOID_RET(int, shim_brk(start_ptr));
 				i = 0;
 			} else {
-				pr_fail("%s: sbrk(%d) failed: errno=%d (%s)\n",
-					args->name, (int)page_size, errno,
-					strerror(errno));
+				pr_fail("%s: sbrk(%d) failed, errno=%d (%s)\n",
+					args->name, (int)page_size, saved_errno,
+					strerror(saved_errno));
 				return EXIT_FAILURE;
 			}
 		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
-
-	rate = (sbrk_exp_count > 0.0) ? (double)sbrk_exp_duration / sbrk_exp_count : 0.0;
-	stress_metrics_set(args, 0, "nanosecs per sbrk page expand",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
-	rate = (sbrk_shr_count > 0.0) ? (double)sbrk_shr_duration / sbrk_shr_count : 0.0;
-	stress_metrics_set(args, 1, "nanosecs per sbrk page shrink",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
@@ -266,35 +298,68 @@ static int OPTIMIZE3 stress_brk_child(stress_args_t *args, void *context)
 static int stress_brk(stress_args_t *args)
 {
 	int rc;
-	brk_context_t brk_context;
+	double rate;
 
-	brk_context.brk_mlock = false;
-	brk_context.brk_notouch = false;
+	brk_context = (brk_context_t *)stress_mmap_populate(NULL, sizeof(*brk_context),
+						PROT_READ | PROT_WRITE,
+						MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	if (brk_context == MAP_FAILED) {
+		pr_inf_skip("%s: cannot mmap brk context region%s, errno=%d (%s), skipping stressor\n",
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
+		return EXIT_NO_RESOURCE;
+	}
 
-	(void)stress_get_setting("brk-mlock", &brk_context.brk_mlock);
-	(void)stress_get_setting("brk-notouch", &brk_context.brk_notouch);
+	brk_context->brk_bytes = DEFAULT_BRK_BYTES;
+	brk_context->sbrk_exp_duration = 0.0;
+	brk_context->sbrk_exp_count = 0.0;
+	brk_context->sbrk_shr_duration = 0.0;
+	brk_context->sbrk_shr_count = 0.0;
+	brk_context->brk_mlock = false;
+	brk_context->brk_notouch = false;
+
+	(void)stress_get_setting("brk-bytes", &brk_context->brk_bytes);
+	(void)stress_get_setting("brk-mlock", &brk_context->brk_mlock);
+	(void)stress_get_setting("brk-notouch", &brk_context->brk_notouch);
 
 #if !defined(MCL_FUTURE)
-	if ((args->instance == 0) && brk_context.brk_mlock) {
+	if (stress_instance_zero(args) && brk_context->brk_mlock) {
 		pr_inf("%s: --brk-mlock option was enabled but support for "
-			"mlock(MCL_FUTURE) is not available\n",
+			"mlockall(MCL_FUTURE) is not available\n",
 			args->name);
 	}
 #endif
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	rc = stress_oomable_child(args, (void *)&brk_context, stress_brk_child, STRESS_OOMABLE_DROP_CAP);
+	rc = stress_oomable_child(args, NULL, stress_brk_child, STRESS_OOMABLE_DROP_CAP);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
+
+	pr_dbg("%s: %" PRIu64 " occurrences of sbrk out of memory\n",
+		args->name, brk_context->out_of_memory);
+	pr_dbg("%s: %" PRIu64 " successful sbrk expands, %" PRIu64 " succussful sbrk shinks\n",
+		args->name, brk_context->sbrk_expands, brk_context->sbrk_shrinks);
+
+	rate = (brk_context->sbrk_exp_count > 0.0) ? (double)brk_context->sbrk_exp_duration / brk_context->sbrk_exp_count : 0.0;
+	stress_metrics_set(args, 0, "nanosecs per sbrk page expand",
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
+	rate = (brk_context->sbrk_shr_count > 0.0) ? (double)brk_context->sbrk_shr_duration / brk_context->sbrk_shr_count : 0.0;
+	stress_metrics_set(args, 1, "nanosecs per sbrk page shrink",
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
+
+
+	(void)munmap((void *)brk_context, sizeof(*brk_context));
 
 	return rc;
 }
 
-stressor_info_t stress_brk_info = {
+const stressor_info_t stress_brk_info = {
 	.stressor = stress_brk,
 	.supported = stress_brk_supported,
-	.class = CLASS_OS | CLASS_VM,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_VM,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,6 +27,8 @@
 #include "core-out-of-memory.h"
 #include "core-net.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_LINUX_SOCKIOS_H)
 #include <linux/sockios.h>
 #endif
@@ -35,8 +37,6 @@
 #include <netinet/ip.h>
 #endif
 
-#define MIN_RAWSOCK_PORT		(1024)
-#define MAX_RAWSOCK_PORT		(65535)
 #define DEFAULT_RAWSOCK_PORT		(45000)
 
 static const stress_help_t help[] = {
@@ -46,22 +46,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_rawsock_port()
- *	set port to use
- */
-static int stress_set_rawsock_port(const char *opt)
-{
-	int rawsock_port;
-
-	stress_set_net_port("rawsock-port", opt,
-		MIN_RAWSOCK_PORT, MAX_RAWSOCK_PORT, &rawsock_port);
-	return stress_set_setting("rawsock-port", TYPE_ID_INT, &rawsock_port);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_rawsock_port,	stress_set_rawsock_port },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_rawsock_port, "rawsock-port", TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	END_OPT,
 };
 
 #if defined(SOCK_RAW) &&	\
@@ -84,9 +71,11 @@ static void MLOCKED_TEXT rawsock_sigalrm_handler(int signum)
 	stop_rawsock = true;
 }
 
-static void stress_rawsock_init(void)
+static void stress_rawsock_init(const uint32_t instances)
 {
-	rawsock_lock = stress_lock_create();
+	(void)instances;
+
+	rawsock_lock = stress_lock_create("rawsock");
 	stop_rawsock = false;
 }
 
@@ -149,21 +138,20 @@ static int OPTIMIZE3 stress_rawsock_client(stress_args_t *args, const int rawsoc
 	pkt.iph.daddr = addr.sin_addr.s_addr;
 
 	/* Wait for server to start */
-	while (!stop_rawsock && stress_continue(args)) {
+	while (LIKELY(!stop_rawsock && stress_continue(args))) {
 		uint32_t ready;
 
-		if (stress_lock_acquire(rawsock_lock) < 0) {
+		if (UNLIKELY(stress_lock_acquire(rawsock_lock) < 0))
 			_exit(EXIT_FAILURE);
-			}
 		ready = g_shared->rawsock.ready;
 		(void)stress_lock_release(rawsock_lock);
 
-		if (ready == args->num_instances)
+		if (ready == args->instances)
 			break;
-		shim_usleep(20000);
+		(void)shim_usleep(20000);
 	}
 
-	while (!stop_rawsock && stress_continue(args)) {
+	while (LIKELY(!stop_rawsock && stress_continue(args))) {
 		ssize_t sret;
 
 		pkt.hash = stress_hash_mulxror32((const char * )&pkt.data, sizeof(pkt.data));
@@ -174,7 +162,7 @@ static int OPTIMIZE3 stress_rawsock_client(stress_args_t *args, const int rawsoc
 			if (errno == ENOBUFS) {
 				/* Throttle */
 				VOID_RET(int, nice(1));
-				shim_usleep(250000);
+				(void)shim_usleep(250000);
 				continue;
 			}
 			break;
@@ -185,7 +173,7 @@ static int OPTIMIZE3 stress_rawsock_client(stress_args_t *args, const int rawsoc
 		if (UNLIKELY((pkt.data & 0xff) == 0)) {
 			int queued;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			VOID_RET(int, ioctl(fd, SIOCOUTQ, &queued));
@@ -203,7 +191,7 @@ static int OPTIMIZE3 stress_rawsock_server(stress_args_t *args, const pid_t pid)
 	struct sockaddr_in addr;
 	double t_start, duration = 0.0, bytes = 0.0, rate;
 
-	if (stop_rawsock || !stress_continue(args))
+	if (UNLIKELY(stop_rawsock || !stress_continue(args)))
 		goto die;
 
 	if ((fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW)) < 0) {
@@ -221,7 +209,7 @@ static int OPTIMIZE3 stress_rawsock_server(stress_args_t *args, const pid_t pid)
 	(void)stress_lock_release(rawsock_lock);
 
 	t_start = stress_time_now();
-	while (!stop_rawsock && stress_continue(args)) {
+	while (LIKELY(!stop_rawsock && stress_continue(args))) {
 		stress_raw_packet_t ALIGN64 pkt;
 		socklen_t len = sizeof(addr);
 		ssize_t n;
@@ -243,7 +231,7 @@ static int OPTIMIZE3 stress_rawsock_server(stress_args_t *args, const pid_t pid)
 
 			bytes += n;
 			hash = stress_hash_mulxror32((const char * )&pkt.data, sizeof(pkt.data));
-			if (hash != pkt.hash) {
+			if (UNLIKELY(hash != pkt.hash)) {
 				pr_fail("%s: recv data hash check fail on "
 					"data 0x%4.4" PRIx32 ", got "
 					"0x%4.4" PRIx32 ", expected "
@@ -258,7 +246,7 @@ static int OPTIMIZE3 stress_rawsock_server(stress_args_t *args, const pid_t pid)
 		if (UNLIKELY((pkt.data & 0xfff) == 0)) {
 			int queued;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			VOID_RET(int, ioctl(fd, SIOCINQ, &queued));
@@ -269,7 +257,7 @@ static int OPTIMIZE3 stress_rawsock_server(stress_args_t *args, const pid_t pid)
 	duration = stress_time_now() - t_start;
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB recv'd per sec",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 die:
 	(void)shim_waitpid(pid, &status, 0);
 
@@ -294,12 +282,11 @@ again:
 	pid = fork();
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno)) {
-			shim_usleep(100000);
+			(void)shim_usleep(100000);
 			goto again;
 		}
-		if (stop_rawsock || !stress_continue(args)) {
+		if (UNLIKELY(stop_rawsock || !stress_continue(args)))
 			return EXIT_SUCCESS;
-		}
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
@@ -329,6 +316,8 @@ static int stress_rawsock(stress_args_t *args)
 	(void)stress_get_setting("rawsock-port", &rawsock_port);
 
 	rawsock_port += args->instance;
+	if (rawsock_port > MAX_PORT)
+		rawsock_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(rawsock_port, rawsock_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -340,6 +329,8 @@ static int stress_rawsock(stress_args_t *args)
 	pr_dbg("%s: process [%d] using socket port %d\n",
 		args->name, (int)args->pid, rawsock_port);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	rc = stress_oomable_child(args, (void *)&rawsock_port, stress_rawsock_child, STRESS_OOMABLE_NORMAL);
@@ -350,10 +341,10 @@ static int stress_rawsock(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_rawsock_info = {
+const stressor_info_t stress_rawsock_info = {
 	.stressor = stress_rawsock,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.supported = stress_rawsock_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
@@ -361,10 +352,10 @@ stressor_info_t stress_rawsock_info = {
 	.deinit = stress_rawsock_deinit,
 };
 #else
-stressor_info_t stress_rawsock_info = {
+const stressor_info_t stress_rawsock_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/sockios.h, SOCK_RAW, IPPROTO_RAW or only supported on Linux"

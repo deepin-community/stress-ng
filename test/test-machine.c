@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -16,13 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
-#include <netinet/sctp.h>
-
 int main(void)
 {
-	struct sctp_association s;
-
-	(void)s;
-
-	return sizeof(s);
+	return 0;
 }

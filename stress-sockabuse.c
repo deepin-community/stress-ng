@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,9 @@
 #include "core-killpid.h"
 #include "core-net.h"
 
+#include <sys/ioctl.h>
+#include <sys/file.h>
+
 #if defined(HAVE_SYS_XATTR_H)
 #include <sys/xattr.h>
 #undef HAVE_ATTR_XATTR_H
@@ -35,8 +38,6 @@
 #error cannot have both HAVE_SYS_XATTR_H and HAVE_ATTR_XATTR_H
 #endif
 
-#define MIN_SOCKABUSE_PORT	(1024)
-#define MAX_SOCKABUSE_PORT	(65535)
 #define DEFAULT_SOCKABUSE_PORT	(12000)
 
 #define MSGVEC_SIZE		(4)
@@ -48,19 +49,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"sockabuse-port P",	"use socket ports P to P + number of workers - 1" },
 	{ NULL,	NULL,			NULL }
 };
-
-/*
- *  stress_set_sockabuse_port()
- *	set port to use
- */
-static int stress_set_sockabuse_port(const char *opt)
-{
-	int sockabuse_port;
-
-	stress_set_net_port("sockabuse-port", opt,
-		MIN_SOCKABUSE_PORT, MAX_SOCKABUSE_PORT, &sockabuse_port);
-	return stress_set_setting("sockabuse-port", TYPE_ID_INT, &sockabuse_port);
-}
 
 /*
  *  stress_sockabuse_fd
@@ -123,7 +111,7 @@ static void stress_sockabuse_fd(const int fd)
 	{
 		struct timeval now;
 
-		if (gettimeofday(&now, NULL) == 0) {
+		if (LIKELY(gettimeofday(&now, NULL) == 0)) {
 			timespec[0].tv_sec = now.tv_sec;
 			timespec[1].tv_sec = now.tv_sec;
 
@@ -160,7 +148,7 @@ static void stress_sockabuse_fd(const int fd)
 		(void)munmap(ptr, 4096);
 	nfd = dup(fd);
 	VOID_RET(ssize_t, shim_copy_file_range(fd, 0, nfd, 0, 16, 0));
-	if (nfd >= 0)
+	if (LIKELY(nfd >= 0))
 		(void)close(nfd);
 #if defined(HAVE_POSIX_FADVISE) &&	\
     defined(POSIX_FADV_RANDOM)
@@ -194,20 +182,20 @@ static int stress_sockabuse_client(
 		uint64_t delay = 10000;
 
 retry:
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			return EXIT_FAILURE;
-		if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		if (UNLIKELY((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)) {
 			pr_fail("%s: socket failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
 		}
 
-		if (stress_set_sockaddr(args->name, args->instance, mypid,
+		if (UNLIKELY(stress_set_sockaddr(args->name, args->instance, mypid,
 				AF_INET, sockabuse_port,
-				&addr, &addr_len, NET_ADDR_ANY) < 0) {
+				&addr, &addr_len, NET_ADDR_ANY) < 0)) {
 			return EXIT_FAILURE;
 		}
-		if (connect(fd, addr, addr_len) < 0) {
+		if (UNLIKELY(connect(fd, addr, addr_len) < 0)) {
 			(void)shutdown(fd, SHUT_RDWR);
 			(void)close(fd);
 			(void)shim_usleep(delay);
@@ -220,7 +208,7 @@ retry:
 		}
 
 		n = recv(fd, buf, sizeof(buf), 0);
-		if (n < 0) {
+		if (UNLIKELY(n < 0)) {
 			if ((errno != EINTR) && (errno != ECONNRESET))
 				pr_fail("%s: recv failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
@@ -262,14 +250,14 @@ static int stress_sockabuse_server(
 	do {
 		int i;
 
-		if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		if (UNLIKELY((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: socket failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			continue;
 		}
-		if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-			&so_reuseaddr, sizeof(so_reuseaddr)) < 0) {
+		if (UNLIKELY(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+			&so_reuseaddr, sizeof(so_reuseaddr)) < 0)) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: setsockopt failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -277,13 +265,13 @@ static int stress_sockabuse_server(
 			continue;
 		}
 
-		if (stress_set_sockaddr(args->name, args->instance, mypid,
+		if (UNLIKELY(stress_set_sockaddr(args->name, args->instance, mypid,
 				AF_INET, sockabuse_port,
-				&addr, &addr_len, NET_ADDR_ANY) < 0) {
+				&addr, &addr_len, NET_ADDR_ANY) < 0)) {
 			(void)close(fd);
 			continue;
 		}
-		if (bind(fd, addr, addr_len) < 0) {
+		if (UNLIKELY(bind(fd, addr, addr_len) < 0)) {
 			if (errno != EADDRINUSE) {
 				rc = stress_exit_status(errno);
 				pr_fail("%s: bind failed, errno=%d (%s)\n",
@@ -292,7 +280,7 @@ static int stress_sockabuse_server(
 			(void)close(fd);
 			continue;
 		}
-		if (listen(fd, 10) < 0) {
+		if (UNLIKELY(listen(fd, 10) < 0)) {
 			pr_fail("%s: listen failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -305,25 +293,25 @@ static int stress_sockabuse_server(
 		for (i = 0; i < 16; i++) {
 			int sfd;
 
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			sfd = accept(fd, (struct sockaddr *)NULL, NULL);
-			if (sfd >= 0) {
+			if (LIKELY(sfd >= 0)) {
 				struct sockaddr saddr;
 				socklen_t len;
 				int sndbuf;
 				ssize_t n;
 
 				len = sizeof(saddr);
-				if (getsockname(fd, &saddr, &len) < 0) {
+				if (UNLIKELY(getsockname(fd, &saddr, &len) < 0)) {
 					pr_fail("%s: getsockname failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 					(void)close(sfd);
 					break;
 				}
 				len = sizeof(sndbuf);
-				if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) < 0) {
+				if (UNLIKELY(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) < 0)) {
 					pr_fail("%s: getsockopt failed, errno=%d (%s)\n",
 						args->name, errno, strerror(errno));
 					(void)close(sfd);
@@ -332,7 +320,7 @@ static int stress_sockabuse_server(
 				(void)shim_memset(buf, stress_ascii64[stress_bogo_get(args) & 63], sizeof(buf));
 
 				n = send(sfd, buf, sizeof(buf), 0);
-				if (n < 0) {
+				if (UNLIKELY(n < 0)) {
 					if ((errno != EINTR) && (errno != EPIPE))
 						pr_fail("%s: send failed, errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
@@ -357,7 +345,7 @@ die:
 	dt = t2 - t1;
 	if (dt > 0.0)
 		stress_metrics_set(args, 0, "messages sent per sec",
-			(double)msgs / dt, STRESS_HARMONIC_MEAN);
+			(double)msgs / dt, STRESS_METRIC_HARMONIC_MEAN);
 
 	return rc;
 }
@@ -385,6 +373,8 @@ static int stress_sockabuse(stress_args_t *args)
 	(void)stress_get_setting("sockabuse-port", &sockabuse_port);
 
 	sockabuse_port += args->instance;
+	if (sockabuse_port > MAX_PORT)
+		sockabuse_port -= (MAX_PORT - MIN_PORT + 1);
 	reserved_port = stress_net_reserve_ports(sockabuse_port, sockabuse_port);
 	if (reserved_port < 0) {
 		pr_inf_skip("%s: cannot reserve port %d, skipping stressor\n",
@@ -399,6 +389,8 @@ static int stress_sockabuse(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGPIPE, stress_sockabuse_sigpipe_handler, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
 	parent_cpu = stress_get_cpu();
@@ -406,7 +398,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto finish;
 		}
@@ -429,15 +421,16 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sockabuse_port,	stress_set_sockabuse_port },
-	{ 0,			NULL },
+
+static const stress_opt_t opts[] = {
+	{ OPT_sockabuse_port, "sockabuse-port", TYPE_ID_INT_PORT, MIN_PORT, MAX_PORT, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_sockabuse_info = {
+const stressor_info_t stress_sockabuse_info = {
 	.stressor = stress_sockabuse,
-	.class = CLASS_NETWORK | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_NETWORK | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

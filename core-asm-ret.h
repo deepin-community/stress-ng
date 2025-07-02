@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -16,8 +16,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
-#include "stress-ng.h"
-
 #ifndef CORE_ASM_RET_H
 #define CORE_ASM_RET_H
 
@@ -30,7 +28,7 @@ typedef struct {
 
 typedef void (*stress_ret_func_t)(void);
 
-extern stress_ret_opcode_t stress_ret_opcode;
+extern const stress_ret_opcode_t stress_ret_opcode;
 extern int stress_asm_ret_supported(const char *name);
 
 #endif

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,18 +25,26 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		 NULL }
 };
 
+#define MAX_SIGNALS	(64)	/* Note: must NOT be larger than 8 * sizeof(signal_info.signalled) */
+
 static bool jmp_env_ok;
 static sigjmp_buf jmp_env;
 
-static const int signals[] = {
+static const int defined_signals[] = {
 #if defined(SIGABRT)
 	SIGABRT,
+#endif
+#if defined(SIGALRM)
+	SIGALRM,
 #endif
 #if defined(SIGBUS)
 	SIGBUS,
 #endif
 #if defined(SIGCHLD)
 	SIGCHLD,
+#endif
+#if defined(SIGCONT)
+	SIGCONT,
 #endif
 #if defined(SIGEMT)
 	SIGEMT,
@@ -50,11 +58,11 @@ static const int signals[] = {
 #if defined(SIGILL)
 	SIGILL,
 #endif
-#if defined(SIGINT)
-	SIGINT,
-#endif
 #if defined(SIGINFO)
 	SIGINFO,
+#endif
+#if defined(SIGINT)
+	SIGINT,
 #endif
 #if defined(SIGIO)
 	SIGIO,
@@ -95,11 +103,20 @@ static const int signals[] = {
 #if defined(SIGTRAP)
 	SIGTRAP,
 #endif
+#if defined(SIGTSTP)
+	SIGTSTP,
+#endif
 #if defined(SIGTTIN)
 	SIGTTIN,
 #endif
 #if defined(SIGTTOU)
 	SIGTTOU,
+#endif
+#if defined(SIGUNUSED)
+	SIGUNUSED,
+#endif
+#if defined(SIGURG)
+	SIGURG,
 #endif
 #if defined(SIGUSR1)
 	SIGUSR1,
@@ -121,9 +138,12 @@ static const int signals[] = {
 #endif
 };
 
+static int signals[MAX_SIGNALS] ALIGN64;
+static size_t max_signals;
+
 typedef struct {
 	stress_args_t *args;
-	uint32_t signalled;	/* bitmap of index into signals[] handled */
+	uint64_t signalled;	/* bitmap of index into signals[] handled */
 	bool stop;		/* true to stop further nested signalling */
 	intptr_t altstack;	/* alternative stack push start */
 	intptr_t altstack_start;/* alternative start mmap start */
@@ -137,31 +157,21 @@ typedef struct {
 static volatile stress_signest_info_t signal_info;
 static uint64_t raised;
 static uint64_t handled;
+static size_t signal_index;
 
 static void stress_signest_ignore(void)
 {
 	size_t i;
 
-	for (i = 0; i < SIZEOF_ARRAY(signals); i++)
+	for (i = 0; i < max_signals; i++)
 		VOID_RET(int, stress_sighandler("signest", signals[i], SIG_IGN, NULL));
-}
-
-static inline ssize_t stress_signest_find(int signum)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(signals); i++) {
-		if (signals[i] == signum)
-			return (ssize_t)i;
-	}
-	return (ssize_t)-1;
 }
 
 static void MLOCKED_TEXT stress_signest_handler(int signum)
 {
-	ssize_t i;
+	const int i = signum;
 	const intptr_t addr = (intptr_t)&i;
-	double run_time = stress_time_now() - signal_info.time_start;
+	const double run_time = stress_time_now() - signal_info.time_start;
 
 	handled++;
 	signal_info.depth++;
@@ -172,9 +182,8 @@ static void MLOCKED_TEXT stress_signest_handler(int signum)
 	/* using alternative signal stack? */
 	if ((addr >= signal_info.altstack_start) &&
 	    (addr < signal_info.altstack_end)) {
-		ptrdiff_t delta;
+		ptrdiff_t delta = signal_info.altstack - addr;
 
- 		delta = signal_info.altstack - addr;
 		if (delta < 0)
 			delta = -delta;
 		if (delta > signal_info.stack_depth)
@@ -203,21 +212,17 @@ static void MLOCKED_TEXT stress_signest_handler(int signum)
 			siglongjmp(jmp_env, 1);
 	}
 
-	i = stress_signest_find(signum);
-	if (UNLIKELY((i < 0) || (i == (ssize_t)SIZEOF_ARRAY(signals))))
+	signal_info.signalled |= STRESS_BIT_ULL(signal_index);
+	signal_index++;
+	if (UNLIKELY(signal_index >= max_signals))
 		goto done;
 
-	signal_info.signalled |= 1U << i;
-
-	for (; i < (ssize_t)SIZEOF_ARRAY(signals); i++) {
-		if (signal_info.stop || !stress_continue(signal_info.args)) {
-			if (jmp_env_ok)
-				siglongjmp(jmp_env, 1);
-		}
-		(void)shim_raise(signals[i]);
-		raised++;
+	if (signal_info.stop || !stress_continue(signal_info.args)) {
+		if (jmp_env_ok)
+			siglongjmp(jmp_env, 1);
 	}
-
+	(void)shim_raise(signals[signal_index]);
+	raised++;
 done:
 	--signal_info.depth;
 	return;
@@ -225,8 +230,7 @@ done:
 
 /*
  *  stress_signest
- *	stress by generating segmentation faults by
- *	writing to a read only page
+ *	stress by raising next signal
  */
 static int stress_signest(stress_args_t *args)
 {
@@ -234,7 +238,7 @@ static int stress_signest(stress_args_t *args)
 	int n, ret, rc;
 	uint8_t *altstack;
 	char *buf, *ptr;
-	const size_t altstack_size = stress_get_min_sig_stack_size() * SIZEOF_ARRAY(signals);
+	const size_t altstack_size = stress_get_min_sig_stack_size() * MAX_SIGNALS;
 	double rate;
 	NOCLOBBER double t, duration;
 
@@ -242,15 +246,33 @@ static int stress_signest(stress_args_t *args)
 	handled = 0;
 	jmp_env_ok = false;
 
+	for (i = 0; i < SIZEOF_ARRAY(defined_signals); i++) {
+		signals[i] = defined_signals[i];
+	}
+	max_signals = i;
+#if defined(SIGRTMIN) && 	\
+    defined(SIGRTMAX)
+	{
+		int j;
+
+		for (j = SIGRTMIN; (j <= SIGRTMAX) && (i < MAX_SIGNALS); i++, j++) {
+			signals[i] = j;
+		}
+		max_signals = i;
+	}
+#endif
+
 	altstack = (uint8_t*)stress_mmap_populate(NULL, altstack_size,
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (altstack == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate alternative signal stack, "
+		pr_inf_skip("%s: failed to mmap %zu byte alternative signal stack%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, altstack_size, 
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(altstack, altstack_size, "altstack");
 
 	if (stress_sigaltstack(altstack, altstack_size) < 0) {
 		(void)munmap((void *)altstack, altstack_size);
@@ -272,17 +294,21 @@ static int stress_signest(stress_args_t *args)
 		goto finish;
 	}
 
-	for (i = 0; i < SIZEOF_ARRAY(signals); i++) {
+	for (i = 0; i < max_signals; i++) {
 		if (stress_sighandler(args->name, signals[i], stress_signest_handler, NULL) < 0)
 			return EXIT_NO_RESOURCE;
 	}
 
 	jmp_env_ok = true;
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t = stress_time_now();
 	do {
-		(void)shim_raise(signals[0]);
+		signal_index = 0;
+		(void)shim_raise(signals[signal_index]);
 		raised++;
 	} while (stress_continue(args));
 
@@ -292,8 +318,8 @@ finish:
 	signal_info.stop = true;
 	stress_signest_ignore();
 
-	for (sz = 1, n = 0, i = 0; i < SIZEOF_ARRAY(signals); i++) {
-		if (signal_info.signalled & (1U << i)) {
+	for (sz = 1, n = 0, i = 0; i < max_signals; i++) {
+		if (signal_info.signalled & STRESS_BIT_ULL(i)) {
 			const char *name = stress_get_signal_name(signals[i]);
 
 			n++;
@@ -301,11 +327,11 @@ finish:
 		}
 	}
 
-	if (args->instance == 0) {
-		buf = calloc(sz, sizeof(*buf));
+	if (stress_instance_zero(args)) {
+		buf = (char *)calloc(sz, sizeof(*buf));
 		if (buf) {
-			for (ptr = buf, i = 0; i < SIZEOF_ARRAY(signals); i++) {
-				if (signal_info.signalled & (1U << i)) {
+			for (ptr = buf, i = 0; i < max_signals; i++) {
+				if (signal_info.signalled & STRESS_BIT_ULL(i)) {
 					const char *name = stress_get_signal_name(signals[i]);
 
 					if (name) {
@@ -341,7 +367,7 @@ finish:
 	}
 	rate = handled > 0 ? duration / (double)handled : 0.0;
 	stress_metrics_set(args, 0, "nanosec to handle a signal",
-		rate * 1000000000.0, STRESS_HARMONIC_MEAN);
+		rate * 1000000000.0, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_sigaltstack_disable();
 	(void)munmap((void *)altstack, altstack_size);
@@ -349,9 +375,9 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_signest_info = {
+const stressor_info_t stress_signest_info = {
 	.stressor = stress_signest,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -143,14 +143,15 @@ static void MLOCKED_TEXT stress_rlimit_handler(int signum)
 
 static int stress_rlimit_child(stress_args_t *args, void *ctxt)
 {
-	stress_rlimit_context_t *context = (stress_rlimit_context_t *)ctxt;
+	const stress_rlimit_context_t *context = (stress_rlimit_context_t *)ctxt;
 	uint8_t *stack;
 
 	stack = (uint8_t *)mmap(NULL, STRESS_MINSIGSTKSZ, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (stack == MAP_FAILED) {
-		pr_inf("%s: cannot allocate signal stack: %d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf("%s: failed to mmap %zu byte signal stack%s, errno=%d (%s)\n",
+			args->name, (size_t)STRESS_MINSIGSTKSZ,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -158,7 +159,10 @@ static int stress_rlimit_child(stress_args_t *args, void *ctxt)
 		(void)munmap((void *)stack, STRESS_MINSIGSTKSZ);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(stack, STRESS_MINSIGSTKSZ, "stack");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Child rlimit stressor */
@@ -172,11 +176,11 @@ static int stress_rlimit_child(stress_args_t *args, void *ctxt)
 		 */
 		for (i = 0; i < SIZEOF_ARRAY(resource_ids); i++) {
 			ret = getrlimit(resource_ids[i].resource, &rlim);
-			if (ret < 0)
+			if (UNLIKELY(ret < 0))
 				continue;
 
 			ret = setrlimit(resource_ids[i].resource, &rlim);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				pr_fail("%s: setrlimit %s failed, errno=%d (%s)\n",
 					args->name, resource_ids[i].name,
 					errno, strerror(errno));
@@ -199,13 +203,13 @@ static int stress_rlimit_child(stress_args_t *args, void *ctxt)
 		ret = sigsetjmp(jmp_env, 1);
 
 		/* Check for timer overrun */
-		if ((stress_time_now() - context->start) > (double)g_opt_timeout)
+		if (UNLIKELY((stress_time_now() - context->start) > (double)g_opt_timeout))
 			break;
 		/* Check for counter limit reached */
-		if (args->max_ops && (stress_bogo_get(args) >= args->max_ops))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
-		if (ret == 0) {
+		if (LIKELY(ret == 0)) {
 			uint8_t *ptr;
 			void *oldbrk;
 			int fds[MAX_RLIMIT_NOFILE];
@@ -316,9 +320,9 @@ static int stress_rlimit(stress_args_t *args)
 	return ret;
 }
 
-stressor_info_t stress_rlimit_info = {
+const stressor_info_t stress_rlimit_info = {
 	.stressor = stress_rlimit,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

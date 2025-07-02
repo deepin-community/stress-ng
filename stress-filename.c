@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,18 +29,12 @@
 #define	STRESS_FILENAME_PROBE	(0)	/* Default */
 #define STRESS_FILENAME_POSIX	(1)	/* POSIX 2008.1 */
 #define STRESS_FILENAME_EXT	(2)	/* EXT* filesystems */
-#define STRESS_FILENAME_UNDEF	(0xff)	/* Undefined */
 
-typedef struct {
-	const uint8_t opt;
-	const char *opt_text;
-} stress_filename_opts_t;
-
-static const stress_filename_opts_t filename_opts[] = {
-	{ STRESS_FILENAME_PROBE,	"probe" },
-	{ STRESS_FILENAME_POSIX,	"posix" },
-	{ STRESS_FILENAME_EXT,		"ext" },
-	{ STRESS_FILENAME_UNDEF,	NULL }
+/* mapping of opts text to STRESS_FILE_NAME_* values */
+static const char * const filename_opts[] = {
+	"probe",	/* STRESS_FILENAME_PROBE */
+	"posix",	/* STRESS_FILENAME_POSIX */
+	"ext",		/* STRESS_FILENAME_EXT */
 };
 
 static const stress_help_t help[] = {
@@ -57,29 +51,10 @@ static char allowed[256];
  * The Open Group Base Specifications Issue 7
  * POSIX.1-2008, 3.278 Portable Filename Character Set
  */
-static char posix_allowed[] =
+static const char posix_allowed[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	"abcdefghijklmnopqrstuvwxyz"
 	"0123456789._-";
-
-static int stress_set_filename_opts(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; filename_opts[i].opt_text; i++) {
-		if (!strcmp(opt, filename_opts[i].opt_text)) {
-			uint8_t filename_opt = filename_opts[i].opt;
-			stress_set_setting("filename-opts", TYPE_ID_UINT8, &filename_opt);
-			return 0;
-		}
-	}
-	(void)fprintf(stderr, "filename-opts option '%s' not known, options are:", opt);
-	for (i = 0; filename_opts[i].opt_text; i++)
-		(void)fprintf(stderr, "%s %s",
-			i == 0 ? "" : ",", filename_opts[i].opt_text);
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
 
 /*
  *  stress_filename_probe_length()
@@ -102,6 +77,8 @@ static int stress_filename_probe_length(
 		*(ptr + i + 1) = '\0';
 
 		if ((fd = creat(filename, S_IRUSR | S_IWUSR)) < 0) {
+			if (errno == ENOTSUP)
+				break;
 			if (errno == ENAMETOOLONG)
 				break;
 			pr_err("%s: creat() failed when probing "
@@ -112,7 +89,14 @@ static int stress_filename_probe_length(
 			return -1;
 		}
 		(void)close(fd);
-		(void)shim_unlink(filename);
+		if (shim_unlink(filename)) {
+			pr_err("%s: unlink() failed when probing "
+				"for filename length, "
+				"errno=%d (%s)\n",
+				args->name, errno, strerror(errno));
+			*sz_max = 0;
+			return -1;
+		}
 		max = i;
 	}
 	*sz_max = max + 1;
@@ -163,7 +147,7 @@ static int stress_filename_probe(
 			 */
 			if ((errno != EINVAL) &&
 			    (errno != ENOENT) &&
-			    (errno == ENAMETOOLONG) &&
+			    ((errno == ENAMETOOLONG) || (errno == ENOTSUP)) &&
 			    (errno != EILSEQ)) {
 				pr_err("%s: creat() failed when probing "
 					"for allowed filename characters, "
@@ -176,7 +160,14 @@ static int stress_filename_probe(
 			}
 		} else {
 			(void)close(fd);
-			(void)shim_unlink(filename);
+			if (shim_unlink(filename)) {
+				pr_err("%s: unlink() failed when probing "
+					"for allowed filename characters, "
+					"errno=%d (%s)\n",
+					args->name, errno, strerror(errno));
+				*chars_allowed = 0;
+				return -errno;
+			}
 			allowed[j] = (char)i;
 			j++;
 		}
@@ -227,13 +218,17 @@ static void stress_filename_generate(
  *  stress_filename_tidy()
  *	clean up residual files
  */
-static void stress_filename_tidy(const char *path)
+static void stress_filename_tidy(
+	stress_args_t *args,
+	const char *path,
+	int *rc
+)
 {
 	DIR *dir;
 
 	dir = opendir(path);
 	if (dir) {
-		struct dirent *d;
+		const struct dirent *d;
 
 		while ((d = readdir(dir)) != NULL) {
 			char filename[PATH_MAX];
@@ -242,7 +237,12 @@ static void stress_filename_tidy(const char *path)
 				continue;
 			(void)stress_mk_filename(filename, sizeof(filename),
 				path, d->d_name);
-			(void)shim_unlink(filename);
+			if (shim_unlink(filename)) {
+				pr_fail("%s: unlink() failed when tidying, "
+					"errno=%d (%s)\n",
+					args->name, errno, strerror(errno));
+				*rc = EXIT_FAILURE;
+			}
 		}
 		(void)closedir(dir);
 	}
@@ -263,11 +263,63 @@ static void stress_filename_generate_random(
 
 	for (i = 0; i < sz_max; i++) {
 		const size_t j = (size_t)stress_mwc32modn(chars_allowed);
+
 		filename[i] = allowed[j];
 	}
 	if (*filename == '.')
 		*filename = '_';
 	filename[i] = '\0';
+}
+
+/*
+ *  stress_filename_generate_random_utf8()
+ *	generate a utf8 filename, may be legal or not
+ *	for the filename charset being supported
+ */
+static void stress_filename_generate_random_utf8(
+	char *filename,
+	const size_t sz_max)
+{
+	size_t i = 0, j = 0;
+
+	while (i < sz_max) {
+		const size_t residual = STRESS_MINIMUM(sz_max - i, 4);
+		const size_t len = stress_mwc8modn(residual) + 1;
+
+		switch (len) {
+		default:
+		case 1:
+			filename[i++] = stress_mwc8modn(127) + 1;
+			break;
+		case 2:
+			filename[i++] = 0xc0 | (stress_mwc8() & 0x1f);
+			j = i;
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			break;
+		case 3:
+			filename[i++] = 0xe0 | (stress_mwc8() & 0x0f);
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			j = i;
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			break;
+		case 4:
+			filename[i++] = 0xf0 | (stress_mwc8() & 0x07);
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			j = i;
+			filename[i++] = 0x80 | (stress_mwc8() & 0x3f);
+			break;
+		}
+	}
+	filename[i] = '\0';
+	/*
+	 *  occassionally truncate valid utf8 filename to create
+	 *  invalid utf8 strings, c.f.:
+	 *  https://sourceware.org/pipermail/cygwin/2024-September/256451.html
+	 */
+	if (j && stress_mwc8() < 16)
+		filename[j] = '\0';
+
 }
 
 /*
@@ -281,7 +333,8 @@ static void stress_filename_test(
 	const char *filename,
 	const size_t sz_max,
 	const bool should_pass,
-	const pid_t pid)
+	const pid_t pid,
+	int *rc)
 {
 	int fd;
 	int ret;
@@ -289,17 +342,22 @@ static void stress_filename_test(
 
 	/* exercise dcache lookup of non-existent filename */
 	ret = shim_stat(filename, &buf);
-	if (ret == 0)
+	if (ret == 0) {
 		pr_fail("%s: stat succeeded on non-existent file\n",
 			args->name);
+		*rc = EXIT_FAILURE;
+	}
 
 	if ((fd = creat(filename, S_IRUSR | S_IWUSR)) < 0) {
+		if (errno == ENOTSUP)
+			return;
 		if ((!should_pass) && (errno == ENAMETOOLONG))
 			return;
 
-		pr_fail("%s: open failed on file of length "
+		pr_fail("%s: creat() failed on file of length "
 			"%zu bytes, errno=%d (%s)\n",
 			args->name, sz_max, errno, strerror(errno));
+		*rc = EXIT_FAILURE;
 	} else {
 		stress_read_fdinfo(pid, fd);
 		(void)close(fd);
@@ -307,14 +365,66 @@ static void stress_filename_test(
 		/* exercise dcache lookup of existent filename */
 		VOID_RET(int, shim_stat(filename, &buf));
 
-		(void)shim_unlink(filename);
+		if (shim_unlink(filename)) {
+			pr_fail("%s: unlink() failed on file of length "
+				"%zu bytes, errno=%d (%s)\n",
+				args->name, sz_max, errno, strerror(errno));
+			*rc = EXIT_FAILURE;
+			return;
+		}
 	}
 
 	/* exercise dcache lookup of non-existent filename */
 	ret = shim_stat(filename, &buf);
-	if (ret == 0)
+	if (ret == 0) {
 		pr_fail("%s: stat succeeded on non-existent unlinked file\n",
 			args->name);
+		*rc = EXIT_FAILURE;
+	}
+}
+
+/*
+ *  stress_filename_test_utf8()
+ *      exercise utf8 filename, may or may not fail
+ */
+static void stress_filename_test_utf8(
+	stress_args_t *args,
+	const char *filename,
+	const size_t sz_max,
+	const pid_t pid,
+	int *rc)
+{
+	int fd;
+	int ret;
+	struct stat buf;
+
+	/* exercise dcache lookup of non-existent filename */
+	VOID_RET(int, shim_stat(filename, &buf));
+
+	if ((fd = creat(filename, S_IRUSR | S_IWUSR)) < 0)
+		return;
+
+	stress_read_fdinfo(pid, fd);
+	(void)close(fd);
+
+	/* exercise dcache lookup of existent filename */
+	VOID_RET(int, shim_stat(filename, &buf));
+
+	if (shim_unlink(filename)) {
+		pr_fail("%s: unlink() failed on file of length "
+			"%zu bytes, errno=%d (%s)\n",
+			args->name, sz_max, errno, strerror(errno));
+		*rc = EXIT_FAILURE;
+		return;
+	}
+
+	/* exercise dcache lookup of non-existent filename */
+	ret = shim_stat(filename, &buf);
+	if (ret == 0) {
+		pr_fail("%s: stat succeeded on non-existent unlinked file\n",
+			args->name);
+		*rc = EXIT_FAILURE;
+	}
 }
 
 /*
@@ -323,7 +433,7 @@ static void stress_filename_test(
  */
 static int stress_filename(stress_args_t *args)
 {
-	int ret, rc = EXIT_FAILURE;
+	int ret, rc = EXIT_SUCCESS;
 	size_t sz_left, sz_max;
 	char pathname[PATH_MAX - 256];
 	char filename[PATH_MAX];
@@ -410,7 +520,7 @@ static int stress_filename(stress_args_t *args)
 		break;
 	}
 
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: filesystem allows %zu unique "
 			"characters in a %zu character long filename\n",
 			args->name, chars_allowed, sz_max);
@@ -421,9 +531,11 @@ static int stress_filename(stress_args_t *args)
 		goto tidy_dir;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 again:
-	if (!stress_continue_flag()) {
+	if (UNLIKELY(!stress_continue_flag())) {
 		/* Time to die */
 		rc = EXIT_SUCCESS;
 		goto tidy_dir;
@@ -432,11 +544,11 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			rc = EXIT_SUCCESS;
 			goto tidy_dir;
 		}
-		pr_err("%s: fork failed: errno=%d: (%s)\n",
+		pr_err("%s: fork failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 	} else if (pid > 0) {
 		int status;
@@ -445,8 +557,8 @@ again:
 		ret = shim_waitpid(pid, &status, 0);
 		if (ret < 0) {
 			if (errno != EINTR)
-				pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_dbg("%s: waitpid() on PID %" PRIdMAX" failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 			stress_force_killed_bogo(args);
 			(void)stress_kill_pid_wait(pid, NULL);
 		} else if (WIFSIGNALED(status)) {
@@ -471,6 +583,8 @@ again:
 					goto again;
 				}
 			}
+		} else if (WIFEXITED(status)) {
+			rc = WEXITSTATUS(status);
 		}
 	} else {
 		/* Child, wrapped to catch OOMs */
@@ -494,89 +608,118 @@ again:
 
 			/* Should succeed */
 			stress_filename_generate(ptr, 1, ch);
-			stress_filename_test(args, filename, 1, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, 1, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, 1, chars_allowed);
-			stress_filename_test(args, filename, 1, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, 1, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Should succeed */
 			stress_filename_generate(ptr, sz_max, ch);
-			stress_filename_test(args, filename, sz_max, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, sz_max, chars_allowed);
-			stress_filename_test(args, filename, sz_max, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Should succeed */
 			stress_filename_generate(ptr, sz_max - 1, ch);
-			stress_filename_test(args, filename, sz_max - 1, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max - 1, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, sz_max - 1, chars_allowed);
-			stress_filename_test(args, filename, sz_max - 1, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max - 1, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Should fail */
 			stress_filename_generate(ptr, sz_max + 1, ch);
-			stress_filename_test(args, filename, sz_max + 1, false, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max + 1, false, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, sz_max + 1, chars_allowed);
-			stress_filename_test(args, filename, sz_max + 1, false, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz_max + 1, false, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Should succeed */
 			stress_filename_generate(ptr, sz, ch);
-			stress_filename_test(args, filename, sz, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, sz, chars_allowed);
-			stress_filename_test(args, filename, sz, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, sz, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Should succeed */
 			stress_filename_generate(ptr, rnd_sz, ch);
-			stress_filename_test(args, filename, rnd_sz, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, rnd_sz, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			stress_filename_generate_random(ptr, rnd_sz, chars_allowed);
-			stress_filename_test(args, filename, rnd_sz, true, mypid);
-			if (!stress_continue(args))
+			stress_filename_test(args, filename, rnd_sz, true, mypid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
 				break;
+
+			/* May succeed or fail */
+			stress_filename_generate_random_utf8(ptr, sz_max - 1);
+			stress_filename_test_utf8(args, filename, sz_max - 1, pid, &rc);
+			if (UNLIKELY(!stress_continue(args)))
+				break;
+
+			if (filename_opt == STRESS_FILENAME_EXT) {
+				stress_filename_generate_random_utf8(ptr, rnd_sz);
+				stress_filename_test_utf8(args, filename, rnd_sz, pid, &rc);
+				if (UNLIKELY(!stress_continue(args)))
+					break;
+			}
+
+#if defined(HAVE_PATHCONF)
+#if defined(_PC_NAME_MAX)
+			VOID_RET(long int, pathconf(pathname, _PC_NAME_MAX));
+#endif
+#if defined(_PC_PATH_MAX)
+			VOID_RET(long int, pathconf(pathname, _PC_PATH_MAX));
+#endif
+#if defined(_PC_NO_TRUNC)
+			VOID_RET(long int, pathconf(pathname, _PC_NO_TRUNC));
+#endif
+#endif
 
 			sz++;
 			if (sz > sz_max)
 				sz = 1;
 			stress_bogo_inc(args);
 		} while (stress_continue(args));
-		_exit(EXIT_SUCCESS);
+		_exit(rc);
 	}
-	rc = EXIT_SUCCESS;
 
 tidy_dir:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	(void)stress_filename_tidy(pathname);
+	stress_filename_tidy(args, pathname, &rc);
 
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_filename_opts,	stress_set_filename_opts },
-	{ 0,			NULL }
+static const char *stress_filename_opts(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(filename_opts)) ? filename_opts[i] : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_filename_opts, "filename-opts", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_filename_opts },
+	END_OPT,
 };
 
-stressor_info_t stress_filename_info = {
+const stressor_info_t stress_filename_info = {
 	.stressor = stress_filename,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

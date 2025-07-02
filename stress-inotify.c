@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2012-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 
+#include <sys/ioctl.h>
+
 #if defined(HAVE_SYS_EPOLL_H)
 #include <sys/epoll.h>
 #endif
@@ -30,7 +32,7 @@
 
 #if !defined(INOTIFY_IOC_SETNEXTWD) &&	\
     defined(_IOW)
-#define INOTIFY_IOC_SETNEXTWD	_IOW('I', 0, __s32)
+#define INOTIFY_IOC_SETNEXTWD	_IOW('I', 0, int32_t)
 #endif
 
 static const stress_help_t help[] = {
@@ -52,8 +54,8 @@ static const stress_help_t help[] = {
 #define TIME_OUT	(10)	/* Secs for inotify to report back */
 #define BUF_SIZE	(4096)
 
-typedef int (*stress_inotify_helper)(stress_args_t *args, const char *path, const void *private);
-typedef void (*stress_inotify_func)(stress_args_t *args, const char *path, const int bad_fd);
+typedef int (*stress_inotify_helper)(stress_args_t *args, const char *path, void *private);
+typedef int (*stress_inotify_func)(stress_args_t *args, const char *path, const int bad_fd);
 
 typedef struct {
 	const stress_inotify_func func;
@@ -200,17 +202,17 @@ static void exercise_inotify_rm_watch(const int bad_fd)
  *	run a given test helper function 'func' and see if this triggers the
  *	required inotify event flags 'flags'.
  */
-static void inotify_exercise(
+static int inotify_exercise(
 	stress_args_t *args,	/* Stressor args */
-	const char *filename,		/* Filename in test */
-	const char *watchname,		/* File/directory to watch using inotify */
-	const char *matchname,		/* Filename for inotify event to report */
+	const char *filename,	/* Filename in test */
+	const char *watchname,	/* File/directory to watch using inotify */
+	const char *matchname,	/* Filename for inotify event to report */
 	const stress_inotify_helper func, /* Helper func */
-	const uint32_t flags,		/* IN_* flags to watch for */
-	void *private,			/* Helper func private data */
-	const int bad_fd)		/* A bad file descriptor */
+	const uint32_t flags,	/* IN_* flags to watch for */
+	void *private,		/* Helper func private data */
+	const int bad_fd)	/* A bad file descriptor */
 {
-	int fd, wd, n = 0;
+	int fd, wd, n = 0, rc = EXIT_SUCCESS;
 	uint32_t check_flags = flags;
 	char buffer[1024];
 
@@ -221,8 +223,8 @@ static void inotify_exercise(
 retry:
 	n++;
 	if ((fd = inotify_init()) < 0) {
-		if (!stress_continue(args))
-			return;
+		if (UNLIKELY(!stress_continue(args)))
+			return EXIT_SUCCESS;
 
 		/* This is just so wrong... */
 		if (errno == EMFILE) {
@@ -235,9 +237,9 @@ retry:
 			goto retry;
 		}
 		/* Nope, give up, not necessarily a test failure, we maybe low on fds */
-		pr_warn("%s: inotify_init failed: errno=%d (%s) after %" PRIu32 " calls\n",
+		pr_warn("%s: inotify_init failed, errno=%d (%s) after %" PRIu32 " calls\n",
 			args->name, errno, strerror(errno), n);
-		return;
+		return EXIT_SUCCESS;
 	}
 
 
@@ -245,7 +247,7 @@ retry:
 		(void)close(fd);
 		pr_fail("%s: inotify_add_watch failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
-		return;
+		return EXIT_FAILURE;
 	}
 
 	if (func(args, filename, private) < 0)
@@ -268,17 +270,19 @@ retry:
 		err = select(fd + 1, &rfds, NULL, NULL, &tv);
 		if (err == -1) {
 			if (errno != EINTR)
-				pr_err("%s: select error: errno=%d (%s)\n",
+				pr_err("%s: select error, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 			break;
 		} else if (err == 0) {
-			if (g_opt_flags & OPT_FLAGS_VERIFY)
-				pr_fail("%s: timed waiting for event flags 0x%x\n", args->name, flags);
+			if (g_opt_flags & OPT_FLAGS_VERIFY) {
+				pr_fail("%s: timed out waiting for event flags 0x%x\n", args->name, flags);
+				rc = EXIT_FAILURE;
+			}
 			break;
 		}
 
 redo:
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		/*
 		 *  Exercise FIOREAD to get inotify code coverage up
@@ -286,12 +290,14 @@ redo:
 		if (ioctl(fd, FIONREAD, &nbytes) < 0) {
 			if (g_opt_flags & OPT_FLAGS_VERIFY) {
 				pr_fail("%s: data is ready, but ioctl FIONREAD failed\n", args->name);
+				rc = EXIT_FAILURE;
 				break;
 			}
 		}
 		if (nbytes <= 0) {
 			pr_fail("%s: data is ready, but ioctl FIONREAD "
 				"reported %d bytes available\n", args->name, nbytes);
+			rc = EXIT_FAILURE;
 			break;
 		}
 
@@ -303,6 +309,7 @@ redo:
 			if (errno) {
 				pr_fail("%s: inotify fd read, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 				break;
 			}
 		}
@@ -330,9 +337,11 @@ redo:
 cleanup:
 	(void)inotify_rm_watch(fd, wd);
 	if (close(fd) < 0) {
-		pr_err("%s: close error: errno=%d (%s)\n",
+		pr_fail("%s: close error, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
+		rc = EXIT_FAILURE;
 	}
+	return rc;
 }
 
 /*
@@ -342,7 +351,7 @@ cleanup:
 static int rm_file(stress_args_t *args, const char *path)
 {
 	if ((shim_unlink(path) < 0) && (errno != ENOENT)) {
-		pr_err("%s: cannot remove file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot remove file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -375,7 +384,7 @@ static int rm_dir(stress_args_t *args, const char *path)
 	}
 	ret = shim_rmdir(path);
 	if ((ret < 0) && (errno != ENOENT))
-		pr_err("%s: cannot remove directory %s: errno=%d (%s)\n",
+		pr_err("%s: cannot remove directory %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 	return ret;
 }
@@ -389,7 +398,7 @@ static int mk_dir(stress_args_t *args, const char *path)
 	if (mkdir(path, DIR_FLAGS) < 0) {
 		if ((errno == ENOMEM) || (errno == ENOSPC))
 			return -1;
-		pr_err("%s: cannot mkdir %s: errno=%d (%s)\n",
+		pr_err("%s: cannot mkdir %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -411,13 +420,13 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 	if ((fd = open(filename, O_CREAT | O_RDWR, FILE_FLAGS)) < 0) {
 		if ((errno == ENFILE) || (errno == ENOMEM) || (errno == ENOSPC))
 			return -1;
-		pr_err("%s: cannot create file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot create file %s, errno=%d (%s)\n",
 			args->name, filename, errno, strerror(errno));
 		return -1;
 	}
 
 	(void)shim_memset(buffer, 'x', BUF_SIZE);
-	while (stress_continue(args) && (sz > 0)) {
+	while (LIKELY(stress_continue(args) && (sz > 0))) {
 		size_t n = (sz > BUF_SIZE) ? BUF_SIZE : sz;
 		ssize_t ret;
 
@@ -425,7 +434,7 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 		if (ret < 0) {
 			if (errno == ENOSPC)
 				break;
-			pr_err("%s: error writing to file %s: errno=%d (%s)\n",
+			pr_err("%s: error writing to file %s, errno=%d (%s)\n",
 				args->name, filename, errno, strerror(errno));
 			(void)close(fd);
 			return -1;
@@ -434,7 +443,7 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 	}
 
 	if (close(fd) < 0) {
-		pr_err("%s: cannot close file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot close file %s, errno=%d (%s)\n",
 			args->name, filename, errno, strerror(errno));
 		return -1;
 	}
@@ -445,31 +454,34 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 static int inotify_attrib_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	(void)signum;
 	if (chmod(path, S_IRUSR | S_IWUSR) < 0) {
-		pr_err("%s: cannot chmod file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot chmod file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
 	return 0;
 }
 
-static void inotify_attrib_file(
+static int inotify_attrib_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 
-	inotify_exercise(args, filepath, path, "inotify_file",
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_attrib_helper, IN_ATTRIB, NULL, bad_fd);
 	(void)rm_file(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -479,7 +491,7 @@ static void inotify_attrib_file(
 static int inotify_access_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	int fd;
 	char buffer[1];
@@ -487,7 +499,7 @@ static int inotify_access_helper(
 
 	(void)signum;
 	if ((fd = open(path, O_RDONLY)) < 0) {
-		pr_err("%s: cannot open file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -497,7 +509,7 @@ do_access:
 	if (stress_continue(args) && (read(fd, buffer, 1) < 0)) {
 		if ((errno == EAGAIN) || (errno == EINTR))
 			goto do_access;
-		pr_err("%s: cannot read file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot read file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		rc = -1;
 	}
@@ -505,20 +517,23 @@ do_access:
 	return rc;
 }
 
-static void inotify_access_file(
+static int inotify_access_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 
-	inotify_exercise(args, filepath, path, "inotify_file",
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_access_helper, IN_ACCESS, NULL, bad_fd);
 	(void)rm_file(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -528,7 +543,7 @@ static void inotify_access_file(
 static int inotify_modify_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	int fd, rc = 0;
 	char buffer[1] = { 0 };
@@ -537,7 +552,7 @@ static int inotify_modify_helper(
 	if (mk_file(args, path, 4096) < 0)
 		return -1;
 	if ((fd = open(path, O_RDWR)) < 0) {
-		pr_err("%s: cannot open file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		rc = -1;
 		goto remove;
@@ -546,17 +561,18 @@ do_modify:
 	if (stress_continue(args) && (write(fd, buffer, 1) < 0)) {
 		if ((errno == EAGAIN) || (errno == EINTR))
 			goto do_modify;
-		pr_err("%s: cannot write to file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot write to file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		rc = -1;
 	}
 	(void)close(fd);
 remove:
 	(void)rm_file(args, path);
+
 	return rc;
 }
 
-static void inotify_modify_file(
+static int inotify_modify_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
@@ -564,7 +580,7 @@ static void inotify_modify_file(
 	char filepath[PATH_MAX];
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
-	inotify_exercise(args, filepath, path, "inotify_file",
+	return inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_modify_helper, IN_MODIFY, NULL, bad_fd);
 }
 #else
@@ -575,14 +591,14 @@ static void inotify_modify_file(
 static int inotify_creat_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	int fd;
 
 	(void)signum;
 
 	if ((fd = creat(path, FILE_FLAGS)) < 0) {
-		pr_err("%s: cannot create file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot create file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -590,17 +606,20 @@ static int inotify_creat_helper(
 	return 0;
 }
 
-static void inotify_creat_file(
+static int inotify_creat_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
-	inotify_exercise(args, filepath, path, "inotify_file",
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_creat_helper, IN_CREATE, NULL, bad_fd);
 	(void)rm_file(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -610,13 +629,13 @@ static void inotify_creat_file(
 static int inotify_open_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	int fd;
 
 	(void)signum;
 	if ((fd = open(path, O_RDONLY)) < 0) {
-		pr_err("%s: cannot open file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -624,19 +643,22 @@ static int inotify_open_helper(
 	return 0;
 }
 
-static void inotify_open_file(
+static int inotify_open_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
-	inotify_exercise(args, filepath, path, "inotify_file",
+		return EXIT_SUCCESS;
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_open_helper, IN_OPEN, NULL, bad_fd);
 	(void)rm_file(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -646,27 +668,30 @@ static void inotify_open_file(
 static int inotify_delete_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	(void)signum;
 
 	return rm_file(args, path);
 }
 
-static void inotify_delete_file(
+static int inotify_delete_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
-	inotify_exercise(args, filepath, path, "inotify_file",
+		return EXIT_SUCCESS;
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_delete_helper, IN_DELETE, NULL, bad_fd);
 	/* We remove (again) it just in case the test failed */
 	(void)rm_file(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -676,27 +701,30 @@ static void inotify_delete_file(
 static int inotify_delete_self_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *signum)
+	void *signum)
 {
 	(void)signum;
 
 	return rm_dir(args, path);
 }
 
-static void inotify_delete_self(
+static int inotify_delete_self(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_dir");
 	if (mk_dir(args, filepath) < 0)
-		return;
-	inotify_exercise(args, filepath, filepath, "inotify_dir",
+		return EXIT_SUCCESS;
+	rc = inotify_exercise(args, filepath, filepath, "inotify_dir",
 		inotify_delete_self_helper, IN_DELETE_SELF, NULL, bad_fd);
 	/* We remove (again) in case the test failed */
 	(void)rm_dir(args, filepath);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -706,12 +734,12 @@ static void inotify_delete_self(
 static int inotify_move_self_helper(
 	stress_args_t *args,
 	const char *oldpath,
-	const void *private)
+	void *private)
 {
 	const char *newpath = (const char *)private;
 
 	if (rename(oldpath, newpath) < 0) {
-		pr_err("%s: cannot rename %s to %s: errno=%d (%s)\n",
+		pr_err("%s: cannot rename %s to %s, errno=%d (%s)\n",
 			args->name, oldpath, newpath, errno, strerror(errno));
 		return -1;
 	}
@@ -721,60 +749,66 @@ static int inotify_move_self_helper(
 	UNEXPECTED
 #endif
 
-static void inotify_move_self(
+static int inotify_move_self(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX], newpath[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_dir");
 	if (mk_dir(args, filepath) < 0)
-		return;
+		return EXIT_SUCCESS;
 	stress_mk_filename(newpath, sizeof(newpath), path, "renamed_dir");
 
-	inotify_exercise(args, filepath, filepath, "inotify_dir",
+	rc = inotify_exercise(args, filepath, filepath, "inotify_dir",
 		inotify_move_self_helper, IN_MOVE_SELF, newpath, bad_fd);
 	(void)rm_dir(args, newpath);
 	(void)rm_dir(args, filepath);	/* In case rename failed */
+
+	return rc;
 }
 
 #if defined(IN_MOVED_TO)
 static int inotify_moved_to_helper(
 	stress_args_t *args,
 	const char *newpath,
-	const void *private)
+	void *private)
 {
 	const char *oldpath = (const char *)private;
 
 	if (rename(oldpath, newpath) < 0) {
-		pr_err("%s: cannot rename %s to %s: errno=%d (%s)\n",
+		pr_err("%s: cannot rename %s to %s, errno=%d (%s)\n",
 			args->name, oldpath, newpath, errno, strerror(errno));
 		return -1;
 	}
 	return 0;
 }
 
-static void inotify_moved_to(
+static int inotify_moved_to(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char olddir[PATH_MAX - 16], oldfile[PATH_MAX], newfile[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(olddir, sizeof(olddir), path, "new_dir");
 	(void)rm_dir(args, olddir);
 	if (mk_dir(args, olddir) < 0)
-		return;
+		return EXIT_SUCCESS;
 	stress_mk_filename(oldfile, sizeof(oldfile), olddir, "inotify_file");
 	if (mk_file(args, oldfile, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 
 	stress_mk_filename(newfile, sizeof(newfile), path, "inotify_file");
-	inotify_exercise(args, newfile, path, "inotify_dir",
+	rc = inotify_exercise(args, newfile, path, "inotify_dir",
 		inotify_moved_to_helper, IN_MOVED_TO, oldfile, bad_fd);
 	(void)rm_file(args, newfile);
 	(void)rm_dir(args, olddir);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -784,38 +818,41 @@ static void inotify_moved_to(
 static int inotify_moved_from_helper(
 	stress_args_t *args,
 	const char *oldpath,
-	const void *private)
+	void *private)
 {
 	const char *newpath = (const char *)private;
 
 	if (rename(oldpath, newpath) < 0) {
-		pr_err("%s: cannot rename %s to %s: errno=%d (%s)\n",
+		pr_err("%s: cannot rename %s to %s, errno=%d (%s)\n",
 			args->name, oldpath, newpath, errno, strerror(errno));
 		return -1;
 	}
 	return 0;
 }
 
-static void inotify_moved_from(
+static int inotify_moved_from(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char oldfile[PATH_MAX], newdir[PATH_MAX - 16], newfile[PATH_MAX];
+	int rc;
 
 	stress_mk_filename(oldfile, sizeof(oldfile), path, "inotify_file");
 	if (mk_file(args, oldfile, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 	stress_mk_filename(newdir, sizeof(newdir), path, "new_dir");
 	(void)rm_dir(args, newdir);
 	if (mk_dir(args, newdir) < 0)
-		return;
+		return EXIT_SUCCESS;
 	stress_mk_filename(newfile, sizeof(newfile), newdir, "inotify_file");
-	inotify_exercise(args, oldfile, path, "inotify_dir",
+	rc = inotify_exercise(args, oldfile, path, "inotify_dir",
 		inotify_moved_from_helper, IN_MOVED_FROM, newfile, bad_fd);
 	(void)rm_file(args, newfile);
 	(void)rm_file(args, oldfile);	/* In case rename failed */
 	(void)rm_dir(args, newdir);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -825,37 +862,43 @@ static void inotify_moved_from(
 static int inotify_close_write_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *fdptr)
+	void *ptr)
 {
+	int *fdptr = (int *)ptr;
+
 	(void)args;
 	(void)path;
 
-	(void)close(*(const int *)fdptr);
+	(void)close(*fdptr);
+	*fdptr = -1;
 	return 0;
 }
 
-static void inotify_close_write_file(
+static int inotify_close_write_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
-	int fd;
+	int fd, rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 
 	if ((fd = open(filepath, O_RDWR)) < 0) {
-		pr_err("%s: cannot re-open %s: errno=%d (%s)\n",
+		pr_err("%s: cannot re-open %s, errno=%d (%s)\n",
 			args->name, filepath, errno, strerror(errno));
-		return;
+		return EXIT_FAILURE;
 	}
 
-	inotify_exercise(args, filepath, path, "inotify_file",
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_close_write_helper, IN_CLOSE_WRITE, (void*)&fd, bad_fd);
 	(void)rm_file(args, filepath);
-	(void)close(fd);
+	if (fd != -1)
+		(void)close(fd);
+
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -865,38 +908,43 @@ static void inotify_close_write_file(
 static int inotify_close_nowrite_helper(
 	stress_args_t *args,
 	const char *path,
-	const void *fdptr)
+	void *ptr)
 {
+	int *fdptr = (int *)ptr;
+
 	(void)args;
 	(void)path;
 
-	(void)close(*(const int *)fdptr);
+	(void)close(*fdptr);
+	*fdptr = -1;
 	return 0;
 }
 
-static void inotify_close_nowrite_file(
+static int inotify_close_nowrite_file(
 	stress_args_t *args,
 	const char *path,
 	const int bad_fd)
 {
 	char filepath[PATH_MAX];
-	int fd;
+	int fd, rc;
 
 	stress_mk_filename(filepath, sizeof(filepath), path, "inotify_file");
 	if (mk_file(args, filepath, 4096) < 0)
-		return;
+		return EXIT_SUCCESS;
 
 	if ((fd = open(filepath, O_RDONLY)) < 0) {
-		pr_err("%s: cannot re-open %s: errno=%d (%s)\n",
+		pr_err("%s: cannot re-open %s, errno=%d (%s)\n",
 			args->name, filepath, errno, strerror(errno));
 		(void)rm_file(args, filepath);
-		return;
+		return EXIT_FAILURE;
 	}
 
-	inotify_exercise(args, filepath, path, "inotify_file",
+	rc = inotify_exercise(args, filepath, path, "inotify_file",
 		inotify_close_nowrite_helper, IN_CLOSE_NOWRITE, (void*)&fd, bad_fd);
 	(void)rm_file(args, filepath);
-	(void)close(fd);
+	if (fd != -1)
+		(void)close(fd);
+	return rc;
 }
 #else
 	UNEXPECTED
@@ -949,7 +997,7 @@ static const stress_inotify_t inotify_stressors[] = {
 static int stress_inotify(stress_args_t *args)
 {
 	char pathname[PATH_MAX - 16];
-	int ret, i;
+	int ret, i, rc = EXIT_SUCCESS;
 	const int bad_fd = stress_get_bad_fd();
 
 	stress_temp_dir_args(args, pathname, sizeof(pathname));
@@ -957,30 +1005,36 @@ static int stress_inotify(stress_args_t *args)
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		for (i = 0; stress_continue(args) && inotify_stressors[i].func; i++)
-			inotify_stressors[i].func(args, pathname, bad_fd);
+		for (i = 0; LIKELY(stress_continue(args) && inotify_stressors[i].func); i++) {
+			if (inotify_stressors[i].func(args, pathname, bad_fd) == EXIT_FAILURE) {
+				rc = EXIT_FAILURE;
+				break;
+			}
+		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)stress_temp_dir_rm_args(args);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_inotify_info = {
+const stressor_info_t stress_inotify_info = {
 	.stressor = stress_inotify,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_inotify_info = {
+const stressor_info_t stress_inotify_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without sys/epoll.h, sys/inotify.h, inotify(), inotify1() or select() support"

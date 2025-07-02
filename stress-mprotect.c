@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,6 +17,7 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-put.h"
 #include "core-killpid.h"
 #include "core-madvise.h"
@@ -103,7 +104,7 @@ static int stress_mprotect_mem(
 
 	VOID_RET(int, sigsetjmp(jmp_env, 1));
 
-	while (stress_continue(args)) {
+	while (LIKELY(stress_continue(args))) {
 		const uint32_t page = stress_mwc32modn(mem_pages);
 		uint8_t *ptr = mem + (page_size * page);
 		const size_t max_size = (size_t)(mem_end - ptr);
@@ -114,15 +115,15 @@ static int stress_mprotect_mem(
 		if ((max_size < page_size) || (size < page_size))
 			continue;
 
-		for (i = 0; (i < 10) && stress_continue(args); i++) {
+		for (i = 0; LIKELY((i < 10) && stress_continue(args)); i++) {
 			const int j = stress_mwc16modn(n_flags);
 
-			if (mprotect((void *)ptr, size, prot_flags[j]) == 0) {
+			if (LIKELY(mprotect((void *)ptr, size, prot_flags[j]) == 0)) {
 				stress_bogo_inc(args);
 
 #if defined(PROT_READ) &&	\
     defined(PROT_WRITE)
-				if ((prot_flags[j] & (PROT_READ | PROT_WRITE)) == 0) {
+				if (UNLIKELY((prot_flags[j] & (PROT_READ | PROT_WRITE)) == 0)) {
 					char str[128];
 
 					stress_uint8_put(*ptr);
@@ -137,7 +138,7 @@ static int stress_mprotect_mem(
 #endif
 #if defined(PROT_WRITE)
 				/* not writeable, should not get here */
-				if ((prot_flags[j] & PROT_WRITE) == 0) {
+				if (UNLIKELY((prot_flags[j] & PROT_WRITE) == 0)) {
 					char str[128];
 
 					*ptr = 1;
@@ -168,9 +169,16 @@ static int stress_mprotect(stress_args_t *args)
 	const size_t mem_size = page_size * mem_pages;
 	size_t i;
 	uint8_t *mem;
-	pid_t pids[MPROTECT_MAX];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	int prot_bits = 0, *prot_flags, rc = EXIT_SUCCESS;
 	size_t n_flags;
+
+	s_pids = stress_sync_s_pids_mmap(MPROTECT_MAX);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, MPROTECT_MAX, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
 
 #if defined(PROT_NONE)
 	prot_bits |= PROT_NONE;
@@ -198,36 +206,50 @@ static int stress_mprotect(stress_args_t *args)
 	if (!prot_flags) {
 		pr_inf_skip("%s: cannot allocate protection masks, skipping stressor\n",
 			args->name);
-		return EXIT_NO_RESOURCE;
+		rc = EXIT_NO_RESOURCE;
+		goto tidy_s_pids;
 	}
 
 	mem = (uint8_t *)mmap(NULL, mem_size, PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (mem == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate %zd pages, skipping stressor\n",
-			args->name, mem_pages);
+		pr_inf_skip("%s: cannot allocate %zu pages%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, mem_pages,
+			stress_get_memfree_str(), errno, strerror(errno));
 		free(prot_flags);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(mem, mem_size, "mprotect-data");
 	(void)stress_madvise_mergeable(mem, mem_size);
 
 	/* Make sure this is killable by OOM killer */
 	stress_set_oom_adjustment(args, true);
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
-
 	for (i = 0; i < MPROTECT_MAX; i++) {
-		pids[i] = fork();
-		if (pids[i] == 0) {
+		stress_sync_start_init(&s_pids[i]);
+
+		s_pids[i].pid = fork();
+		if (s_pids[i].pid == 0) {
 			int ret;
+
+			s_pids[i].pid = getpid();
+			stress_sync_start_wait_s_pid(&s_pids[i]);
 
 			ret = stress_mprotect_mem(args, page_size, mem, mem_pages, prot_flags, n_flags);
 			_exit(ret);
+		} else if (s_pids[i].pid > 0) {
+			stress_sync_start_s_pid_list_add(&s_pids_head, &s_pids[i]);
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	stress_mprotect_mem(args, page_size, mem, mem_pages, prot_flags, n_flags);
-	if (stress_kill_and_wait_many(args, pids, MPROTECT_MAX, SIGALRM, true) == EXIT_FAILURE)
+	if (stress_kill_and_wait_many(args, s_pids, MPROTECT_MAX, SIGALRM, true) == EXIT_FAILURE)
 		rc = EXIT_FAILURE;
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -235,19 +257,22 @@ static int stress_mprotect(stress_args_t *args)
 	(void)munmap((void *)mem, mem_size);
 	free(prot_flags);
 
+tidy_s_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, MPROTECT_MAX);
+
 	return rc;
 }
 
-stressor_info_t stress_mprotect_info = {
+const stressor_info_t stress_mprotect_info = {
 	.stressor = stress_mprotect,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_mprotect_info = {
+const stressor_info_t stress_mprotect_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without mprotect() system call"

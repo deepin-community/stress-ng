@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -43,19 +43,9 @@ static const unsigned int sync_modes[] = {
 UNEXPECTED
 #endif
 
-static int stress_set_sync_file_bytes(const char *opt)
-{
-	off_t sync_file_bytes;
-
-	sync_file_bytes = (off_t)stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("sync_file-bytes", (uint64_t)sync_file_bytes,
-		MIN_SYNC_FILE_BYTES, MAX_SYNC_FILE_BYTES);
-	return stress_set_setting("sync_file-bytes", TYPE_ID_OFF_T, &sync_file_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_sync_file_bytes,	stress_set_sync_file_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_sync_file_bytes, "sync-file-bytes", TYPE_ID_OFF_T, MIN_SYNC_FILE_BYTES, MAX_SYNC_FILE_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -73,18 +63,18 @@ static int stress_sync_allocate(
 	int ret;
 
 	ret = ftruncate(fd, 0);
-	if (ret < 0) {
-		pr_err("%s: ftruncate failed: errno=%d (%s)%s\n",
+	if (UNLIKELY(ret < 0)) {
+		pr_err("%s: ftruncate failed, errno=%d (%s)%s\n",
 			args->name, errno, strerror(errno), fs_type);
 		return -errno;
 	}
 
 #if defined(HAVE_FDATASYNC)
 	ret = shim_fdatasync(fd);
-	if (ret < 0) {
+	if (UNLIKELY(ret < 0)) {
 		if ((errno == ENOSPC) || (errno == EINTR))
 			return -errno;
-		pr_fail("%s: fdatasync failed: errno=%d (%s)%s\n",
+		pr_fail("%s: fdatasync failed, errno=%d (%s)%s\n",
 			args->name, errno, strerror(errno), fs_type);
 		return -errno;
 	}
@@ -93,12 +83,12 @@ static int stress_sync_allocate(
 #endif
 
 	ret = shim_fallocate(fd, 0, (off_t)0, sync_file_bytes);
-	if (ret < 0) {
+	if (UNLIKELY(ret < 0)) {
 		if (errno == EINTR)
 			return 0;
 		if (errno == ENOSPC)
 			return -errno;
-		pr_err("%s: fallocate failed: errno=%d (%s)%s\n",
+		pr_err("%s: fallocate failed, errno=%d (%s)%s\n",
 			args->name, errno, strerror(errno), fs_type);
 		return -errno;
 	}
@@ -111,21 +101,25 @@ static int stress_sync_allocate(
  */
 static int stress_sync_file(stress_args_t *args)
 {
-	int fd, ret;
+	int fd, ret, rc = EXIT_SUCCESS;
 	const int bad_fd = stress_get_bad_fd();
-	off_t sync_file_bytes = DEFAULT_SYNC_FILE_BYTES;
+	off_t sync_file_bytes, sync_file_bytes_total = DEFAULT_SYNC_FILE_BYTES;
 	char filename[PATH_MAX];
 	const char *fs_type;
 
-	if (!stress_get_setting("sync_file-bytes", &sync_file_bytes)) {
+	if (!stress_get_setting("sync_file-bytes", &sync_file_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			sync_file_bytes = MAXIMIZED_FILE_SIZE;
+			sync_file_bytes_total = MAXIMIZED_FILE_SIZE;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			sync_file_bytes = MIN_SYNC_FILE_BYTES;
+			sync_file_bytes_total = MIN_SYNC_FILE_BYTES;
 	}
-	sync_file_bytes /= args->num_instances;
-	if (sync_file_bytes < (off_t)MIN_SYNC_FILE_BYTES)
+	sync_file_bytes = sync_file_bytes_total / args->instances;
+	if (sync_file_bytes < (off_t)MIN_SYNC_FILE_BYTES) {
 		sync_file_bytes = (off_t)MIN_SYNC_FILE_BYTES;
+		sync_file_bytes_total = sync_file_bytes * args->instances;
+	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, sync_file_bytes, sync_file_bytes_total);
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -135,7 +129,7 @@ static int stress_sync_file(stress_args_t *args)
 		filename, sizeof(filename), stress_mwc32());
 	if ((fd = open(filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)) < 0) {
 		if ((errno == ENFILE) || (errno == ENOMEM) || (errno == ENOSPC)) {
-			pr_inf_skip("%s: cannot create file to sync on, skipping stressor: errno=%d (%s)\n",
+			pr_inf_skip("%s: cannot create file to sync on, skipping stressor, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
@@ -149,8 +143,18 @@ static int stress_sync_file(stress_args_t *args)
 	stress_file_rw_hint_short(fd);
 
 	fs_type = stress_get_fs_type(filename);
+#if defined(HAVE_PATHCONF)
+#if defined(_PC_ASYNC_IO)
+	VOID_RET(long int, pathconf(filename, _PC_ASYNC_IO));
+#endif
+#if defined(_PC_SYNC_IO)
+	VOID_RET(long int, pathconf(filename, _PC_SYNC_IO));
+#endif
+#endif
 	(void)shim_unlink(filename);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -159,17 +163,17 @@ static int stress_sync_file(stress_args_t *args)
 		const unsigned int mode = sync_modes[mode_index];
 
 		ret = stress_sync_allocate(args, fd, fs_type, sync_file_bytes);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (ret == -ENOSPC)
 				continue;
 			break;
 		}
-		for (offset = 0; stress_continue_flag() &&
-		     (offset < (shim_off64_t)sync_file_bytes); ) {
+		for (offset = 0; LIKELY(stress_continue_flag() &&
+		     (offset < (shim_off64_t)sync_file_bytes)); ) {
 			const shim_off64_t sz = (stress_mwc32() & 0x1fc00) + KB;
 
 			ret = shim_sync_file_range(fd, offset, sz, mode);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				if (errno == ENOSYS) {
 					pr_inf_skip("%s: skipping stressor, sync_file_range is not implemented\n",
 						args->name);
@@ -177,11 +181,12 @@ static int stress_sync_file(stress_args_t *args)
 				}
 				pr_fail("%s: sync_file_range (forward), errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno), fs_type);
+				rc = EXIT_FAILURE;
 				break;
 			}
 			offset += sz;
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/*
@@ -199,17 +204,17 @@ static int stress_sync_file(stress_args_t *args)
 		VOID_RET(int, shim_sync_file_range(fd, sync_file_bytes << 2, 0, mode));
 
 		ret = stress_sync_allocate(args, fd, fs_type, sync_file_bytes);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (ret == -ENOSPC)
 				continue;
 			break;
 		}
-		for (offset = 0; stress_continue_flag() &&
-		     (offset < (shim_off64_t)sync_file_bytes); ) {
+		for (offset = 0; LIKELY(stress_continue_flag() &&
+		     (offset < (shim_off64_t)sync_file_bytes)); ) {
 			const shim_off64_t sz = (stress_mwc32() & 0x1fc00) + KB;
 
 			ret = shim_sync_file_range(fd, sync_file_bytes - offset, sz, mode);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				if (errno == ENOSYS) {
 					pr_inf_skip("%s: skipping stressor, sync_file_range is not implemented\n",
 						args->name);
@@ -217,25 +222,26 @@ static int stress_sync_file(stress_args_t *args)
 				}
 				pr_fail("%s: sync_file_range (reverse), errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno), fs_type);
+				rc = EXIT_FAILURE;
 				break;
 			}
 			offset += sz;
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		ret = stress_sync_allocate(args, fd, fs_type, sync_file_bytes);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if (ret == -ENOSPC)
 				continue;
 			break;
 		}
-		for (i = 0; stress_continue_flag() &&
-		     (i < (shim_off64_t)sync_file_bytes / (shim_off64_t)(128 * KB)); i++) {
+		for (i = 0; LIKELY(stress_continue_flag() &&
+		     (i < (shim_off64_t)sync_file_bytes / (shim_off64_t)(128 * KB))); i++) {
 			offset = (shim_off64_t)(stress_mwc64modn((uint64_t)sync_file_bytes) & ~((128 * KB) - 1));
 
 			ret = shim_sync_file_range(fd, offset, 128 * KB, mode);
-			if (ret < 0) {
+			if (UNLIKELY(ret < 0)) {
 				if (errno == ENOSYS) {
 					pr_inf_skip("%s: skipping stressor, sync_file_range is not implemented\n",
 						args->name);
@@ -243,32 +249,33 @@ static int stress_sync_file(stress_args_t *args)
 				}
 				pr_fail("%s: sync_file_range (random), errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno), fs_type);
+				rc = EXIT_FAILURE;
 				break;
 			}
 		}
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 err:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)close(fd);
 	(void)stress_temp_dir_rm_args(args);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_sync_file_info = {
+const stressor_info_t stress_sync_file_info = {
 	.stressor = stress_sync_file,
-	.class = CLASS_IO | CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sync_file_info = {
+const stressor_info_t stress_sync_file_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_IO | CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sync_file_range() system call"

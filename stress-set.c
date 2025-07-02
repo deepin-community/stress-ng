@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 #include "core-capabilities.h"
+
+#include <time.h>
 
 #if defined(HAVE_SYS_FSUID_H)
 #include <sys/fsuid.h>
@@ -43,55 +45,56 @@ UNEXPECTED
 #define GIDS_MAX 	(1024)
 
 typedef struct {
-	shim_rlimit_resource_t id;
 	int	ret;
 	struct rlimit rlim;
 } stress_rlimit_info_t;
 
-static stress_rlimit_info_t rlimits[] = {
+static const shim_rlimit_resource_t rlimit_resources[] = {
 #if defined(RLIMIT_AS)
-	{ RLIMIT_AS, 0, { 0, 0 } },
+	RLIMIT_AS,
 #endif
 #if defined(RLIMIT_CORE)
-	{ RLIMIT_CORE, 0, { 0, 0 } },
+	RLIMIT_CORE,
 #endif
 #if defined(RLIMIT_CPU)
-	{ RLIMIT_CPU, 0, { 0, 0 } },
+	RLIMIT_CPU,
 #endif
 #if defined(RLIMIT_DATA)
-	{ RLIMIT_DATA, 0, { 0, 0 } },
+	RLIMIT_DATA,
 #endif
 #if defined(RLIMIT_FSIZE)
-	{ RLIMIT_FSIZE, 0, { 0, 0 } },
+	RLIMIT_FSIZE,
 #endif
 #if defined(RLIMIT_MEMLOCK)
-	{ RLIMIT_MEMLOCK, 0, { 0, 0 } },
+	RLIMIT_MEMLOCK,
 #endif
 #if defined(RLIMIT_MSGQUEUE)
-	{ RLIMIT_MSGQUEUE, 0, { 0, 0 } },
+	RLIMIT_MSGQUEUE,
 #endif
 #if defined(RLIMIT_NICE)
-	{ RLIMIT_NICE, 0, { 0, 0 } },
+	RLIMIT_NICE,
 #endif
 #if defined(RLIMIT_NOFILE)
-	{ RLIMIT_NOFILE, 0, { 0, 0 } },
+	RLIMIT_NOFILE,
 #endif
 #if defined(RLIMIT_RSS)
-	{ RLIMIT_RSS, 0, { 0, 0 } },
+	RLIMIT_RSS,
 #endif
 #if defined(RLIMIT_RTPRIO)
-	{ RLIMIT_RTPRIO, 0, { 0, 0 } },
+	RLIMIT_RTPRIO,
 #endif
 #if defined(RLIMIT_RTTIME)
-	{ RLIMIT_RTTIME, 0, { 0, 0 } },
+	RLIMIT_RTTIME,
 #endif
 #if defined(RLIMIT_SIGPENDING)
-	{ RLIMIT_SIGPENDING, 0, { 0, 0 } },
+	RLIMIT_SIGPENDING,
 #endif
 #if defined(RLIMIT_STACK)
-	{ RLIMIT_STACK, 0, { 0, 0 } },
+	RLIMIT_STACK,
 #endif
 };
+
+static stress_rlimit_info_t rlimits[SIZEOF_ARRAY(rlimit_resources)];
 
 static const stress_help_t help[] = {
 	{ NULL,	"set N",	"start N workers exercising the set*() system calls" },
@@ -118,6 +121,7 @@ static int stress_set(stress_args_t *args)
 	const bool cap_sys_resource = stress_check_capability(SHIM_CAP_SYS_RESOURCE);
 #if defined(HAVE_SETREUID)
 	const bool cap_setuid = stress_check_capability(SHIM_CAP_SETUID);
+	int bad_uid_count = 0;
 #endif
 #if defined(HAVE_GETPGID) &&    \
     defined(HAVE_SETPGID)
@@ -125,19 +129,19 @@ static int stress_set(stress_args_t *args)
 #endif
 
 	for (i = 0; i < SIZEOF_ARRAY(rlimits); i++) {
-		rlimits[i].ret = getrlimit(rlimits[i].id, &rlimits[i].rlim);
+		rlimits[i].ret = getrlimit(rlimit_resources[i], &rlimits[i].rlim);
 	}
 
-	hostname = calloc(hostname_len, sizeof(*hostname));
+	hostname = (char *)calloc(hostname_len, sizeof(*hostname));
 	if (!hostname) {
-		pr_inf_skip("%s: cannot allocate hostname array of %zu bytes, skipping stessor\n",
-			args->name, hostname_len);
+		pr_inf_skip("%s: cannot allocate hostname array of %zu bytes%s, skipping stressor\n",
+			args->name, hostname_len, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	longname = calloc(longname_len, sizeof(*hostname));
+	longname = (char *)calloc(longname_len, sizeof(*hostname));
 	if (!longname) {
-		pr_inf_skip("%s: cannot allocate longname array of %zu bytes, skipping stessor\n",
-			args->name, longname_len);
+		pr_inf_skip("%s: cannot allocate longname array of %zu bytes%s, skipping stressor\n",
+			args->name, longname_len, stress_get_memfree_str());
 		free(hostname);
 		return EXIT_NO_RESOURCE;
 	}
@@ -147,6 +151,8 @@ static int stress_set(stress_args_t *args)
 		(void)shim_strscpy(longname, hostname, longname_len);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -162,13 +168,13 @@ static int stress_set(stress_args_t *args)
 
 		/* setsid will fail, ignore return */
 		VOID_RET(pid_t, setsid());
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/* getgid always succeeds */
 		gid = getgid();
 		VOID_RET(int, setgid(gid));
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		if (*longname) {
@@ -196,7 +202,7 @@ static int stress_set(stress_args_t *args)
 					VOID_RET(int, setpgid(bad_pid, bad_pid));
 				}
 				VOID_RET(int, setpgid(mypid, pid));
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					break;
 			}
 		}
@@ -213,10 +219,14 @@ static int stress_set(stress_args_t *args)
 			ret = gettimeofday(&tv, &tz);
 			if (ret == 0) {
 				ret = settimeofday(&tv, &tz);
-				if (ret != -EPERM) {
-					pr_fail("%s: settimeofday failed, did not have privilege to "
-						"set time, expected -EPERM, instead got errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+				if (ret < 0) {
+					if (UNLIKELY((errno != EPERM) &&
+					             (errno != EINVAL) &&
+						     (errno != ENOBUFS))) {
+						pr_fail("%s: settimeofday failed, could not "
+							"set time, errno=%d (%s)\n",
+							args->name, errno, strerror(errno));
+					}
 				}
 				/*
 				 *  exercise bogus times west tz, possibly undefined behaviour but
@@ -239,7 +249,7 @@ static int stress_set(stress_args_t *args)
 			pid = getpgrp();
 			if (pid != -1) {
 				VOID_RET(int, setpgrp());
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					break;
 			}
 		}
@@ -250,7 +260,7 @@ static int stress_set(stress_args_t *args)
 		/* getuid always succeeds */
 		uid = getuid();
 		VOID_RET(int, setuid(uid));
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 #if defined(HAVE_GRP_H)
@@ -279,15 +289,20 @@ static int stress_set(stress_args_t *args)
 #if defined(HAVE_SETREUID)
 		VOID_RET(int, setreuid((uid_t)-1, (uid_t)-1));
 
-		/*
-		 *  Validate setreuid syscalls exercised to increase the current
-		 *  ruid and euid without CAP_SETUID capability cannot succeed
-		 */
-		if ((!cap_setuid) && (stress_get_unused_uid(&bad_uid) >= 0)) {
-			if (setreuid(bad_uid, bad_uid) == 0) {
-				pr_fail("%s: setreuid failed, did not have privilege to set "
-					"ruid and euid, expected -EPERM, instead got errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+		bad_uid_count++;
+		if (bad_uid_count > 1024) {
+			bad_uid_count = 0;
+
+			/*
+			 *  Validate setreuid syscalls exercised to increase the current
+			 *  ruid and euid without CAP_SETUID capability cannot succeed
+			 */
+			if ((!cap_setuid) && (stress_get_unused_uid(&bad_uid) >= 0)) {
+				if (setreuid(bad_uid, bad_uid) == 0) {
+					pr_fail("%s: setreuid failed, did not have privilege to set "
+						"ruid and euid, expected -EPERM, instead got errno=%d (%s)\n",
+						args->name, errno, strerror(errno));
+				}
 			}
 		}
 #else
@@ -445,7 +460,7 @@ static int stress_set(stress_args_t *args)
 #if defined(__NR_sgetmask) &&	\
     defined(__NR_ssetmask)
 		{
-			long mask;
+			long int mask;
 
 			mask = shim_sgetmask();
 			shim_ssetmask(mask);
@@ -468,7 +483,7 @@ static int stress_set(stress_args_t *args)
 				/* Set name back */
 				VOID_RET(int, shim_setdomainname(name, strlen(name)));
 			}
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 		}
 #else
@@ -489,11 +504,11 @@ static int stress_set(stress_args_t *args)
 				rlim.rlim_cur = rlimits[i].rlim.rlim_cur;
 				if (rlim.rlim_cur > 1) {
 					rlim.rlim_max = rlim.rlim_cur - 1;
-					(void)setrlimit(rlimits[i].id, &rlim);
+					(void)setrlimit(rlimit_resources[i], &rlim);
 				}
 
 				/* Valid setrlimit syscall and ignoring failure */
-				(void)setrlimit(rlimits[i].id, &rlimits[i].rlim);
+				(void)setrlimit(rlimit_resources[i], &rlimits[i].rlim);
 			}
 		}
 
@@ -507,14 +522,19 @@ static int stress_set(stress_args_t *args)
 				if ((rlimits[i].ret == 0) && (rlimits[i].rlim.rlim_max < RLIM_INFINITY)) {
 					rlim.rlim_cur = rlimits[i].rlim.rlim_cur;
 					rlim.rlim_max = RLIM_INFINITY;
-					ret = setrlimit(rlimits[i].id, &rlim);
-					if (ret != -EPERM) {
+					ret = setrlimit(rlimit_resources[i], &rlim);
+					/*
+					 *  Cygwin can return -EINVAL as it's not supported in
+					 *  due to limited functionality in windows, so don't throw
+					 *  a failure for this specific failure.
+					 */
+					if ((ret != -EPERM) && (ret != -EINVAL)) {
 						pr_fail("%s: setrlimit failed, did not have privilege to set "
 							"hard limit, expected -EPERM, instead got errno=%d (%s)\n",
 							args->name, errno, strerror(errno));
 					}
 					if (ret == 0) {
-						(void)setrlimit(rlimits[i].id, &rlimits[i].rlim);
+						(void)setrlimit(rlimit_resources[i], &rlimits[i].rlim);
 					}
 				}
 			}
@@ -547,9 +567,9 @@ static int stress_set(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_set_info = {
+const stressor_info_t stress_set_info = {
 	.stressor = stress_set,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

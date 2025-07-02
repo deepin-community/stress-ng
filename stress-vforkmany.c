@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -45,21 +45,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_vforkmany_vm(const char *opt)
-{
-	return stress_set_setting_true("vforkmany-vm", opt);
-}
-
-static int stress_set_vforkmany_vm_bytes(const char *opt)
-{
-	size_t vforkmany_vm_bytes;
-
-	vforkmany_vm_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("vforkmany-vm-bytes", (uint64_t)vforkmany_vm_bytes,
-		MIN_VFORKMANY_VM_BYTES, MAX_VFORKMANY_VM_BYTES);
-	return stress_set_setting("vforkmany-vm-bytes", TYPE_ID_SIZE_T, &vforkmany_vm_bytes);
-}
-
 /*
  *  vforkmany_wait()
  *	wait and then kill
@@ -67,11 +52,12 @@ static int stress_set_vforkmany_vm_bytes(const char *opt)
 static void vforkmany_wait(vforkmany_shared_t *vforkmany_shared, const pid_t pid)
 {
 	for (;;) {
-		int ret, status;
+		pid_t ret;
+		int status;
 
 		errno = 0;
 		ret = waitpid(pid, &status, 0);
-		if ((ret >= 0) || (errno != EINTR)) {
+		if (LIKELY((ret >= 0) || (errno != EINTR))) {
 			vforkmany_shared->waited++;
 			break;
 		}
@@ -96,16 +82,14 @@ static int stress_vforkmany(stress_args_t *args)
 	static uint8_t *stack_sig;
 	static bool vforkmany_vm = false;
 	static vforkmany_shared_t *vforkmany_shared;
-	static size_t vforkmany_vm_bytes = 0;
+	static size_t vforkmany_vm_bytes = DEFAULT_VFORKMANY_VM_BYTES;
 	static int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("vforkmany-vm", &vforkmany_vm);
-	(void)stress_get_setting("vforkmany-vm-bytes", &vforkmany_vm_bytes);
-	if (vforkmany_vm_bytes != 0) {
-		/* vm bytes supplied so enable vforkmany_vm */
+	if (stress_get_setting("vforkmany-vm-bytes", &vforkmany_vm_bytes)) {
 		vforkmany_vm = true;
-	} else {
-		vforkmany_vm_bytes = DEFAULT_VFORKMANY_VM_BYTES;
+		if (stress_instance_zero(args))
+			stress_usage_bytes(args, vforkmany_vm_bytes, vforkmany_vm_bytes * args->instances);
 	}
 
 	stress_ksm_memory_merge(1);
@@ -115,11 +99,13 @@ static int stress_vforkmany(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (stack_sig == MAP_FAILED) {
-		pr_inf_skip("%s: skipping stressor, cannot allocate signal stack,"
-			" errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu byte signal stack%s,"
+			" errno=%d (%s), skipping stressor\n",
+			args->name, (size_t)STRESS_SIGSTKSZ,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(stack_sig, STRESS_SIGSTKSZ, "altstack");
 	if (stress_sigaltstack(stack_sig, STRESS_SIGSTKSZ) < 0)
 		return EXIT_FAILURE;
 
@@ -128,12 +114,14 @@ static int stress_vforkmany(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (vforkmany_shared == MAP_FAILED) {
-		pr_inf("%s: mmap failed: %d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf("%s: failed to mmap %zu bytes%s, errno=%d (%s)\n",
+			args->name, sizeof(*vforkmany_shared),
+			stress_get_memfree_str(), errno, strerror(errno));
 		VOID_RET(int, stress_sigaltstack(NULL, 0));
 		(void)munmap((void *)stack_sig, STRESS_SIGSTKSZ);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(vforkmany_shared, sizeof(*vforkmany_shared), "state");
 	vforkmany_shared->terminate = false;
 	vforkmany_shared->invoked = false;
 	vforkmany_shared->waited = false;
@@ -142,15 +130,18 @@ static int stress_vforkmany(stress_args_t *args)
 	vforkmany_shared->duration = 0.0;
 	vforkmany_shared->counter = 0;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 fork_again:
 	chpid = fork();
 	if (chpid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto fork_again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
-		pr_err("%s: fork failed: errno=%d: (%s)\n",
+		pr_err("%s: fork failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)munmap((void *)vforkmany_shared, sizeof(*vforkmany_shared));
 		VOID_RET(int, stress_sigaltstack(NULL, 0));
@@ -177,24 +168,23 @@ fork_again:
 		do {
 			waste = (uint8_t *)mmap(NULL, waste_size, PROT_READ | PROT_WRITE,
 					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-			if (waste != MAP_FAILED)
+			if (UNLIKELY(waste != MAP_FAILED))
 				break;
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				_exit(0);
 			waste_size >>= 1;
 		} while (waste_size > 4096);
-
 
 		if (waste != MAP_FAILED) {
 			if (waste_size != vforkmany_vm_bytes) {
 				static char buf[32];
 
-				stress_uint64_to_str(buf, sizeof(buf), (uint64_t)waste_size);
+				stress_uint64_to_str(buf, sizeof(buf), (uint64_t)waste_size, 1, true);
 				pr_dbg("%s: could only mmap a region of size of %s\n", args->name, buf);
 			}
 			(void)stress_mincore_touch_pages_interruptible(waste, waste_size);
 		}
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			_exit(0);
 
 		if (vforkmany_vm) {
@@ -231,7 +221,7 @@ vfork_again:
 			 * instead poll the run time and break out
 			 * of the loop if we've run out of run time
 			 */
-			if (vforkmany_shared->terminate) {
+			if (UNLIKELY(vforkmany_shared->terminate)) {
 				stress_continue_set_flag(false);
 				break;
 			}
@@ -244,9 +234,9 @@ vfork_again:
 				pid = shim_vfork();
 				stress_bogo_inc(args);
 			}
-			if (pid < 0) {
+			if (UNLIKELY(pid < 0)) {
 				/* failed */
-				shim_sched_yield();
+				(void)shim_sched_yield();
 				_exit(0);
 			} else if (pid == 0) {
 				vforkmany_shared->invoked++;
@@ -281,14 +271,14 @@ vfork_again:
 					(void)stress_mincore_touch_pages_interruptible(waste, waste_size);
 
 				/* child, parent is blocked, spawn new child */
-				if (!args->max_ops || (stress_bogo_get(args) < args->max_ops))
+				if (LIKELY(stress_continue(args)))
 					goto vfork_again;
 				_exit(0);
 			} else {
 				/* parent, wait for child, and exit if not first parent */
 				if (pid >= 1)
 					(void)vforkmany_wait(vforkmany_shared, pid);
-				shim_sched_yield();
+				(void)shim_sched_yield();
 				if (getpid() != start_pid)
 					_exit(0);
 			}
@@ -321,7 +311,7 @@ finish:
 		double rate = vforkmany_shared->duration / (double)vforkmany_shared->counter;
 
 		stress_metrics_set(args, 0, "nanosecs to start vfork'd a process",
-			rate * 1000000000.0, STRESS_HARMONIC_MEAN);
+			rate * 1000000000.0, STRESS_METRIC_HARMONIC_MEAN);
 	}
 	if ((vforkmany_shared->waited > 0) && (vforkmany_shared->invoked == 0)) {
 		pr_fail("%s: no vfork'd processes got fully invoked correctly "
@@ -336,16 +326,16 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_vforkmany_vm,		stress_set_vforkmany_vm },
-	{ OPT_vforkmany_vm_bytes,	stress_set_vforkmany_vm_bytes },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_vforkmany_vm,       "vforkmany-vm",       TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_vforkmany_vm_bytes, "vforkmany-vm-bytes", TYPE_ID_SIZE_T_BYTES_VM, MIN_VFORKMANY_VM_BYTES, MAX_VFORKMANY_VM_BYTES, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_vforkmany_info = {
+const stressor_info_t stress_vforkmany_info = {
 	.stressor = stress_vforkmany,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

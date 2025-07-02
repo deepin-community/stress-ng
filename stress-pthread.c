@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -81,19 +81,9 @@ static stress_pthread_info_t pthreads[MAX_PTHREAD];
 
 #endif
 
-static int stress_set_pthread_max(const char *opt)
-{
-	uint64_t pthread_max;
-
-	pthread_max = stress_get_uint64(opt);
-	stress_check_range("pthread-max", pthread_max,
-		MIN_PTHREAD, MAX_PTHREAD);
-	return stress_set_setting("pthread-max", TYPE_ID_UINT64, &pthread_max);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_pthread_max,	stress_set_pthread_max },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_pthread_max, "pthread-max", TYPE_ID_UINT64, MIN_PTHREAD, MAX_PTHREAD, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_PTHREAD)
@@ -104,7 +94,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
     defined(HAVE_LINUX_FUTEX_H) &&	\
     defined(HAVE_SYSCALL) &&		\
     defined(__NR_get_robust_list)
-static inline long sys_get_robust_list(int pid, struct robust_list_head **head_ptr, size_t *len_ptr)
+static inline long int sys_get_robust_list(int pid, struct robust_list_head **head_ptr, size_t *len_ptr)
 {
 	return syscall(__NR_get_robust_list, pid, head_ptr, len_ptr);
 }
@@ -114,7 +104,7 @@ static inline long sys_get_robust_list(int pid, struct robust_list_head **head_p
     defined(HAVE_LINUX_FUTEX_H) &&	\
     defined(HAVE_SYSCALL) &&		\
     defined(__NR_set_robust_list)
-static inline long sys_set_robust_list(struct robust_list_head *head, size_t len)
+static inline long int sys_set_robust_list(struct robust_list_head *head, size_t len)
 {
 	return syscall(__NR_set_robust_list, head, len);
 }
@@ -177,13 +167,13 @@ static void OPTIMIZE3 stress_pthread_tid_address(stress_args_t *args)
 	uint64_t tid_addr = 0;
 
 	if (LIKELY(prctl(PR_GET_TID_ADDRESS, &tid_addr, 0, 0, 0) == 0)) {
-		unsigned long set_tid_addr;
+		unsigned long int set_tid_addr;
 
 		if (sizeof(void *) == 4)  {
 			set_tid_addr = stress_little_endian() ?
 				(tid_addr & 0xffffffff) : (tid_addr >> 32);
 		} else {
-			set_tid_addr = (unsigned long)tid_addr;
+			set_tid_addr = (unsigned long int)tid_addr;
 		}
 
 		if (set_tid_addr) {
@@ -197,7 +187,7 @@ static void OPTIMIZE3 stress_pthread_tid_address(stress_args_t *args)
 
 			errno = 0;
 			tid2 = shim_gettid();
-			if ((errno == 0) && (tid1 != tid2)) {
+			if (UNLIKELY((errno == 0) && (tid1 != tid2))) {
 				pr_fail("%s: set_tid_address failed, returned tid %d, expecting tid %d\n",
 					args->name, (int)tid1, (int)tid2);
 			}
@@ -214,7 +204,6 @@ static void OPTIMIZE3 stress_pthread_tid_address(stress_args_t *args)
  */
 static void *stress_pthread_func(void *parg)
 {
-	static void *nowt = NULL;
 	int ret;
 	const double t_run = stress_time_now();
 	pid_t tgid_unused;
@@ -241,7 +230,7 @@ static void *stress_pthread_func(void *parg)
 	/*
 	 *  Check that get_robust_list() works OK
 	 */
-	if (sys_get_robust_list(0, &head, &len) < 0) {
+	if (UNLIKELY(sys_get_robust_list(0, &head, &len) < 0)) {
 		if (errno != ENOSYS) {
 			pr_fail("%s: get_robust_list failed, tid=%d, errno=%d (%s)\n",
 				args->name, (int)tid, errno, strerror(errno));
@@ -255,7 +244,7 @@ static void *stress_pthread_func(void *parg)
 
 			/* Currently disabled, valgrind complains that head is out of range */
 			if (sys_set_robust_list(&new_head, len) < 0) {
-				if (errno != ENOSYS) {
+				if (UNLIKELY(errno != ENOSYS)) {
 					pr_fail("%s: set_robust_list failed, tid=%d, errno=%d (%s)\n",
 						args->name, (int)tid, errno, strerror(errno));
 						goto die;
@@ -263,11 +252,11 @@ static void *stress_pthread_func(void *parg)
 			}
 
 			/* Exercise invalid zero length */
-			VOID_RET(long, sys_set_robust_list(&new_head, 0));
+			VOID_RET(long int, sys_set_robust_list(&new_head, 0));
 
 #if 0
 			/* Exercise invalid length */
-			VOID_RET(long, sys_set_robust_list(new_head, (size_t)-1));
+			VOID_RET(long int, sys_set_robust_list(new_head, (size_t)-1));
 #endif
 		}
 #endif
@@ -275,7 +264,7 @@ static void *stress_pthread_func(void *parg)
 	 *  Check get_robust_list with an invalid PID
 	 */
 	}
-	VOID_RET(long, sys_get_robust_list(-1, &head, &len));
+	VOID_RET(long int, sys_get_robust_list(-1, &head, &len));
 #endif
 
 	/*
@@ -331,14 +320,14 @@ static void *stress_pthread_func(void *parg)
 	 *  Bump count of running threads
 	 */
 	ret = shim_pthread_spin_lock(&spinlock);
-	if (ret) {
+	if (UNLIKELY(ret)) {
 		pr_fail("%s: pthread_spin_lock failed, tid=%d, errno=%d (%s)\n",
 			args->name, (int)tid, ret, strerror(ret));
 		goto die;
 	}
 	pthread_count++;
 	ret = shim_pthread_spin_unlock(&spinlock);
-	if (ret) {
+	if (UNLIKELY(ret)) {
 		pr_fail("%s: pthread_spin_unlock failed, tid=%d, errno=%d (%s)\n",
 			args->name, (int)tid, ret, strerror(ret));
 		goto die;
@@ -347,7 +336,7 @@ static void *stress_pthread_func(void *parg)
 	/*
 	 *  Did parent inform pthreads to terminate?
 	 */
-	if (!keep_thread_running())
+	if (UNLIKELY(!keep_thread_running()))
 		goto die;
 
 	/*
@@ -355,7 +344,7 @@ static void *stress_pthread_func(void *parg)
 	 *  indicate it is time to die
 	 */
 	ret = pthread_mutex_lock(&mutex);
-	if (ret) {
+	if (UNLIKELY(ret)) {
 		pr_fail("%s: pthread_mutex_lock failed, tid=%d, errno=%d (%s)\n",
 			args->name, (int)tid, ret, strerror(ret));
 		goto die;
@@ -374,7 +363,7 @@ static void *stress_pthread_func(void *parg)
 
 		ret = pthread_cond_timedwait(&cond, &mutex, &abstime);
 		if (ret) {
-			if (ret != ETIMEDOUT) {
+			if (UNLIKELY(ret != ETIMEDOUT)) {
 				pr_fail("%s: pthread_cond_wait failed, tid=%d, errno=%d (%s)\n",
 					args->name, (int)tid, ret, strerror(ret));
 				break;
@@ -385,7 +374,7 @@ yield:
 		(void)shim_sched_yield();
 	}
 	ret = pthread_mutex_unlock(&mutex);
-	if (ret)
+	if (UNLIKELY(ret))
 		pr_fail("%s: pthread_mutex_unlock failed, tid=%d, errno=%d (%s)\n",
 			args->name, (int)tid, ret, strerror(ret));
 
@@ -430,7 +419,7 @@ die:
 
 	stress_pthread_tid_address(args);
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -466,9 +455,9 @@ static int stress_pthread(stress_args_t *args)
 	 *  in pthread or this process to check if
 	 *  SIGALRM has been sent.
 	 */
-	sigemptyset(&set);
-	sigaddset(&set, SIGALRM);
-	sigprocmask(SIG_BLOCK, &set, NULL);
+	(void)sigemptyset(&set);
+	(void)sigaddset(&set, SIGALRM);
+	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
 	if (!stress_get_setting("pthread-max", &pthread_max)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
@@ -514,6 +503,8 @@ static int stress_pthread(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -524,7 +515,7 @@ static int stress_pthread(stress_args_t *args)
 
 		(void)shim_memset(&pthreads, 0, sizeof(pthreads));
 		ret = pthread_mutex_lock(&mutex);
-		if (ret) {
+		if (UNLIKELY(ret)) {
 			stop_running();
 			continue;
 		}
@@ -546,12 +537,12 @@ static int stress_pthread(stress_args_t *args)
 			 *  and this allows us to exercise the pthread stack
 			 *  setting.
 			 */
-			pthreads[i].stack = calloc(1, stack_size);
-			if (!pthreads[i].stack)
+			pthreads[i].stack = (void *)calloc(1, stack_size);
+			if (UNLIKELY(!pthreads[i].stack))
 				break;
 
 			ret = pthread_attr_init(&attr);
-			if (ret) {
+			if (UNLIKELY(ret)) {
 				(void)pthread_mutex_unlock(&mutex);
 				pr_fail("%s: pthread_attr_init failed, errno=%d (%s)\n",
 					args->name, ret, strerror(ret));
@@ -559,7 +550,7 @@ static int stress_pthread(stress_args_t *args)
 				goto reap;
 			}
 			ret = pthread_attr_setstack(&attr, pthreads[i].stack, stack_size);
-			if (ret) {
+			if (UNLIKELY(ret)) {
 				(void)pthread_mutex_unlock(&mutex);
 				pr_fail("%s: pthread_attr_setstack failed, errno=%d (%s)\n",
 					args->name, ret, strerror(ret));
@@ -572,7 +563,7 @@ static int stress_pthread(stress_args_t *args)
 			pthreads[i].t_run = pthreads[i].t_create;
 			pthreads[i].ret = pthread_create(&pthreads[i].pthread, NULL,
 				stress_pthread_func, (void *)&pargs);
-			if (pthreads[i].ret) {
+			if (UNLIKELY(pthreads[i].ret)) {
 				/* Out of resources, don't try any more */
 				if (pthreads[i].ret == EAGAIN) {
 					limited++;
@@ -588,12 +579,12 @@ static int stress_pthread(stress_args_t *args)
 			if (i + 1 > maximum)
 				maximum = i + 1;
 			stress_bogo_inc(args);
-			if (!(keep_running() && stress_continue(args)))
+			if (UNLIKELY(!(keep_running() && stress_continue(args))))
 				break;
 		}
 		attempted++;
 		ret = pthread_mutex_unlock(&mutex);
-		if (ret) {
+		if (UNLIKELY(ret)) {
 			stop_running();
 			goto reap;
 
@@ -605,14 +596,14 @@ static int stress_pthread(stress_args_t *args)
 		for (j = 0; j < 1000; j++) {
 			bool all_running = false;
 
-			if (!stress_continue(args)) {
+			if (UNLIKELY(!stress_continue(args))) {
 				stop_running();
 				goto reap;
 			}
 
 			if (!locked) {
 				ret = shim_pthread_spin_lock(&spinlock);
-				if (ret) {
+				if (UNLIKELY(ret)) {
 					pr_fail("%s: pthread_spin_lock failed (parent), errno=%d (%s)\n",
 						args->name, ret, strerror(ret));
 					stop_running();
@@ -624,7 +615,7 @@ static int stress_pthread(stress_args_t *args)
 
 			if (locked) {
 				ret = shim_pthread_spin_unlock(&spinlock);
-				if (ret) {
+				if (UNLIKELY(ret)) {
 					pr_fail("%s: pthread_spin_unlock failed (parent), errno=%d (%s)\n",
 						args->name, ret, strerror(ret));
 					stop_running();
@@ -639,8 +630,7 @@ static int stress_pthread(stress_args_t *args)
 		}
 
 #if defined(HAVE_PTHREAD_SIGQUEUE) &&	\
-    defined(HAVE_SIGWAITINFO) &&	\
-    !defined(__CYGWIN__)
+    defined(HAVE_SIGWAITINFO)
 		for (j = 0; j < i; j++) {
 			union sigval value;
 
@@ -655,7 +645,7 @@ static int stress_pthread(stress_args_t *args)
 reap:
 		keep_thread_running_flag = false;
 		ret = pthread_cond_broadcast(&cond);
-		if (ret) {
+		if (UNLIKELY(ret)) {
 			pr_fail("%s: pthread_cond_broadcast failed (parent), errno=%d (%s)\n",
 				args->name, ret, strerror(ret));
 			stop_running();
@@ -666,7 +656,7 @@ reap:
 				double t;
 
 				ret = pthread_join(pthreads[j].pthread, NULL);
-				if ((ret) && (ret != ESRCH)) {
+				if (UNLIKELY((ret) && (ret != ESRCH))) {
 					pr_fail("%s: pthread_join failed (parent), errno=%d (%s)\n",
 						args->name, ret, strerror(ret));
 					stop_running();
@@ -687,13 +677,13 @@ reap:
 
 	average = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs to start a pthread",
-		average * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		average * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	(void)snprintf(msg, sizeof(msg), "%% of %" PRIu64 " pthreads created",
-		pthread_max * args->num_instances);
+		pthread_max * args->instances);
 	if (attempted > 0)
 		stress_metrics_set(args, 1, msg,
 			100.0 * (double)(attempted - limited) / (double)attempted,
-			STRESS_GEOMETRIC_MEAN);
+			STRESS_METRIC_GEOMETRIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -712,18 +702,18 @@ reap:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_pthread_info = {
+const stressor_info_t stress_pthread_info = {
 	.stressor = stress_pthread,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_pthread_info = {
+const stressor_info_t stress_pthread_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without pthread support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,20 +20,26 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 #include "core-madvise.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 #include "core-pragma.h"
+
+typedef struct {
+	bool mmapfixed_mlock;
+	bool mmapfixed_numa;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask;
+	stress_numa_mask_t *numa_nodes;
+#endif
+} mmapfixed_info_t;
 
 static const stress_help_t help[] = {
 	{ NULL,	"mmapfixed N",		"start N workers stressing mmap with fixed mappings" },
 	{ NULL,	"mmapfixed-mlock",	"attempt to mlock pages into memory" },
+	{ NULL,	"mmapfixed-numa",	"bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	"mmapfixed-ops N",	"stop after N mmapfixed bogo operations" },
 	{ NULL,	NULL,			NULL }
 };
-
-static int stress_set_mmapfixed_mlock(const char *opt)
-{
-	return stress_set_setting_true("mmapfixed-mlock", opt);
-}
 
 #if UINTPTR_MAX == MAX_32
 #define MMAP_TOP	(0x80000000UL)
@@ -53,7 +59,7 @@ static bool OPTIMIZE3 stress_mmapfixed_is_mapped_slow(
 	size_t len,
 	const size_t page_size)
 {
-	uint32_t vec[PAGE_CHUNKS / sizeof(uint32_t)] ALIGN64;
+	uint64_t vec[PAGE_CHUNKS / sizeof(uint64_t)] ALIGN64;
 	ssize_t n = (ssize_t)len;
 	size_t n_pages = len / page_size;
 
@@ -113,21 +119,20 @@ static int stress_mmapfixed_child(stress_args_t *args, void *context)
 	const uintptr_t page_mask = ~((uintptr_t)(page_size - 1));
 #endif
 	uintptr_t addr = MMAP_TOP;
-	bool mmapfixed_mlock = false;
-
-	(void)context;
-
-	(void)stress_get_setting("mmapfixed-mlock", &mmapfixed_mlock);
+	int rc = EXIT_SUCCESS;
+	mmapfixed_info_t *info = (mmapfixed_info_t *)context;
 
 	VOID_RET(int, stress_sighandler(args->name, SIGSEGV,
 				stress_sig_handler_exit, NULL));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		uint8_t *buf;
 		int flags = MAP_FIXED | MAP_ANONYMOUS;
-		size_t  sz = page_size * (1 + stress_mwc8modn(7));
+		const size_t sz = page_size * (1 + stress_mwc8modn(7));
 
 #if defined(MAP_SHARED) &&	\
     defined(MAP_PRIVATE)
@@ -148,7 +153,7 @@ static int stress_mmapfixed_child(stress_args_t *args, void *context)
 		flags |= stress_mwc1() ? MAP_FIXED : MAP_FIXED_NOREPLACE;
 #endif
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		if (stress_mmapfixed_is_mapped((void *)addr, sz, page_size))
@@ -160,8 +165,11 @@ static int stress_mmapfixed_child(stress_args_t *args, void *context)
 		buf = (uint8_t *)mmap((void *)addr, sz, PROT_READ | PROT_WRITE, flags, -1, 0);
 		if (buf == MAP_FAILED)
 			goto next;
-
-		if (mmapfixed_mlock)
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		if (info->mmapfixed_numa)
+			stress_numa_randomize_pages(args, info->numa_nodes, info->numa_mask, buf, sz, page_size);
+#endif
+		if (info->mmapfixed_mlock)
 			(void)shim_mlock(buf, sz);
 		(void)stress_madvise_random(buf, sz);
 #if defined(HAVE_MREMAP) &&	\
@@ -188,14 +196,18 @@ static int stress_mmapfixed_child(stress_args_t *args, void *context)
 			if (newbuf && (newbuf != MAP_FAILED))
 				buf = newbuf;
 
-			if (mmapfixed_mlock)
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			if (info->mmapfixed_numa)
+				stress_numa_randomize_pages(args, info->numa_nodes, info->numa_mask, buf, sz, page_size);
+#endif
+			if (info->mmapfixed_mlock)
 				(void)shim_mlock(buf, sz);
 			(void)stress_madvise_random(buf, sz);
 
 			for (mask = ~(uintptr_t)0; mask > page_size; mask >>= 1) {
-				uintptr_t rndaddr = rndaddr_base & mask;
+				const uintptr_t rndaddr = rndaddr_base & mask;
 				uint64_t *buf64 = (uint64_t *)buf;
-				uint64_t val64 = (uint64_t)(uintptr_t)buf64;
+				const uint64_t val64 = (uint64_t)(uintptr_t)buf64;
 
 				if (rndaddr == last_rndaddr)
 					continue;
@@ -213,14 +225,19 @@ static int stress_mmapfixed_child(stress_args_t *args, void *context)
 				if (newbuf && (newbuf != MAP_FAILED)) {
 					buf64 = (uint64_t *)newbuf;
 
-					if (*buf64 != val64) {
+					if (UNLIKELY(*buf64 != val64)) {
 						pr_fail("%s: remap from %p to %p contains 0x%" PRIx64
 							" and not expected value 0x%" PRIx64 "\n",
 							args->name, buf, newbuf, *buf64, val64);
+						rc = EXIT_FAILURE;
 					}
 
 					buf = newbuf;
-					if (mmapfixed_mlock)
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+					if (info->mmapfixed_numa)
+						stress_numa_randomize_pages(args, info->numa_nodes, info->numa_mask, buf, sz, page_size);
+#endif
+					if (info->mmapfixed_mlock)
 						(void)shim_mlock(buf, sz);
 					(void)stress_madvise_random(buf, sz);
 				}
@@ -234,11 +251,11 @@ next:
 		addr >>= 1;
 		if (addr < MMAP_BOTTOM)
 			addr = MMAP_TOP;
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -247,18 +264,53 @@ next:
  */
 static int stress_mmapfixed(stress_args_t *args)
 {
-	return stress_oomable_child(args, NULL, stress_mmapfixed_child, STRESS_OOMABLE_QUIET);
+	mmapfixed_info_t info;
+	int ret;
+
+	info.mmapfixed_mlock = false;
+	info.mmapfixed_numa = false;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	info.numa_mask = NULL;
+	info.numa_nodes = NULL;
+#endif
+
+	(void)stress_get_setting("mmapfixed-mlock", &info.mmapfixed_mlock);
+	(void)stress_get_setting("mmapfixed-numa", &info.mmapfixed_numa);
+
+	if (info.mmapfixed_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &info.numa_nodes,
+						&info.numa_mask, "--mmapfixed-numa",
+						&info.mmapfixed_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --mmapfixed-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		info.mmapfixed_numa = false;
+#endif
+	}
+	ret = stress_oomable_child(args, &info, stress_mmapfixed_child, STRESS_OOMABLE_QUIET);
+
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (info.numa_mask)
+		stress_numa_mask_free(info.numa_mask);
+	if (info.numa_nodes)
+		stress_numa_mask_free(info.numa_nodes);
+#endif
+
+	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mmapfixed_mlock,	stress_set_mmapfixed_mlock },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_mmapfixed_mlock, "mmapfixed-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmapfixed_numa,  "mmapfixed-numa", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_mmapfixed_info = {
+const stressor_info_t stress_mmapfixed_info = {
 	.stressor = stress_mmapfixed,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,6 @@
 
 int main(int argc, char **argv)
 {
-	return __builtin_popcountll((unsigned long long)argc);
+	return __builtin_popcountll((unsigned long long int)argc);
 }
 

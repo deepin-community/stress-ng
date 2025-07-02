@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,6 +66,9 @@ static void OPTIMIZE3 NORETURN stress_resched_child(
 #if defined(SCHED_BATCH)
 		SCHED_BATCH,
 #endif
+#if defined(SCHED_EXT)
+		SCHED_EXT,
+#endif
 #if defined(SCHED_IDLE)
 		SCHED_IDLE,
 #endif
@@ -101,12 +104,12 @@ static void OPTIMIZE3 NORETURN stress_resched_child(
 						_exit(EXIT_FAILURE);
 					}
 				}
-				VOID_RET(int, shim_sched_yield());
+				(void)shim_sched_yield();
 				stress_bogo_inc(args);
 				(*yield_ptr)++;
 			}
 #else
-			VOID_RET(int, shim_sched_yield());
+			(void)shim_sched_yield();
 			stress_bogo_inc(args);
 			(*yield_ptr)++;
 #endif
@@ -114,7 +117,7 @@ static void OPTIMIZE3 NORETURN stress_resched_child(
 
 		VOID_RET(int, nice(1));
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 	}
 	_exit(rc);
@@ -126,20 +129,20 @@ static void OPTIMIZE3 NORETURN stress_resched_child(
  */
 static void stress_resched_spawn(
 	stress_args_t *args,
-	pid_t *pids,
-	const int index,
+	stress_pid_t *s_pids,
+	const int idx,
 	const int max_prio,
 	uint64_t *yields)
 {
 	pid_t pid;
 
-	pids[index] = -1;
+	s_pids[idx].pid = -1;
 
 	pid = fork();
 	if (pid == 0) {
-		stress_resched_child(args, index, max_prio, yields);
+		stress_resched_child(args, idx, max_prio, yields);
 	} else if (pid > 0) {
-		pids[index] = pid;
+		s_pids[idx].pid = pid;
 	}
 }
 
@@ -149,15 +152,13 @@ static void stress_resched_spawn(
  */
 static int stress_resched(stress_args_t *args)
 {
-	pid_t *pids;
-	int rc = EXIT_SUCCESS;
-
-#if defined(HAVE_SETPRIORITY)
-	int i, pids_max, max_prio = 19;
+	stress_pid_t *s_pids;
+	int i, s_pids_max, max_prio = 19, rc = EXIT_SUCCESS;
 	size_t yields_size;
 	uint64_t *yields;
 
-#if defined(RLIMIT_NICE)
+#if defined(HAVE_SETPRIORITY) &&	\
+    defined(RLIMIT_NICE)
 	{
 		struct rlimit rlim;
 
@@ -166,38 +167,42 @@ static int stress_resched(stress_args_t *args)
 		}
 	}
 #endif
-#endif
-	pids_max = max_prio + 1; /* 0.. max_prio */
-	pids = calloc((size_t)pids_max, sizeof(*pids));
-	if (!pids) {
-		pr_inf_skip("%s: cannot allocate pids array, skipping stressor, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+	s_pids_max = max_prio + 1; /* 0.. max_prio */
+	s_pids = stress_sync_s_pids_mmap((size_t)s_pids_max);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, s_pids_max, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
-	for (i = 0; i < pids_max; i++)
-		pids[i] = -1;
+	for (i = 0; i < s_pids_max; i++)
+		s_pids[i].pid = -1;
 
 	if (stress_sighandler(args->name, SIGUSR1, stress_resched_usr1_handler, NULL) < 0) {
 		rc = EXIT_NO_RESOURCE;
-		goto free_pids;
+		goto tidy_s_pids;
 	}
 
-	yields_size = ((sizeof(*yields) * (size_t)pids_max) + args->page_size - 1) & ~(args->page_size - 1);
+	yields_size = ((sizeof(*yields) * (size_t)s_pids_max) + args->page_size - 1) & ~(args->page_size - 1);
 	yields = (uint64_t *)stress_mmap_populate(NULL, yields_size,
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (yields == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap yield counter array, skipping stressor, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu byte yield counter array%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, yields_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
-		goto free_pids;
+		goto tidy_s_pids;
 	}
+	stress_set_vma_anon_name(yields, yields_size, "yield-stats");
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/* Start off one child process per positive nice level */
-	for (i = 0; stress_continue(args) && (i < pids_max); i++)
-		stress_resched_spawn(args, pids, i, max_prio, yields);
+	for (i = 0; LIKELY(stress_continue(args) && (i < s_pids_max)); i++)
+		stress_resched_spawn(args, s_pids, i, max_prio, yields);
 
 	do {
 		pid_t pid;
@@ -213,36 +218,36 @@ static int stress_resched(stress_args_t *args)
 			 *  Find unstarted process or process that just terminated
 			 *  and respawn it at the nice level of the given slot
 			 */
-			for (i = 0; i < pids_max; i++) {
-				if ((pids[i] == -1) || (pid == pids[i]))
-					stress_resched_spawn(args, pids, i, max_prio, yields);
+			for (i = 0; i < s_pids_max; i++) {
+				if ((s_pids[i].pid == -1) || (pid == s_pids[i].pid))
+					stress_resched_spawn(args, s_pids, i, max_prio, yields);
 			}
 		}
 	} while (stress_continue(args));
 
-	if (stress_kill_and_wait_many(args, pids, pids_max, SIGALRM, true) == EXIT_FAILURE)
+	if (stress_kill_and_wait_many(args, s_pids, s_pids_max, SIGALRM, true) == EXIT_FAILURE)
 		rc = EXIT_FAILURE;
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	/*
 	 *  Dump stats for just instance 0 to reduce output
 	 */
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		uint64_t total_yields = 0;
 
-		for (i = 0; i < pids_max; i++)
+		for (i = 0; i < s_pids_max; i++)
 			total_yields += yields[i];
 
 		pr_block_begin();
-		for (i = 0; i < pids_max; i++) {
+		for (i = 0; i < s_pids_max; i++) {
 			if (yields[i] > 0) {
-				double percent = 100.0 * ((double)yields[i]/ (double)total_yields);
+				const double percent = 100.0 * ((double)yields[i]/ (double)total_yields);
 
 				if (i == 0) {
 					pr_dbg("%s: prio %2d: %5.2f%% yields\n",
 						args->name, i, percent);
 				} else {
-					double scale = (double)yields[i] / (double)yields[i - 1];
+					const double scale = (double)yields[i] / (double)yields[i - 1];
 
 					pr_dbg("%s: prio %2d: %5.2f%% yields (prio %2d x %f)%s\n",
 						args->name, i, percent, i - 1, scale,
@@ -254,23 +259,23 @@ static int stress_resched(stress_args_t *args)
 	}
 
 	(void)munmap((void *)yields, yields_size);
-free_pids:
-	free(pids);
+tidy_s_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, (size_t)s_pids_max);
 
 	return rc;
 }
 
-stressor_info_t stress_resched_info = {
+const stressor_info_t stress_resched_info = {
 	.stressor = stress_resched,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
-stressor_info_t stress_resched_info = {
+const stressor_info_t stress_resched_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without Linux scheduling support"

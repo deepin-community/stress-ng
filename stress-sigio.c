@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -65,7 +65,7 @@ static void MLOCKED_TEXT stress_sigio_handler(int signum)
 		/*
 		 *  Data is ready, so drain as much as possible
 		 */
-		while (stress_continue_flag() && (stress_time_now() < time_end)) {
+		while (LIKELY(stress_continue_flag() && (stress_time_now() < time_end))) {
 			ssize_t ret;
 
 			got_err = 0;
@@ -97,21 +97,24 @@ static int stress_sigio(stress_args_t *args)
 	pid = -1;
 
 	time_end = args->time_end;
-	buffers = stress_mmap_populate(NULL, 2 * BUFFER_SIZE,
+	buffers = (char *)stress_mmap_populate(NULL, 2 * BUFFER_SIZE,
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffers == MAP_FAILED) {
-		pr_inf("%s: cannot allocate I/O buffers, skipping stressor\n",
-			args->name);
+		pr_inf_skip("%s: failed to mmap %d byte I/O buffers%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, 2 * BUFFER_SIZE,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffers, 2 * BUFFER_SIZE, "io-buffers");
 	rd_buffer = &buffers[BUFFER_SIZE * 0];
 	wr_buffer = &buffers[BUFFER_SIZE * 1];
 
 	if (pipe(fds) < 0) {
 		pr_err("%s: pipe failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
-		(void)munmap(buffers, 2 * BUFFER_SIZE);
+		(void)munmap((void *)buffers, 2 * BUFFER_SIZE);
 		return EXIT_NO_RESOURCE;
 	}
 	rd_fd = fds[0];
@@ -145,7 +148,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -179,6 +182,8 @@ again:
 	(void)close(fds[1]);
 	fds[1] = -1;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	if (stress_sighandler(args->name, SIGIO, stress_sigio_handler, NULL) < 0)
@@ -211,7 +216,8 @@ again:
 	t_delta = stress_time_now() - t_start;
 	rate = (t_delta > 0.0) ? (double)async_sigs / t_delta : 0.0;
 	stress_metrics_set(args, 0, "SIGIO signals per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
+
 
 finish:
 	/*  And ignore IO signals from now on */
@@ -233,21 +239,21 @@ err:
 	if (fds[1] != -1)
 		(void)close(fds[1]);
 
-	(void)munmap(buffers, 2 * BUFFER_SIZE);
+	(void)munmap((void *)buffers, 2 * BUFFER_SIZE);
 
 	return rc;
 }
 
-stressor_info_t stress_sigio_info = {
+const stressor_info_t stress_sigio_info = {
 	.stressor = stress_sigio,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_sigio_info = {
+const stressor_info_t stress_sigio_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without fcntl() commands O_ASYNC, O_NONBLOCK, F_SETOWN, F_GETFL or F_SETFL"

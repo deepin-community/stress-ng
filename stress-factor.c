@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,25 +22,19 @@
 #include <gmp.h>
 #endif
 
+#define MIN_FACTOR_DIGITS	(8)
+#define MAX_FACTOR_DIGITS	(100000000)
+
 static const stress_help_t help[] = {
-	{ NULL,	"factor N",		"start N workers performing multi-precision floating point operations" },
+	{ NULL,	"factor N",		"start N workers performing large integer factorization" },
 	{ NULL,	"factor-digits N",	"specific number of digits of number to factor" },
 	{ NULL,	"factor-ops N",		"stop after N factorisation operations" },
 	{ NULL,	NULL,		 	NULL }
 };
 
-static int stress_set_factor_digits(const char *opt)
-{
-	size_t factor_digits;
-
-	factor_digits = (size_t)stress_get_int32(opt);
-	stress_check_range("factor-digits", (uint64_t)factor_digits, 8, 100000000);
-	return stress_set_setting("factor-digits", TYPE_ID_SIZE_T, &factor_digits);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_factor_digits,	stress_set_factor_digits },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_factor_digits, "factor-digits", TYPE_ID_SIZE_T, MIN_FACTOR_DIGITS, MAX_FACTOR_DIGITS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_GMP_H) &&	\
@@ -48,18 +42,27 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
 
 static int OPTIMIZE3 stress_factor(stress_args_t *args)
 {
-	size_t factor_digits = 10;
+	size_t factor_digits = 10, max_digits = 0;
 	double total_factors = 0.0, mean, t, duration = 0.0, rate;
 	uint64_t ops, factors;
 	mpz_t value, divisor, q, r, tmp;
 
-	(void)stress_get_setting("factor-digits", &factor_digits);
+	if (!stress_get_setting("factor-digits", &factor_digits)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			factor_digits = MAX_FACTOR_DIGITS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			factor_digits = MIN_FACTOR_DIGITS;
+	}
 
 	mpz_inits(value, divisor, q, r, tmp, NULL);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
+		size_t digits;
+
 		/* Step #1, generate a number to factorize */
 		mpz_set_ui(value, 2);
 		do {
@@ -71,7 +74,7 @@ static int OPTIMIZE3 stress_factor(stress_args_t *args)
 			unsigned long int n;
 			size_t digitsleft = factor_digits - mpz_sizeinbase(value, 10);
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto abort;
 
 			if (digitsleft > 6)
@@ -88,6 +91,10 @@ static int OPTIMIZE3 stress_factor(stress_args_t *args)
 			mpz_mul(value, value, tmp);
 		} while (mpz_sizeinbase(value, 10) < factor_digits);
 
+		digits = mpz_sizeinbase(value, 10);
+		if (digits > max_digits)
+			max_digits = digits;
+
 		/* Step #2, factorize it */
 		t = stress_time_now();
 		mpz_set_ui(divisor, 2);
@@ -95,7 +102,7 @@ static int OPTIMIZE3 stress_factor(stress_args_t *args)
 		factors = 0;
 
 		while (mpz_cmp_ui(value, 1) != 0) {
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				goto abort;
 			mpz_cdiv_qr(q, r, value, divisor);
 
@@ -119,30 +126,31 @@ abort:
 
 	ops = stress_bogo_get(args);
 	mean = (ops > 0) ? total_factors / (double)ops : 0.0;
-	stress_metrics_set(args, 0, "average number of factors", mean, STRESS_GEOMETRIC_MEAN);
+	stress_metrics_set(args, 0, "average number of factors", mean, STRESS_METRIC_GEOMETRIC_MEAN);
 
 	rate = (ops > 0) ? (double)duration / (double)ops : 0.0;
-	stress_metrics_set(args, 1, "millisec per factorization", 1000.0 * rate, STRESS_HARMONIC_MEAN);
+	stress_metrics_set(args, 1, "millisec per factorization", 1000.0 * rate, STRESS_METRIC_HARMONIC_MEAN);
+	stress_metrics_set(args, 2, "digits in largest factor", (double)max_digits, STRESS_METRIC_MAXIMUM);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_factor_info = {
+const stressor_info_t stress_factor_info = {
 	.stressor = stress_factor,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_factor_info = {
+const stressor_info_t stress_factor_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without gmp.h, or libgmp"

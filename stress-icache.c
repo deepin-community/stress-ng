@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,6 +33,7 @@ static const stress_help_t help[] = {
      defined(STRESS_ARCH_ARM) ||	\
      defined(STRESS_ARCH_RISCV) ||	\
      defined(STRESS_ARCH_S390) ||	\
+     defined(STRESS_ARCH_PPC) ||	\
      defined(STRESS_ARCH_PPC64)) &&	\
      defined(HAVE_MPROTECT)
 
@@ -49,7 +50,7 @@ static int icache_madvise_nohugepage(
 		 */
 		if (errno != EINVAL) {
 			pr_inf("%s: madvise MADV_NOHUGEPAGE failed on text "
-				"page %p: errno=%d (%s)\n",
+				"page %p, errno=%d (%s)\n",
 				args->name, addr, errno, strerror(errno));
 			return -1;
 		}
@@ -72,7 +73,7 @@ static int NOINLINE icache_mprotect(
 
 	ret = mprotect(addr, size, prot);
 	if (ret < 0) {
-		pr_inf("%s: mprotect failed on text page %p: errno=%d (%s)\n",
+		pr_inf("%s: mprotect failed on text page %p, errno=%d (%s)\n",
 			args->name, addr, errno, strerror(errno));
 	}
 	return ret;
@@ -151,16 +152,22 @@ static int stress_icache(stress_args_t *args)
 	void *page;
 	int ret;
 
+	stress_catch_sigsegv();
+
 	page = stress_mmap_populate(NULL, page_size,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (page == MAP_FAILED) {
-		pr_inf_skip("%s: could not mmap %zd sized page, skipping stressor\n",
-			args->name, page_size);
+		pr_inf_skip("%s: could not mmap %zu sized page%s, errno=%d (%s), skipping stressor\n",
+			args->name, page_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(page, page_size, "opcodes");
 	(void)shim_memcpy(page, &stress_ret_opcode.opcodes, stress_ret_opcode.len);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 	ret = stress_icache_func(args, page, page_size);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -169,16 +176,16 @@ static int stress_icache(stress_args_t *args)
 	return ret;
 }
 
-stressor_info_t stress_icache_info = {
+const stressor_info_t stress_icache_info = {
 	.stressor = stress_icache,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.supported = stress_asm_ret_supported,
 	.help = help
 };
 #else
-stressor_info_t stress_icache_info = {
+const stressor_info_t stress_icache_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU_CACHE,
 	.supported = stress_asm_ret_supported,
 	.help = help,
 	.unimplemented_reason = "built without mprotect() or userspace instruction cache flushing support"

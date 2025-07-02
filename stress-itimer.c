@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,36 +32,16 @@ static const stress_help_t help[] = {
 	{ NULL, NULL,		NULL }
 };
 
-/*
- *  stress_set_itimer_freq()
- *	set itimer frequency from given option
- */
-static int stress_set_itimer_freq(const char *opt)
-{
-	uint64_t itimer_freq;
-
-	itimer_freq = stress_get_uint64(opt);
-	stress_check_range("itimer-freq", itimer_freq,
-		MIN_ITIMER_FREQ, MAX_ITIMER_FREQ);
-	return stress_set_setting("itimer-freq", TYPE_ID_UINT64, &itimer_freq);
-}
-
-static int stress_set_itimer_rand(const char *opt)
-{
-	return stress_set_setting_true("itimer-rand", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_itimer_freq,	stress_set_itimer_freq },
-	{ OPT_itimer_rand,	stress_set_itimer_rand },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_itimer_freq, "itimer-freq", TYPE_ID_UINT64, MIN_ITIMER_FREQ, MAX_ITIMER_FREQ, NULL },
+	{ OPT_itimer_rand, "itimer-rand", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_GETITIMER) &&	\
     defined(HAVE_SETITIMER)
 
-static volatile uint64_t itimer_counter = 0;
-static uint64_t max_ops;
+static stress_args_t *s_args;
 static double rate_us;
 static double time_end;
 
@@ -107,42 +87,28 @@ static void stress_itimer_set(struct itimerval *timer)
 }
 
 /*
- *  stress_itimer_stress_continue(args)
- *      returns true if we can keep on running a stressor
- */
-static bool HOT OPTIMIZE3 stress_itimer_stress_continue(void)
-{
-	return (LIKELY(stress_continue_flag()) &&
-		LIKELY(!max_ops || (itimer_counter < max_ops)));
-}
-
-/*
  *  stress_itimer_handler()
  *	catch itimer signal and cancel if no more runs flagged
  */
-static void stress_itimer_handler(int sig)
+static void OPTIMIZE3 stress_itimer_handler(int sig)
 {
 	struct itimerval timer;
 	sigset_t mask;
 
 	(void)sig;
 
-	if (!stress_itimer_stress_continue())
-		goto cancel;
-	itimer_counter++;
-
 	if (sigpending(&mask) == 0)
 		if (sigismember(&mask, SIGINT))
 			goto cancel;
+
+	if (LIKELY(!stress_continue(s_args)))
+		goto cancel;
+	stress_bogo_inc(s_args);
 	/* High freq timer, check periodically for timeout */
-	if ((itimer_counter & 65535) == 0)
+	if ((stress_bogo_get(s_args) & 65535) == 0)
 		if (stress_time_now() > time_end)
 			goto cancel;
-	if (stress_continue_flag()) {
-		stress_itimer_set(&timer);
-		return;
-	}
-
+	return;
 cancel:
 	stress_continue_set_flag(false);
 	/* Cancel timer if we detect no more runs */
@@ -160,13 +126,12 @@ static int stress_itimer(stress_args_t *args)
 	sigset_t mask;
 	uint64_t itimer_freq = DEFAULT_ITIMER_FREQ;
 
+	s_args = args;
 	time_end = args->time_end;
 
 	(void)sigemptyset(&mask);
 	(void)sigaddset(&mask, SIGINT);
 	(void)sigprocmask(SIG_SETMASK, &mask, NULL);
-
-	max_ops = args->max_ops;
 
 	if (!stress_get_setting("itimer-freq", &itimer_freq)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
@@ -179,10 +144,14 @@ static int stress_itimer(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGPROF, stress_itimer_handler, NULL) < 0)
 		return EXIT_FAILURE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	stress_itimer_set(&timer);
 	if (setitimer(ITIMER_PROF, &timer, NULL) < 0) {
 		if (errno == EINVAL) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: skipping stressor, setitimer with "
 					"ITIMER_PROF is not implemented\n",
 					args->name);
@@ -193,7 +162,6 @@ static int stress_itimer(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		size_t i;
@@ -203,11 +171,9 @@ static int stress_itimer(stress_args_t *args)
 		for (i = 0; i < SIZEOF_ARRAY(stress_itimers); i++) {
 			(void)getitimer(stress_itimers[i], &t);
 		}
-
-		stress_bogo_set(args, itimer_counter);
 	} while (stress_continue(args));
 
-	if (itimer_counter == 0) {
+	if (stress_bogo_get(args) == 0) {
 		pr_fail("%s: did not handle any itimer SIGPROF signals\n",
 			args->name);
 	}
@@ -219,21 +185,20 @@ static int stress_itimer(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-
-stressor_info_t stress_itimer_info = {
+const stressor_info_t stress_itimer_info = {
 	.stressor = stress_itimer,
-	.class = CLASS_INTERRUPT | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_itimer_info = {
+const stressor_info_t stress_itimer_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SIGNAL | CLASS_INTERRUPT | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without getitimer() or setitimer() support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -58,6 +58,7 @@ static int stress_spawn_supported(const char *name)
  */
 static int stress_spawn(stress_args_t *args)
 {
+	int rc = EXIT_SUCCESS;
 	char *path;
 	char exec_path[PATH_MAX];
 	uint64_t spawn_fails = 0, spawn_calls = 0;
@@ -79,13 +80,15 @@ static int stress_spawn(stress_args_t *args)
 	 */
 	path = stress_get_proc_self_exe(exec_path, sizeof(exec_path));
 	if (!path) {
-		if (args->instance == 0)
+		if (stress_instance_zero(args))
 			pr_inf_skip("%s: skipping stressor, can't determine stress-ng "
 				"executable name\n", args->name);
 		return EXIT_NOT_IMPLEMENTED;
 	}
 	argv_new[0] = path;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -97,6 +100,7 @@ static int stress_spawn(stress_args_t *args)
 		if (ret < 0) {
 			pr_fail("%s: posix_spawn failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			spawn_fails++;
 		} else {
 			int status;
@@ -113,23 +117,24 @@ static int stress_spawn(stress_args_t *args)
 		pr_fail("%s: %" PRIu64 " spawns failed (%.2f%%)\n",
 			args->name, spawn_fails,
 			(double)spawn_fails * 100.0 / (double)(spawn_calls));
+		rc = EXIT_FAILURE;
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_spawn_info = {
+const stressor_info_t stress_spawn_info = {
 	.stressor = stress_spawn,
 	.supported = stress_spawn_supported,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_spawn_info = {
+const stressor_info_t stress_spawn_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without spawn.h or posix_spawn()"

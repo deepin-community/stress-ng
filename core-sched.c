@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,12 +36,7 @@
 #define SCHED_FLAG_DL_OVERRUN           (0x04)
 #endif
 
-typedef struct {
-	const int sched;
-	const char *const sched_name;
-} stress_sched_types_t;
-
-static const stress_sched_types_t sched_types[] = {
+const stress_sched_types_t stress_sched_types[] = {
 #if defined(SCHED_BATCH)
 	{ SCHED_BATCH,		"batch" },
 #endif
@@ -57,10 +52,15 @@ static const stress_sched_types_t sched_types[] = {
 #if defined(SCHED_OTHER)
 	{ SCHED_OTHER,		"other" },
 #endif
+#if defined(SCHED_EXT)
+	{ SCHED_EXT,		"sched_ext" },
+#endif
 #if defined(SCHED_RR)
 	{ SCHED_RR,		"rr" },
 #endif
 };
+
+const size_t stress_sched_types_length = SIZEOF_ARRAY(stress_sched_types);
 
 /*
  *  get_sched_name()
@@ -70,9 +70,9 @@ const char * PURE stress_get_sched_name(const int sched)
 {
 	size_t i;
 
-	for (i = 0; i < SIZEOF_ARRAY(sched_types); i++) {
-		if (sched_types[i].sched == sched)
-			return sched_types[i].sched_name;
+	for (i = 0; i < stress_sched_types_length; i++) {
+		if (stress_sched_types[i].sched == sched)
+			return stress_sched_types[i].sched_name;
 	}
 	return "unknown";
 }
@@ -81,6 +81,7 @@ const char * PURE stress_get_sched_name(const int sched)
     !defined(__OpenBSD__) && 						\
     !defined(__minix__) &&						\
     !defined(__APPLE__) &&						\
+    !defined(__HAIKU__) &&						\
     !defined(__serenity__)
 
 static const char prefix[] = "sched";
@@ -218,7 +219,7 @@ int stress_set_sched(
 				return -E2BIG;
 			rc = -errno;
 			if (!quiet)
-				pr_inf("%s: cannot set scheduler '%s': errno=%d (%s)\n",
+				pr_inf("%s: cannot set scheduler '%s', errno=%d (%s)\n",
 					prefix, stress_get_sched_name(sched),
 					errno, strerror(errno));
 			return rc;
@@ -240,7 +241,7 @@ int stress_set_sched(
 	if (rc < 0) {
 		rc = -errno;
 		if (!quiet)
-			pr_inf("%s: cannot set scheduler '%s': errno=%d (%s)\n",
+			pr_inf("%s: cannot set scheduler '%s', errno=%d (%s)\n",
 				prefix,
 				stress_get_sched_name(sched),
 				errno, strerror(errno));
@@ -254,7 +255,7 @@ int stress_set_sched(
 #define HAVE_STRESS_SET_SCHED	(1)
 
 /* No-op shim */
-int stress_set_sched(
+int PURE stress_set_sched(
 	const pid_t pid,
 	const int sched,
 	const int32_t sched_priority,
@@ -269,27 +270,6 @@ int stress_set_sched(
 }
 #endif
 
-#if !defined(HAVE_STRESS_SET_DEADLINE_SCHED)
-#define HAVE_STRESS_SET_DEADLINE_SCHED	(1)
-
-/* No-op shim */
-int stress_set_deadline_sched(
-	const pid_t pid,
-	const uint64_t period,
-	const uint64_t runtime,
-	const uint64_t deadline,
-	const bool quiet)
-{
-	(void)pid;
-	(void)period;
-	(void)runtime;
-	(void)deadline;
-	(void)quiet;
-
-	return 0;
-}
-#endif
-
 /*
  *  get_opt_sched()
  *	get scheduler policy
@@ -298,18 +278,18 @@ int32_t stress_get_opt_sched(const char *const str)
 {
 	size_t i;
 
-	for (i = 0; i < SIZEOF_ARRAY(sched_types); i++) {
-		if (!strcmp(sched_types[i].sched_name, str))
-			return sched_types[i].sched;
+	for (i = 0; i < stress_sched_types_length; i++) {
+		if (!strcmp(stress_sched_types[i].sched_name, str))
+			return stress_sched_types[i].sched;
 	}
 	if (strcmp("which", str))
-		(void)fprintf(stderr, "Invalid sched option: %s\n", str);
-	if (SIZEOF_ARRAY(sched_types) == (0)) {
-		(void)fprintf(stderr, "No scheduler options are available\n");
+		(void)fprintf(stderr, "invalid sched option: %s\n", str);
+	if (stress_sched_types_length == (0)) {
+		(void)fprintf(stderr, "no scheduler options are available\n");
 	} else {
-		(void)fprintf(stderr, "Available scheduler options are:");
-		for (i = 0; i < SIZEOF_ARRAY(sched_types); i++) {
-			(void)fprintf(stderr, " %s", sched_types[i].sched_name);
+		(void)fprintf(stderr, "available scheduler options are:");
+		for (i = 0; i < stress_sched_types_length; i++) {
+			(void)fprintf(stderr, " %s", stress_sched_types[i].sched_name);
 		}
 		(void)fprintf(stderr, "\n");
 	}

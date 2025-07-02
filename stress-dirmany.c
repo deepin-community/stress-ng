@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,20 +29,6 @@ static const stress_help_t help[] = {
 	{ NULL,	"dirmany-ops N",	"stop after N directory file bogo operations" },
 	{ NULL,	NULL,			NULL }
 };
-
-/*
- *  stress_set_dirmany_bytes()
- *      set size of files to be created
- */
-static int stress_set_dirmany_bytes(const char *opt)
-{
-	off_t dirmany_bytes;
-
-	dirmany_bytes = (off_t)stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("dirmany-bytes", (uint64_t)dirmany_bytes,
-		MIN_DIRMANY_BYTES, MAX_DIRMANY_BYTES);
-	return stress_set_setting("dirmany-bytes", TYPE_ID_OFF_T, &dirmany_bytes);
-}
 
 static void stress_dirmany_filename(
 	const char *pathname,
@@ -91,16 +77,23 @@ static uint64_t stress_dirmany_create(
 		char filename[PATH_MAX + 20];
 		int fd;
 
-		if ((LIKELY(g_opt_timeout > 0)) && stress_time_now() > t_end)
+		if ((LIKELY(g_opt_timeout > 0)) && (stress_time_now() > t_end))
 			break;
 
 		stress_dirmany_filename(pathname, pathname_len, filename, sizeof(filename), filename_len, i_end);
 		fd = open(filename, O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
 		if (fd < 0) {
 			if (errno == ENAMETOOLONG) {
-				filename_len--;
-				*max_len = filename_len;
-				continue;
+				if (LIKELY(filename_len > 2)) {
+					filename_len--;
+					*max_len = filename_len;
+					continue;
+				} else {
+					pr_fail("%s: cannot determine largest valid filename size, errno=%d (%s)\n",
+						args->name, errno, strerror(errno));
+					*failed = true;
+					break;
+				}
 			}
 			break;
 		}
@@ -171,22 +164,30 @@ static int stress_dirmany(stress_args_t *args)
 	off_t dirmany_bytes = 0;
 	size_t pathname_len;
 
-	stress_temp_dir(pathname, sizeof(pathname), args->name, args->pid, args->instance);
+	stress_temp_dir(pathname, sizeof(pathname), args->name,
+		args->pid, args->instance);
 	pathname_len = strlen(pathname);
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
-	(void)stress_get_setting("dirmany-bytes", &dirmany_bytes);
+	if (!stress_get_setting("dirmany-bytes", &dirmany_bytes)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			dirmany_bytes = (sizeof(dirmany_bytes) > 5) ? 1 * TB : ~(size_t)0;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			dirmany_bytes = MIN_DIRMANY_BYTES;
+	}
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		char sz[32];
 
 		pr_dbg("%s: %s byte file size\n", args->name,
-			dirmany_bytes ? stress_uint64_to_str(sz, sizeof(sz), (uint64_t)dirmany_bytes) : "0");
+			dirmany_bytes ? stress_uint64_to_str(sz, sizeof(sz), (uint64_t)dirmany_bytes, 1, true) : "0");
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -215,16 +216,16 @@ static int stress_dirmany(stress_args_t *args)
 		double rate;
 
 		stress_metrics_set(args, 0, "% of time creating files",
-			create_time / total_time * 100.0, STRESS_GEOMETRIC_MEAN);
+			create_time / total_time * 100.0, STRESS_METRIC_GEOMETRIC_MEAN);
 		stress_metrics_set(args, 1, "% of time removing file",
-			remove_time / total_time * 100.0, STRESS_GEOMETRIC_MEAN);
+			remove_time / total_time * 100.0, STRESS_METRIC_GEOMETRIC_MEAN);
 
 		rate = (create_time > 0.0) ? (double)total_created / create_time : 0.0;
 		stress_metrics_set(args, 2, "files created per sec",
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 		rate = (remove_time > 0.0) ? (double)total_created / remove_time : 0.0;
 		stress_metrics_set(args, 3, "files removed per sec",
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -237,15 +238,15 @@ static int stress_dirmany(stress_args_t *args)
 	return ret;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dirmany_bytes,	stress_set_dirmany_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_dirmany_bytes, "dirmany-bytes", TYPE_ID_OFF_T, MIN_DIRMANY_BYTES, MAX_DIRMANY_BYTES, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_dirmany_info = {
+const stressor_info_t stress_dirmany_info = {
 	.stressor = stress_dirmany,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

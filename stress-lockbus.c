@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,22 @@
  */
 #include "stress-ng.h"
 #include "core-arch.h"
+#include "core-numa.h"
+
+#if defined(HAVE_LINUX_MEMPOLICY_H) &&  \
+    defined(__NR_mbind)
+#include <linux/mempolicy.h>
+#define HAVE_NUMA_LOCKBUS	(1)
+#endif
+
+#if defined(HAVE_LIB_RT) &&		\
+    defined(HAVE_TIMER_CREATE) &&	\
+    defined(HAVE_TIMER_DELETE) &&	\
+    defined(HAVE_TIMER_GETOVERRUN) &&	\
+    defined(HAVE_TIMER_SETTIME)
+#include <time.h>
+#define HAVE_TIMER_FUNCS
+#endif
 
 static const stress_help_t help[] = {
 	{ NULL,	"lockbus N",	 	"start N workers locking a memory increment" },
@@ -27,22 +43,16 @@ static const stress_help_t help[] = {
 	{ NULL, NULL,			NULL }
 };
 
-static int stress_set_lockbus_nosplit(const char *opt)
-{
-	return stress_set_setting_true("lockbus-nosplit", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_lockbus_nosplit,	stress_set_lockbus_nosplit },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_lockbus_nosplit, "lockbus-nosplit", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if (((defined(HAVE_COMPILER_GCC_OR_MUSL) ||		\
        defined(HAVE_COMPILER_CLANG) ||			\
        defined(HAVE_COMPILER_ICC) ||			\
        defined(HAVE_COMPILER_ICX) ||			\
-       defined(HAVE_COMPILER_TCC) ||			\
-       defined(HAVE_COMPILER_PCC)) &&			\
+       defined(HAVE_COMPILER_TCC)) &&			\
        defined(STRESS_ARCH_X86)) ||			\
      (defined(HAVE_COMPILER_GCC_OR_MUSL) && 		\
       (defined(HAVE_ATOMIC_ADD_FETCH) ||		\
@@ -55,6 +65,7 @@ static const stress_opt_set_func_t opt_set_funcs[] = {
        defined(STRESS_ARCH_M68K) ||			\
        defined(STRESS_ARCH_MIPS) ||			\
        defined(STRESS_ARCH_PPC64) ||			\
+       defined(STRESS_ARCH_PPC) ||			\
        defined(STRESS_ARCH_RISCV) ||			\
        defined(STRESS_ARCH_S390) ||			\
        defined(STRESS_ARCH_SH4) ||			\
@@ -128,11 +139,37 @@ do {						\
 	MEM_LOCK(ptr, 0);			\
 } while (0)
 
-#if defined(STRESS_ARCH_X86)
 static sigjmp_buf jmp_env;
+static bool do_misaligned;
+#if defined(STRESS_ARCH_X86)
 static bool do_splitlock;
+#endif
+static bool do_sigill;
 
-static void NORETURN MLOCKED_TEXT stress_sigbus_handler(int signum)
+static void NORETURN MLOCKED_TEXT stress_sigill_handler(int signum)
+{
+	if (signum == SIGILL) {
+#if defined(STRESS_ARCH_S390)
+		do_misaligned = false;
+#else
+		do_sigill = true;
+#endif
+	}
+
+	siglongjmp(jmp_env, 1);
+}
+
+static void NORETURN MLOCKED_TEXT stress_sigbus_misaligned_handler(int signum)
+{
+	(void)signum;
+
+	do_misaligned = false;
+
+	siglongjmp(jmp_env, 1);
+}
+
+#if defined(STRESS_ARCH_X86)
+static void NORETURN MLOCKED_TEXT stress_sigbus_splitlock_handler(int signum)
 {
 	(void)signum;
 
@@ -151,37 +188,135 @@ static int stress_lockbus(stress_args_t *args)
 	uint32_t *buffer;
 	double t, rate;
 	NOCLOBBER double duration, count;
+	NOCLOBBER int rc = EXIT_SUCCESS;
+	uint32_t *misaligned_ptr1, *misaligned_ptr2;
+#if defined(HAVE_TIMER_FUNCS)
+	timer_t timerid;
+	NOCLOBBER int timer_ret = -1;
+#endif
 #if defined(STRESS_ARCH_X86)
 	uint32_t *splitlock_ptr1, *splitlock_ptr2;
 	bool lockbus_nosplit = false;
 
+	do_sigill = false;
 	(void)stress_get_setting("lockbus-nosplit", &lockbus_nosplit);
 
-	if (stress_sighandler(args->name, SIGBUS, stress_sigbus_handler, NULL) < 0)
+	if (stress_sighandler(args->name, SIGBUS, stress_sigbus_splitlock_handler, NULL) < 0)
 		return EXIT_FAILURE;
+#endif
+#if defined(HAVE_NUMA_LOCKBUS)
+	NOCLOBBER stress_numa_mask_t *numa_mask;
 #endif
 
 	buffer = (uint32_t*)stress_mmap_populate(NULL, BUFFER_SIZE,
 			PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (buffer == MAP_FAILED) {
-		int rc = stress_exit_status(errno);
-
-		pr_err("%s: mmap failed\n", args->name);
-		return rc;
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), skipping stressor\n",
+			args->name, (size_t)BUFFER_SIZE,
+			stress_get_memfree_str(), errno, strerror(errno));
+		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffer, BUFFER_SIZE, "lockbus-data");
+
+	do_misaligned = true;
+	misaligned_ptr1 = (uint32_t *)(uintptr_t)((uint8_t *)buffer + 1);
+	misaligned_ptr2 = (uint32_t *)(uintptr_t)((uint8_t *)buffer + 10);
+
+	if (stress_sighandler(args->name, SIGBUS, stress_sigbus_misaligned_handler, NULL) < 0)
+		return EXIT_FAILURE;
+#if defined(HAVE_TIMER_FUNCS)
+	if (stress_sighandler(args->name, SIGRTMIN, stress_sigbus_misaligned_handler, NULL) < 0)
+		return EXIT_FAILURE;
+#endif
+	if (stress_sighandler(args->name, SIGILL, stress_sigill_handler, NULL) < 0)
+		return EXIT_FAILURE;
+	if (sigsetjmp(jmp_env, 1))
+		goto misaligned_done;
+
+#if defined(HAVE_TIMER_FUNCS)
+	/*
+	 *  Use a 1 second timer to jmp out of a hung
+	 *  misaligned splitlock.
+	 */
+	{
+		struct sigevent sev;
+		struct itimerspec timer;
+
+		sev.sigev_notify = SIGEV_SIGNAL;
+		sev.sigev_signo = SIGRTMIN;
+		sev.sigev_value.sival_ptr = &timerid;
+
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
+		timer_ret = timer_create(CLOCK_PROCESS_CPUTIME_ID, &sev, &timerid);
+#else
+		timer_ret = timer_create(CLOCK_REALTIME, &sev, &timerid);
+#endif
+		if (timer_ret == 0) {
+			timer.it_value.tv_sec = 1;
+			timer.it_value.tv_nsec = 0;
+			timer.it_interval.tv_sec = 1;
+			timer.it_interval.tv_nsec = 0;
+			if (timer_settime(timerid, 0, &timer, NULL) < 0) {
+				(void)timer_delete(timerid);
+				timer_ret = -1;
+			}
+		}
+	}
+#endif
+	/* These can hang on old ppc64 linux kernels */
+	MEM_LOCK_AND_INC(misaligned_ptr1, 1);
+	MEM_LOCK_AND_INC(misaligned_ptr2, 1);
+
+misaligned_done:
+#if defined(HAVE_TIMER_FUNCS)
+	if (timer_ret == 0) {
+		(void)timer_delete(timerid);
+		timer_ret = -1;
+	}
+#endif
+	if (do_sigill) {
+		pr_inf_skip("%s: SIGILL occurred on atomic lock operations "
+			"(possibly unsupported opcodes), skipping stressor\n",
+			args->name);
+		rc = EXIT_NO_RESOURCE;
+		goto done;
+	}
+	if (stress_instance_zero(args))
+		pr_dbg("%s: misaligned splitlocks %s\n", args->name,
+			do_misaligned ? "enabled" : "disabled");
 
 #if defined(STRESS_ARCH_X86)
+	if (stress_sighandler(args->name, SIGBUS, stress_sigbus_splitlock_handler, NULL) < 0)
+		return EXIT_FAILURE;
 	/* Split lock on a page boundary */
 	splitlock_ptr1 = (uint32_t *)(uintptr_t)(((uint8_t *)buffer) + args->page_size - (sizeof(*splitlock_ptr1) >> 1));
 	/* Split lock on a cache boundary */
 	splitlock_ptr2 = (uint32_t *)(uintptr_t)(((uint8_t *)buffer) + 64 - (sizeof(*splitlock_ptr2) >> 1));
 	do_splitlock = !lockbus_nosplit;
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: splitlocks %s\n", args->name,
 			do_splitlock ? "enabled" : "disabled");
 	if (sigsetjmp(jmp_env, 1) && !stress_continue(args))
 		goto done;
 #endif
+
+#if defined(HAVE_NUMA_LOCKBUS)
+	numa_mask = stress_numa_mask_alloc();
+	if (numa_mask) {
+		stress_numa_mask_t *numa_nodes;
+
+		numa_nodes = stress_numa_mask_alloc();
+		if (numa_nodes) {
+			if (stress_numa_mask_nodes_get(numa_nodes) > 0)
+				stress_numa_randomize_pages(args, numa_nodes, numa_mask, buffer, BUFFER_SIZE, args->page_size);
+			stress_numa_mask_free(numa_nodes);
+		}
+		stress_numa_mask_free(numa_mask);
+	}
+#endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	duration = 0;
@@ -229,6 +364,12 @@ static int stress_lockbus(stress_args_t *args)
 			SYNC_BOOL_COMPARE_AND_SWAP(ptr2, zero, val);
 		}
 #endif
+		if (do_misaligned) {
+			MEM_LOCK_AND_INCx8(misaligned_ptr1, inc);
+			MEM_LOCK_AND_INCx8(misaligned_ptr2, inc);
+			count += (8.0 * 2.0);
+		}
+
 		duration += (stress_time_now() - t);
 #if defined(HAVE_SYNC_BOOL_COMPARE_AND_SWAP)
 		count += (8.0 * 12.0) + 6.0;
@@ -238,31 +379,29 @@ static int stress_lockbus(stress_args_t *args)
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
-#if defined(STRESS_ARCH_X86)
 done:
-#endif
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per memory lock operation",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)buffer, BUFFER_SIZE);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_lockbus_info = {
+const stressor_info_t stress_lockbus_info = {
 	.stressor = stress_lockbus,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_lockbus_info = {
+const stressor_info_t stress_lockbus_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without gcc __atomic* lock builtins"
 };

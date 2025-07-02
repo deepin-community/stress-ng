@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -35,7 +35,7 @@ int stress_kill_pid(const pid_t pid)
 	ret = shim_kill(pid, SIGKILL);
 
 	if (pidfd >= 0) {
-		int saved_errno = errno;
+		 const int saved_errno = errno;
 
 		if (ret == 0)
 			(void)shim_process_mrelease(pidfd, 0);
@@ -54,7 +54,7 @@ int stress_kill_pid(const pid_t pid)
  *	kill and wait for a pid. If status is non-null copy waitpid
  *	status to it.
  */
-int stress_kill_pid_wait(const pid_t pid, int *status)
+pid_t stress_kill_pid_wait(const pid_t pid, int *status)
 {
 	int tmp_status = 0;
 
@@ -106,7 +106,7 @@ static int stress_wait_until_reaped(
 		 *  Retry if EINTR unless we've have 2 mins
 		 *  consecutive EINTRs then give up.
 		 */
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			(void)stress_kill_sig(pid, signum);
 			if (count > 120) {
 				if (set_stress_force_killed_bogo)
@@ -117,13 +117,13 @@ static int stress_wait_until_reaped(
 			 *  Process seems unkillable, report and bail out
 			 */
 			if (count > 600) {
-				pr_dbg("%s: cannot kill PID %jd after 10 minutes, giving up\n",
+				pr_dbg("%s: cannot kill PID %" PRIdMAX " after 10 minutes, giving up\n",
 					args->name, (intmax_t)pid);
 				stress_process_info(args, pid);
 				break;
 			}
 		}
-		shim_sched_yield();
+		(void)shim_sched_yield();
 		if (count > 10)
 			(void)sleep(1);
 	}
@@ -141,15 +141,15 @@ int stress_kill_and_wait(
 {
 	const pid_t mypid = getpid();
 
-	if ((pid == 0) || (pid == 1) || (pid == mypid)) {
-		pr_inf("%s: warning, attempt to kill PID %jd ignored\n",
+	if (UNLIKELY((pid == 0) || (pid == 1) || (pid == mypid))) {
+		pr_inf("%s: warning, attempt to kill PID %" PRIdMAX " ignored\n",
 			args->name, (intmax_t)pid);
 	}
 	/*
 	 *  bad pids, won't kill, but return success to avoid
 	 *  confusion of a kill that failed.
 	 */
-	if ((pid <= 1) || (pid == mypid))
+	if (UNLIKELY((pid <= 1) || (pid == mypid)))
 		return EXIT_SUCCESS;
 
 	stress_kill_sig(pid, signum);
@@ -167,7 +167,7 @@ int stress_kill_and_wait(
  */
 int stress_kill_and_wait_many(
 	stress_args_t *args,
-	const pid_t *pids,
+	const stress_pid_t *s_pids,
 	const size_t n_pids,
 	const int signum,
 	const bool set_stress_force_killed_bogo)
@@ -178,15 +178,15 @@ int stress_kill_and_wait_many(
 
 	/* Kill first */
 	for (i = 0; i < n_pids; i++) {
-		if ((pids[i] > 1) && (pids[i] != mypid))
-			stress_kill_sig(pids[i], signum);
+		if ((s_pids[i].pid > 1) && (s_pids[i].pid != mypid))
+			stress_kill_sig(s_pids[i].pid, signum);
 	}
 	/* Then reap */
 	for (i = 0; i < n_pids; i++) {
-		if ((pids[i] > 1) && (pids[i] != mypid)) {
+		if ((s_pids[i].pid > 1) && (s_pids[i].pid != mypid)) {
 			int ret;
 
-			ret = stress_kill_and_wait(args, pids[i], signum, set_stress_force_killed_bogo);
+			ret = stress_kill_and_wait(args, s_pids[i].pid, signum, set_stress_force_killed_bogo);
 			if (ret == EXIT_FAILURE)
 				rc = ret;
 		}

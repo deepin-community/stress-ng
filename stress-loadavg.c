@@ -1,6 +1,6 @@
 /*
  * Copyright (C)      2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,23 +29,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		 NULL }
 };
 
-/*
- *  stress_set_loadavg_max()
- *      set upper limit on number of pthreads to create
- */
-static int stress_set_loadavg_max(const char *opt)
-{
-	uint64_t loadavg_max;
-
-        loadavg_max = stress_get_uint64(opt);
-
-        stress_check_range("loadavg-max", loadavg_max, 1, MAX_LOADAVG);
-        return stress_set_setting("loadavg-max", TYPE_ID_UINT64, &loadavg_max);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_loadavg_max,	stress_set_loadavg_max },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_loadavg_max, "loadavg-max", TYPE_ID_UINT64, 1, MAX_LOADAVG, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_PTHREAD)
@@ -127,7 +113,6 @@ static uint64_t stress_loadavg_threads_max(void)
  */
 static void *stress_loadavg_func(void *arg)
 {
-	static void *nowt = NULL;
 	const stress_pthread_args_t *pargs = (stress_pthread_args_t *)arg;
 	stress_args_t *args = pargs->args;
 #if defined(LOADAVG_IO)
@@ -142,6 +127,8 @@ static void *stress_loadavg_func(void *arg)
 	(void)arg;
 	(void)shim_nice(19);	/* be very nice */
 
+	stress_random_small_sleep();
+
 	while ((stress_time_now() < args->time_end) && keep_thread_running()) {
 #if defined(LOADAVG_IO)
 		if (fd >= 0) {
@@ -155,7 +142,7 @@ static void *stress_loadavg_func(void *arg)
 
 	(void)keep_running();
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -167,8 +154,8 @@ static int stress_loadavg(stress_args_t *args)
 	static stress_loadavg_info_t *pthreads;
 	uint64_t i, j, pthread_max;
 	const uint64_t threads_max = stress_loadavg_threads_max();
-	const uint32_t instances = (args->num_instances > 1 ?
-				   args->num_instances : 1);
+	const uint32_t instances = (args->instances > 1 ?
+				   args->instances : 1);
 	uint64_t loadavg_max = (uint64_t)instances * 65536;
 	int ret;
 #if defined(LOADAVG_IO)
@@ -182,9 +169,9 @@ static int stress_loadavg(stress_args_t *args)
 
 	if (loadavg_max > threads_max) {
 		loadavg_max = threads_max;
-		if (args->instance == 0) {
-			pr_inf("%s: not enough pthreads, reducing loadavg-max\n",
-				args->name);
+		if (stress_instance_zero(args)) {
+			pr_inf("%s: not enough pthreads, reducing loadavg-max, system limit is %" PRIu64 "\n",
+				args->name, threads_max);
 		}
 	}
 
@@ -199,16 +186,16 @@ static int stress_loadavg(stress_args_t *args)
 	if (pthread_max * instances > loadavg_max)
 		pthread_max = loadavg_max / instances;
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: attempting to create %" PRIu64 " pthreads per "
 			"worker (%" PRIu64 " in total)\n",
 			args->name, pthread_max, pthread_max * instances);
 	}
 
-	pthreads = calloc((size_t)pthread_max, sizeof(*pthreads));
+	pthreads = (stress_loadavg_info_t *)calloc((size_t)pthread_max, sizeof(*pthreads));
 	if (!pthreads) {
-		pr_inf_skip("%s: out of memory allocating pthreads array, skipping stressor\n",
-			args->name);
+		pr_inf_skip("%s: out of memory allocating pthreads array%s, skipping stressor\n",
+			args->name, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -236,6 +223,8 @@ static int stress_loadavg(stress_args_t *args)
 	(void)sigaddset(&set, SIGALRM);
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	keep_thread_running_flag = true;
@@ -262,13 +251,13 @@ static int stress_loadavg(stress_args_t *args)
 			stop_running();
 			break;
 		}
-		if (!(keep_running() && stress_continue(args)))
+		if (UNLIKELY(!(keep_running() && stress_continue(args))))
 			break;
 	}
 
 	do {
 		(void)shim_sched_yield();
-		shim_usleep_interruptible(100000);
+		(void)shim_usleep_interruptible(100000);
 	} while (keep_running() && stress_continue(args));
 
 	keep_thread_running_flag = false;
@@ -296,17 +285,17 @@ static int stress_loadavg(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_loadavg_info = {
+const stressor_info_t stress_loadavg_info = {
 	.stressor = stress_loadavg,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_loadavg_info = {
+const stressor_info_t stress_loadavg_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without pthread support"
 };

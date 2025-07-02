@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -149,15 +149,15 @@ static int do_chmod(
 	const size_t mode_count,
 	const int *mode_perms)
 {
-	static size_t index;
+	static size_t idx;
 
 	if (!mode_count)
 		return 0;
 
-	(void)chmod(filename, (mode_t)mode_perms[index]);
-	index++;
-	if (index >= mode_count)
-		index = 0;
+	(void)chmod(filename, (mode_t)mode_perms[idx]);
+	idx++;
+	if (idx >= mode_count)
+		idx = 0;
 
 	stress_chmod_check(chmod(filename, modes[i]) < 0);
 	stress_chmod_check(chmod(filename, mask) < 0);
@@ -275,7 +275,7 @@ static int stress_chmod(stress_args_t *args)
 	(void)shim_strscpy(tmp, filename, sizeof(tmp));
 	filebase = basename(tmp);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		if ((fd = creat(filename, S_IRUSR | S_IWUSR)) < 0) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: create %s failed, errno=%d (%s)\n",
@@ -295,7 +295,7 @@ static int stress_chmod(stress_args_t *args)
 			(void)shim_usleep(100000);
 #endif
 			/* Timed out, then give up */
-			if (!stress_continue_flag()) {
+			if (UNLIKELY(!stress_continue_flag())) {
 				rc = EXIT_SUCCESS;
 				goto tidy;
 			}
@@ -311,6 +311,8 @@ static int stress_chmod(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -363,9 +365,9 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_chmod_info = {
+const stressor_info_t stress_chmod_info = {
 	.stressor = stress_chmod,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

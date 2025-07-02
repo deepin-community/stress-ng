@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,7 +42,7 @@ static const stress_help_t help[] = {
 static size_t open_count;
 static int *open_perms;
 
-static int open_flags[] = {
+static const int open_flags[] = {
 #if defined(O_APPEND)
 	O_APPEND,
 #endif
@@ -147,11 +147,6 @@ static int open_flags[] = {
 #endif
 };
 
-static int stress_set_open_fd(const char *opt)
-{
-        return stress_set_setting_true("open-fd", opt);
-}
-
 static size_t stress_get_max_fds(void)
 {
 	const size_t max_size = (size_t)-1;
@@ -179,21 +174,22 @@ static size_t stress_get_max_fds(void)
 	return max_fds;
 }
 
-static int stress_set_open_max(const char *opt)
+static void stress_open_max(const char *opt_name, const char *opt_arg, stress_type_id_t *type_id, void *value)
 {
-	size_t open_max;
-	size_t max_fds = stress_get_max_fds();
+	size_t *open_max = (size_t *)value;
+	const size_t max_fds = stress_get_max_fds();
 
-	open_max = (size_t)stress_get_uint64_percent(opt, 1, (uint64_t)max_fds,
-			"cannot determine maximum number of file descriptors");
+	(void)opt_name;
 
-        return stress_set_setting("open-max", TYPE_ID_SIZE_T, &open_max);
+	*type_id = TYPE_ID_SIZE_T;
+	*open_max = (size_t)stress_get_uint64_percent(opt_arg, 1, (uint64_t)max_fds,
+                        "cannot determine maximum number of file descriptors");
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_open_fd,	stress_set_open_fd, },
-	{ OPT_open_max,	stress_set_open_max },
-	{ 0,		NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_open_fd,  "open-fd",  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_open_max,	"open-max", TYPE_ID_CALLBACK, 0, 1, stress_open_max },
+	END_OPT,
 };
 
 #if defined(HAVE_OPENAT) &&	\
@@ -213,13 +209,13 @@ static int obsolete_futimesat(
     defined(HAVE_SYSCALL)
 	/* Try direct system call first */
 	ret = (int)syscall(__NR_futimesat, dir_fd, pathname, tv);
-	if ((ret == 0) || (errno != ENOSYS))
+	if (LIKELY((ret == 0) || (errno != ENOSYS)))
 		return ret;
 #endif
-#if defined(HAVE_FUTIMESAT)
+#if defined(HAVE_FUTIMESAT_DEPRECATED)
 	/* Try libc variant next */
 	ret = (int)futimesat(dir_fd, pathname, tv);
-	if ((ret == 0) || (errno != ENOSYS))
+	if (LIKELY((ret == 0) || (errno != ENOSYS)))
 		return ret;
 #endif
 	/* Not available */
@@ -246,13 +242,13 @@ static int obsolete_futimes(const int fd, const struct timeval tv[2])
     defined(HAVE_SYSCALL)
 	/* Try direct system call first */
 	ret = (int)syscall(__NR_futimes, fd, tv);
-	if ((ret == 0) || (errno != ENOSYS))
+	if (LIKELY((ret == 0) || (errno != ENOSYS)))
 		return ret;
 #endif
 #if defined(HAVE_FUTIMES)
 	/* Try libc variant next */
 	ret = (int)futimes(fd, tv);
-	if ((ret == 0) || (errno != ENOSYS))
+	if (LIKELY((ret == 0) || (errno != ENOSYS)))
 		return ret;
 #endif
 	/* Not available */
@@ -281,7 +277,7 @@ static inline int open_arg2(
 #else
 	fd = open(pathname, flags);
 #endif
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		(*duration) += stress_time_now() - t;
 		(*count) += 1.0;
 		(void)obsolete_futimes(fd, NULL);
@@ -308,7 +304,7 @@ static inline int open_arg3(
 	fd = open(pathname, flags, mode);
 #endif
 
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		struct timeval tv[2];
 
 		(*duration) += stress_time_now() - t;
@@ -346,10 +342,10 @@ static int open_flag_perm(
 	double *duration,
 	double *count)
 {
-	static size_t index = 0;
+	static size_t idx = 0;
 	int fd;
 	const int mode = S_IRUSR | S_IWUSR;
-	const int flags = open_perms[index];
+	const int flags = open_perms[idx];
 	char filename[PATH_MAX];
 
 	(void)args;
@@ -369,24 +365,24 @@ static int open_flag_perm(
 			(void)mkdir(filename, mode);
 		} else {
 			fd = open_arg3(filename, O_CREAT | O_RDWR, mode, duration, count);
-			if (fd >= 0)
+			if (LIKELY(fd >= 0))
 				(void)close(fd);
 		}
 	}
 #else
 	fd = open_arg3(filename, O_CREAT | O_RDWR, mode, duration, count);
-	if (fd >= 0)
+	if (LIKELY(fd >= 0))
 		(void)close(fd);
 #endif
 	fd = open_arg3(filename, flags, mode, duration, count);
 #if defined(O_DIRECTORY)
-	if (flags & O_DIRECTORY)
+	if (LIKELY(flags & O_DIRECTORY))
 		(void)shim_rmdir(filename);
 #endif
 	(void)shim_unlink(filename);
-	index++;
-	if (index >= open_count)
-		index = 0;
+	idx++;
+	if (UNLIKELY(idx >= open_count))
+		idx = 0;
 
 	return fd;
 }
@@ -639,7 +635,7 @@ static int open_direct(
 
 	t = stress_time_now();
 	fd = open(filename, O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, S_IRUSR | S_IWUSR);
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		(*duration) += stress_time_now() - t;
 		(*count) += 1.0;
 	} else {
@@ -647,7 +643,7 @@ static int open_direct(
 		struct stat statbuf;
 
 		ret = shim_stat(filename, &statbuf);
-		if (ret == 0) {
+		if (UNLIKELY(ret == 0)) {
 			pr_inf("%s: open with O_DIRECT failed but file '%s' was created%s\n",
 				args->name, filename, stress_get_fs_type(filename));
 		}
@@ -687,7 +683,7 @@ static int open_with_openat_cwd(
 
 	t = stress_time_now();
 	fd = openat(AT_FDCWD, filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		struct timeval tv[2];
 
 		(*duration) += stress_time_now() - t;
@@ -741,7 +737,7 @@ static int open_with_openat_dir_fd(
 		return -1;
 
 	fd = openat(dir_fd, filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		(void)obsolete_futimesat(dir_fd, filename, NULL);
 		(void)snprintf(filename, sizeof(filename), "%s/stress-open-%" PRIdMAX "-%" PRIu32,
 			temp_dir, (intmax_t)pid, rnd32);
@@ -816,12 +812,12 @@ static int open_with_openat2_cwd(
 		how.mode = S_IRUSR | S_IWUSR;
 		how.resolve = resolve_flags[j++];
 
-		if (j >= SIZEOF_ARRAY(resolve_flags))
+		if (UNLIKELY(j >= SIZEOF_ARRAY(resolve_flags)))
 			j = 0;
 
 		/* Exercise illegal usize field */
 		fd = (int)syscall(__NR_openat2, AT_FDCWD, filename, &how, 0);
-		if (fd >= 0) {
+		if (UNLIKELY(fd >= 0)) {
 			/* Unxexpected, but handle it anyhow */
 			(void)shim_unlink(filename);
 			break;
@@ -829,7 +825,7 @@ static int open_with_openat2_cwd(
 
 		t = stress_time_now();
 		fd = (int)syscall(__NR_openat2, AT_FDCWD, filename, &how, sizeof(how));
-		if (fd >= 0) {
+		if (LIKELY(fd >= 0)) {
 			(*duration) += stress_time_now() - t;
 			(*count) += 1.0;
 			(void)shim_unlink(filename);
@@ -859,7 +855,7 @@ static int open_with_open_proc_self_fd(
 
 	t = stress_time_now();
 	fd = open("/proc/self/fd/0", O_RDONLY);
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		(*duration) += stress_time_now() - t;
 		(*count) += 1.0;
 	}
@@ -883,7 +879,7 @@ static int open_dup(
 
 	t = stress_time_now();
 	fd = dup(STDOUT_FILENO);
-	if (fd >= 0) {
+	if (LIKELY(fd >= 0)) {
 		(*duration) += stress_time_now() - t;
 		(*count) += 1.0;
 	}
@@ -913,8 +909,9 @@ static int open_rdonly_trunc(
 
 	/* undefined behaviour, will open, may truncate on some systems */
 	fd = open_arg2(filename, O_RDONLY | O_TRUNC, duration, count);
-	if (fd >= 0)
-		(void)shim_unlink(filename);
+	(void)fd;
+	(void)shim_unlink(filename);
+
 	return fd;
 }
 #endif
@@ -950,7 +947,7 @@ static int open_modes(
 	fd = open_arg3(filename, O_CREAT | O_RDWR, mode, duration, count);
 	mode++;
 	mode &= mode_mask;
-	if (fd < 0)
+	if (UNLIKELY(fd < 0))
 		return fd;
 
 	(void)shim_unlink(filename);
@@ -958,7 +955,7 @@ static int open_modes(
 }
 #endif
 
-static stress_open_func_t open_funcs[] = {
+static const stress_open_func_t open_funcs[] = {
 #if defined(O_CREAT)
 	open_flag_perm,
 #endif
@@ -1037,7 +1034,7 @@ static stress_open_func_t open_funcs[] = {
 static void stress_fd_dir(const char *path, double *duration, double *count)
 {
 	for (;;) {
-		struct dirent *de;
+		const struct dirent *de;
 		DIR *dir;
 
 		dir = opendir(path);
@@ -1087,7 +1084,10 @@ static int stress_open(stress_args_t *args)
 		return stress_exit_status(-ret);
 	(void)stress_temp_dir_args(args, temp_dir, sizeof(temp_dir));
 
-	(void)stress_get_setting("open-max", &open_max);
+	if (!stress_get_setting("open-max", &open_max)) {
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			open_max = 1;
+	}
 	(void)stress_get_setting("open-fd", &open_fd);
 
 	/* Limit to maximum size_t allocation size */
@@ -1096,18 +1096,29 @@ static int stress_open(stress_args_t *args)
 	/* Limit to max int (fd value) */
 	if (open_max > INT_MAX)
 		open_max = INT_MAX;
-
-	if (!args->instance)
-		pr_inf("%s: using a maximum of %zd file descriptors\n", args->name, open_max);
+	if (open_max < 1)
+		open_max = 1;
 
 	sz = open_max * sizeof(*fds);
-	fds = (int *)stress_mmap_populate(NULL, sz,
-		PROT_READ | PROT_WRITE,
-		MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	fds = (int *)mmap(NULL, sz, PROT_READ | PROT_WRITE,
+			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (fds == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %zd file descriptors\n", args->name, open_max);
-		return EXIT_NO_RESOURCE;
+		/* shrink */
+		open_max = 1024 * 1024;
+		sz = open_max * sizeof(*fds);
+		fds = (int *)mmap(NULL, sz, PROT_READ | PROT_WRITE,
+				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+		if (fds == MAP_FAILED) {
+			pr_inf_skip("%s: cannot mmap %zu file descriptors%s, "
+				"errno=%d (%s), skipping stressor\n",
+				args->name, open_max, stress_get_memfree_str(),
+				errno, strerror(errno));
+			return EXIT_NO_RESOURCE;
+		}
 	}
+	if (!args->instance)
+		pr_inf("%s: using a maximum of %zd file descriptors\n", args->name, open_max);
+	stress_set_vma_anon_name(fds, sz, "fds");
 
 	if (open_fd) {
 		(void)snprintf(path, sizeof(path), "/proc/%" PRIdMAX "/fd", (intmax_t)mypid);
@@ -1126,6 +1137,8 @@ static int stress_open(stress_args_t *args)
 		all_open_flags |= open_flags[i];
 	open_count = stress_flag_permutation(all_open_flags, &open_perms);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -1136,7 +1149,7 @@ static int stress_open(stress_args_t *args)
 			for (;;) {
 				int idx;
 
-				if (!stress_continue(args)) {
+				if (UNLIKELY(!stress_continue(args))) {
 					if (pid > 1)
 						(void)stress_kill_pid(pid);
 					goto close_all;
@@ -1149,7 +1162,7 @@ static int stress_open(stress_args_t *args)
 					break;
 
 				/* Check if we hit the open file limit */
-				if ((errno == EMFILE) || (errno == ENFILE)) {
+				if (UNLIKELY((errno == EMFILE) || (errno == ENFILE))) {
 					if (pid > 1)
 						(void)stress_kill_pid(pid);
 					goto close_all;
@@ -1165,7 +1178,7 @@ static int stress_open(stress_args_t *args)
 			}
 			stress_read_fdinfo(mypid, fds[i]);
 
-			if ((i & 8191) == 8191)
+			if (UNLIKELY((i & 8191) == 8191))
 				sync();
 
 			stress_bogo_inc(args);
@@ -1198,14 +1211,14 @@ close_all:
 
 	rate = (count > 0.0) ? duration / count: 0.0;
 	stress_metrics_set(args, 0, "nanosecs per open",
-		rate * 1000000000.0, STRESS_HARMONIC_MEAN);
+		rate * 1000000000.0, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_open_info = {
+const stressor_info_t stress_open_info = {
 	.stressor = stress_open,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -50,7 +50,7 @@ void OPTIMIZE3 stress_mmap_set(
 		register const uint64_t *page_end = (uint64_t *)((uintptr_t)ptr + page_size);
 #endif
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/*
@@ -107,7 +107,7 @@ int OPTIMIZE3 stress_mmap_check(
 	register uint64_t *ptr = (uint64_t *)buf;
 	register const uint64_t *end = (uint64_t *)(buf + sz);
 
-	while ((ptr < end) && stress_continue_flag()) {
+	while (LIKELY((ptr < end) && stress_continue_flag())) {
 		register const uint64_t *page_end = (uint64_t *)((uintptr_t)ptr + page_size);
 
 		while (ptr < page_end) {
@@ -146,7 +146,7 @@ int OPTIMIZE3 stress_mmap_check(
 			sum ^= ptr[0x1e];
 			sum ^= ptr[0x1f];
 			ptr += 32;
-			if (sum)
+			if (UNLIKELY(sum))
 				return -1;
 		}
 	}
@@ -191,7 +191,7 @@ int OPTIMIZE3 stress_mmap_check_light(
 	register const size_t ptr_inc = page_size / sizeof(*ptr);
 
 	while (LIKELY(ptr < end)) {
-		if (*ptr != val)
+		if (UNLIKELY(*ptr != val))
 			return -1;
 		ptr += ptr_inc;
 		val++;

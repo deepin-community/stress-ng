@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,9 @@
 #include "stress-ng.h"
 #include "core-arch.h"
 #include "core-interrupts.h"
+
+#include <ctype.h>
+#include <math.h>
 
 #define MSR_SMI_COUNT		(0x34)
 
@@ -59,7 +62,7 @@ static void stress_interrupts_counter_set(
 	const uint64_t value,
 	const int which)
 {
-	if (i >= SIZEOF_ARRAY(info))
+	if (UNLIKELY(i >= SIZEOF_ARRAY(info)))
 		return;
 	if (which == COUNTERS_START)
 		counters[i].count_start = value;
@@ -87,7 +90,7 @@ static void stress_interrupts_count(stress_interrupts_t *counters, const int whi
 			unsigned int cpu;
 
 			if ((shim_getcpu(&cpu, NULL, NULL) == 0) &&
-			    (stress_x86_smi_readmsr64(cpu, MSR_SMI_COUNT, &count) == 0))
+			    (stress_x86_readmsr64(cpu, MSR_SMI_COUNT, &count) == 0))
 				stress_interrupts_counter_set(counters, i, count, which);
 			break;
 		}
@@ -95,7 +98,7 @@ static void stress_interrupts_count(stress_interrupts_t *counters, const int whi
 #endif
 
 	fp = fopen("/proc/interrupts", "r");
-	if (!fp)
+	if (UNLIKELY(!fp))
 		return;
 
 	while (fgets(buffer, sizeof(buffer), fp)) {
@@ -118,7 +121,7 @@ static void stress_interrupts_count(stress_interrupts_t *counters, const int whi
 						break;
 
 					/* expecting number, bail otherwise */
-					if (!isdigit((int)*ptr))
+					if (!isdigit((unsigned char)*ptr))
 						break;
 
 					/* get count, sum it */
@@ -126,7 +129,7 @@ static void stress_interrupts_count(stress_interrupts_t *counters, const int whi
 						count += val;
 
 					/* scan over digits */
-					while (isdigit((int)*ptr))
+					while (isdigit((unsigned char)*ptr))
 						ptr++;
 
 					/* bail if end of string */
@@ -219,7 +222,7 @@ void stress_interrupts_dump(FILE *yaml, stress_stressor_t *stressors_list)
 			int count = 0;
 			int32_t j;
 
-			for (j = 0; j < ss->num_instances; j++) {
+			for (j = 0; j < ss->instances; j++) {
 				const int64_t delta =
 					ss->stats[j]->interrupts[i].count_stop -
 					ss->stats[j]->interrupts[i].count_start;
@@ -231,6 +234,7 @@ void stress_interrupts_dump(FILE *yaml, stress_stressor_t *stressors_list)
 
 			if ((total > 0) && (count > 0)) {
 				char munged[64];
+				const char *name = ss->stressor->name;
 				const double average = round((double)total / (double)count);
 				const char *plural = average > 1.0 ? "s" : "";
 
@@ -240,9 +244,8 @@ void stress_interrupts_dump(FILE *yaml, stress_stressor_t *stressors_list)
 				}
 
 				if (!pr_name) {
-					(void)stress_munge_underscore(munged, ss->stressor->name, sizeof(munged));
-					pr_inf("%s:\n", munged);
-					pr_yaml(yaml, "    - stressor: %s\n", munged);
+					pr_inf("%s:\n", name);
+					pr_yaml(yaml, "    - stressor: %s\n", name);
 					pr_name = true;
 				}
 

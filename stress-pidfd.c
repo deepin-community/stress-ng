@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -36,7 +36,7 @@ static int stress_pidfd_open(const pid_t pid, const unsigned int flag)
 
 	/* Exercise pidfd_open with non-existent PID */
 	fd = shim_pidfd_open(bad_pid, 0);
-	if (fd >= 0)
+	if (UNLIKELY(fd >= 0))
 		(void)close(fd);
 
 	/* Exercise pidfd_open with illegal flags */
@@ -118,10 +118,13 @@ static void stress_pidfd_reap(pid_t pid, int pidfd)
 static int stress_pidfd(stress_args_t *args)
 {
 	const int bad_fd = stress_get_bad_fd();
+	int rc = EXIT_SUCCESS;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
-	while (stress_continue(args)) {
+	while ((rc == EXIT_SUCCESS) && stress_continue(args)) {
 		pid_t pid;
 
 again:
@@ -129,7 +132,7 @@ again:
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto finish;
 			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -150,10 +153,12 @@ again:
 				unsigned int flags;
 
 				flags = fcntl(pidfd, F_GETFL, 0);
-				if ((flags & O_NONBLOCK) == 0)
+				if (UNLIKELY((flags & O_NONBLOCK) == 0)) {
 					pr_fail("%s: pidfd_open opened using PIDFD_NONBLOCK "
 						"but O_NONBLOCK is not set on the file\n",
 						args->name);
+					rc = EXIT_FAILURE;
+				}
 #endif
 				(void)close(pidfd);
 			}
@@ -171,7 +176,7 @@ again:
 			/* Exercise illegal mmap'ing the pidfd */
 			ptr = mmap(NULL, args->page_size, PROT_READ,
 				MAP_PRIVATE, pidfd, 0);
-			if (ptr != MAP_FAILED)
+			if (UNLIKELY(ptr != MAP_FAILED))
 				(void)munmap(ptr, args->page_size);
 
 			/* Try to get fd 0 on child pid */
@@ -181,38 +186,47 @@ again:
 
 			/* Exercise with invalid flags */
 			ret = shim_pidfd_getfd(pidfd, 0, ~0U);
-			if (ret >= 0)
+			if (UNLIKELY(ret >= 0))
 				(void)close(ret);
 
 			/* Exercise with bad_fd */
 			ret = shim_pidfd_getfd(pidfd, bad_fd, 0);
-			if (ret >= 0)
+			if (UNLIKELY(ret >= 0))
 				(void)close(ret);
 
 			ret = shim_pidfd_send_signal(pidfd, 0, NULL, 0);
-			if (ret != 0) {
+			if (UNLIKELY(ret != 0)) {
 				if (errno == ENOSYS) {
-					if (args->instance == 0)
+					if (stress_instance_zero(args))
 						pr_inf_skip("%s: skipping stress test, system call is not implemented\n",
 							args->name);
 					stress_pidfd_reap(pid, pidfd);
 					return EXIT_NOT_IMPLEMENTED;
 				}
-				pr_fail("%s: pidfd_send_signal failed: errno=%d (%s)\n",
+				pr_fail("%s: pidfd_send_signal failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 				stress_pidfd_reap(pid, pidfd);
 				break;
 			}
 			ret = shim_pidfd_send_signal(pidfd, SIGSTOP, NULL, 0);
-			if (ret != 0) {
-				pr_fail("%s: pidfd_send_signal (SIGSTOP), failed: errno=%d (%s)\n",
+			if (UNLIKELY(ret != 0)) {
+				pr_fail("%s: pidfd_send_signal (SIGSTOP), failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 			}
 			ret = shim_pidfd_send_signal(pidfd, SIGCONT, NULL, 0);
-			if (ret != 0) {
-				pr_fail("%s: pidfd_send_signal (SIGCONT), failed: errno=%d (%s)\n",
+			if (UNLIKELY(ret != 0)) {
+				pr_fail("%s: pidfd_send_signal (SIGCONT), failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
+				rc = EXIT_FAILURE;
 			}
+#if defined(PIDFD_SELF_THREAD)
+			(void)shim_pidfd_send_signal(PIDFD_SELF_THREAD, 0, NULL, 0);
+#endif
+#if defined(PIDFD_SELF_THREAD_GROUP)
+			(void)shim_pidfd_send_signal(PIDFD_SELF_THREAD_GROUP, 0, NULL, 0);
+#endif
 			stress_pidfd_reap(pid, pidfd);
 		}
 		stress_bogo_inc(args);
@@ -220,12 +234,12 @@ again:
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_pidfd_info = {
+const stressor_info_t stress_pidfd_info = {
 	.stressor = stress_pidfd,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.supported = stress_pidfd_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
@@ -238,9 +252,9 @@ static int stress_pidfd_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_pidfd_info = {
+const stressor_info_t stress_pidfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.supported = stress_pidfd_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help,

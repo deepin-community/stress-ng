@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,9 +20,13 @@
 #include "stress-ng.h"
 #include "core-attribute.h"
 #include "core-builtin.h"
+#include "core-helper.h"
 #include "core-madvise.h"
 #include "core-put.h"
 #include "core-target-clones.h"
+#include "core-pragma.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
@@ -34,8 +38,12 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-#if defined(__linux__)
+#if defined(__linux__)	||	\
+    defined(__sun__) ||		\
+    defined(__FreeBSD__) ||	\
+    defined(__NetBSD__)
 
+#if defined(__linux__)
 typedef struct {
 	const char *name;
 	const int whence;
@@ -46,34 +54,7 @@ static const stress_whences_t whences[] = {
 	{ "SEEK_CUR",	SEEK_CUR },
 	{ "SEEK_END",	SEEK_END }
 };
-
-/*
- *  stress_data_is_not_zero()
- *	checks if buffer is zero, buffer expected to be page aligned
- */
-static inline ALWAYS_INLINE bool PURE OPTIMIZE3 stress_data_is_not_zero(void *buffer, const size_t len)
-{
-#if defined(HAVE_INT128_T)
-	typedef __uint128_t cmptype_t;
-#else
-	typedef uint64_t cmptype_t;
 #endif
-	register const cmptype_t *ptr_end = (cmptype_t *)((uintptr_t)buffer + len);
-	register cmptype_t *ptr = (cmptype_t *)buffer;
-
-	while (ptr < ptr_end) {
-		register cmptype_t v;
-
-		v = ptr[0];
-		v |= ptr[1];
-		v |= ptr[2];
-		v |= ptr[3];
-		ptr += 4;
-		if (v)
-			return true;
-	}
-	return false;
-}
 
 /*
  *  stress_full
@@ -83,31 +64,36 @@ static int stress_full(stress_args_t *args)
 {
 	void *buffer;
 	const size_t buffer_size = 4096;
+#if defined(__linux__)
 	size_t w = 0;
+#endif
 	int rc = EXIT_FAILURE;
 	int fd = -1;
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	buffer = stress_mmap_populate(NULL, buffer_size,
 			PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (buffer == MAP_FAILED) {
-		pr_inf("%s: failed to mmap %zd bytes, errno=%d (%s), skipping stressor\n",
-			args->name, buffer_size, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), skipping stressor\n",
+			args->name, buffer_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buffer, buffer_size, "io-buffer");
 	(void)stress_madvise_mergeable(buffer, buffer_size);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		ssize_t ret;
-		off_t offset;
 		uint8_t *ptr;
 		struct stat statbuf;
 
 		if ((fd = open("/dev/full", O_RDWR)) < 0) {
 			if (errno == ENOENT) {
-				if (args->instance == 0)
+				if (stress_instance_zero(args))
 					pr_inf_skip("%s: /dev/full not available, skipping stress test\n",
 						args->name);
 				rc = EXIT_NOT_IMPLEMENTED;
@@ -152,12 +138,12 @@ try_read:
 		}
 #if defined(HAVE_PREAD)
 		{
-			offset = (sizeof(offset) == sizeof(uint64_t)) ?
+			const off_t offset = (sizeof(offset) == sizeof(uint64_t)) ?
 				(off_t)(stress_mwc64() & 0x7fffffffffffffff) :
 				(off_t)(stress_mwc32() & 0x7fffffffUL);
 			ret = pread(fd, buffer, buffer_size, offset);
 			if (UNLIKELY(ret < 0)) {
-				pr_fail("%s: read failed at offset %jd, errno=%d (%s)\n",
+				pr_fail("%s: read failed at offset %" PRIdMAX ", errno=%d (%s)\n",
 					args->name, (intmax_t)offset, errno, strerror(errno));
 				goto fail;
 			}
@@ -193,19 +179,25 @@ try_read:
 			(void)munmap((void *)ptr, args->page_size);
 		}
 
-		/*
-		 *  Seeks will always succeed
-		 */
-		offset = (off_t)stress_mwc64();
-		ret = lseek(fd, offset, whences[w].whence);
-		if (ret < 0) {
-			pr_fail("%s: lseek(fd, %jd, %s)\n",
-				args->name, (intmax_t)offset, whences[w].name);
-			goto fail;
+#if defined(__linux__)
+		{
+			/*
+			 *  On Linux seeks will always succeed
+			 */
+			const off_t offset = (off_t)stress_mwc64();
+
+			ret = lseek(fd, offset, whences[w].whence);
+			if (ret < 0) {
+				pr_fail("%s: lseek(fd, %" PRIdMAX ", %s) failed, errno=%d (%s)\n",
+					args->name, (intmax_t)offset, whences[w].name,
+					errno, strerror(errno));
+				goto fail;
+			}
 		}
 		w++;
 		if (w >= SIZEOF_ARRAY(whences))
 			w = 0;
+#endif
 
 		/*
 		 *  Exercise a couple of ioctls
@@ -242,16 +234,16 @@ fail:
 	return rc;
 }
 
-stressor_info_t stress_full_info = {
+const stressor_info_t stress_full_info = {
 	.stressor = stress_full,
-	.class = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
+	.classifier = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_full_info = {
+const stressor_info_t stress_full_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
+	.classifier = CLASS_DEV | CLASS_MEMORY | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "core-builtin.h"
 #include "core-pragma.h"
 
+#include <math.h>
+
 #if defined(HAVE_LIBJPEG_H)
 #include <jpeglib.h>
 #endif
@@ -30,6 +32,15 @@
 #define JPEG_IMAGE_XSTRIPES	(0x03)
 #define JPEG_IMAGE_FLAT		(0x04)
 #define JPEG_IMAGE_BROWN	(0x05)
+
+#define MIN_JPEG_HEIGHT		(256)
+#define MAX_JPEG_HEIGHT		(4096)
+
+#define MIN_JPEG_WIDTH		(256)
+#define MAX_JPEG_WIDTH		(4096)
+
+#define MIN_JPEG_QUALITY	(1)
+#define MAX_JPEG_QUALITY	(100)
 
 typedef struct {
 	const char *name;
@@ -55,90 +66,39 @@ static const jpeg_image_type_t jpeg_image_types[] = {
 	{ "xstripes",	JPEG_IMAGE_XSTRIPES },
 };
 
-/*
- *  stress_set_jpeg_height()
- *      set jpeg height
- */
-static int stress_set_jpeg_height(const char *opt)
+static const char *stress_jpeg_image(const size_t i)
 {
-	int32_t jpeg_height;
-
-	jpeg_height = stress_get_int32(opt);
-	stress_check_range("jpeg-height", (uint64_t)jpeg_height, 256, 4096);
-	return stress_set_setting("jpeg-height", TYPE_ID_INT32, &jpeg_height);
+	return (i < SIZEOF_ARRAY(jpeg_image_types)) ? jpeg_image_types[i].name : NULL;
 }
 
-/*
- *  stress_set_jpeg_width()
- *      set jpeg width
- */
-static int stress_set_jpeg_width(const char *opt)
-{
-	int32_t jpeg_width;
-
-	jpeg_width = stress_get_int32(opt);
-	stress_check_range("jpeg-width", (uint64_t)jpeg_width, 256, 4096);
-	return stress_set_setting("jpeg-width", TYPE_ID_INT32, &jpeg_width);
-}
-
-/*
- *  stress_set_jpeg_quality()
- *      set jpeg quality 1..100 (100 best)
- */
-static int stress_set_jpeg_quality(const char *opt)
-{
-	int32_t jpeg_quality;
-
-	jpeg_quality = stress_get_int32(opt);
-	stress_check_range("jpeg-quality", (uint64_t)jpeg_quality, 1, 100);
-	return stress_set_setting("jpeg-quality", TYPE_ID_INT32, &jpeg_quality);
-}
-
-/*
- *  stress_set_jpeg_image()
- *      set image to compress
- */
-static int stress_set_jpeg_image(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(jpeg_image_types); i++) {
-		if (strcmp(opt, jpeg_image_types[i].name) == 0)
-			return stress_set_setting("jpeg-image", TYPE_ID_INT, &jpeg_image_types[i].type);
-	}
-	(void)fprintf(stderr, "jpeg-image must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(jpeg_image_types); i++)
-		(void)fprintf(stderr, " %s", jpeg_image_types[i].name);
-
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_jpeg_height,	stress_set_jpeg_height },
-	{ OPT_jpeg_image,	stress_set_jpeg_image },
-	{ OPT_jpeg_width,	stress_set_jpeg_width },
-	{ OPT_jpeg_quality,	stress_set_jpeg_quality },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_jpeg_height,  "jpeg-height",   TYPE_ID_INT32, MIN_JPEG_HEIGHT, MAX_JPEG_HEIGHT, NULL },
+	{ OPT_jpeg_image,   "jpeg-image",    TYPE_ID_SIZE_T_METHOD, 0, 0, stress_jpeg_image },
+	{ OPT_jpeg_width,   "jpeg-width",    TYPE_ID_INT32, MIN_JPEG_WIDTH, MAX_JPEG_WIDTH, NULL },
+	{ OPT_jpeg_quality, "jpeg-quality",  TYPE_ID_INT32, MIN_JPEG_QUALITY, MAX_JPEG_QUALITY, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_JPEG) &&	\
     defined(HAVE_LIBJPEG_H)
 
-static inline ALWAYS_INLINE double OPTIMIZE3 stress_plasma(const double x, const double y, const double time)
+static inline ALWAYS_INLINE double OPTIMIZE3 stress_plasma(
+	const double x,
+	const double y,
+	const double whence)
 {
 	const double tau = 2 * M_PI;
 	double cx, cy;
 	double value;
+	double third = 0.3333333333333333333L;
 
-	value = shim_sin((time - x) * tau);
-	value += shim_cos((time + y) * tau);
-	value += shim_sin((time + x - y) * tau);
-	value += shim_sin((time + x + y) * tau);
+	value = shim_sin((whence - x) * tau);
+	value += shim_cos((whence + y) * tau);
+	value += shim_sin((whence + x - y) * tau);
+	value += shim_sin((whence + x + y) * tau);
 
-	cx = x - 0.5 + shim_sin(time * tau) / 3.0;
-	cy = y - 0.5 + shim_cos(time * tau) / 3.0;
+	cx = x - 0.5 + shim_sin(whence * tau) * third;
+	cy = y - 0.5 + shim_cos(whence * tau) * third;
 	value += shim_sin(shim_sqrt(128.0 * (cx * cx + cy * cy)));
 
 	return value;
@@ -151,9 +111,10 @@ static void OPTIMIZE3 stress_rgb_plasma(
 {
 	register uint8_t *ptr = rgb;
 	register int32_t sy;
-	const double tx = ((double)stress_mwc32()) / 100.0;
-	const double ty = ((double)stress_mwc32()) / 100.0;
-	const double tz = ((double)stress_mwc32()) / 100.0;
+	const double hundredth = 0.01L;
+	const double tx = ((double)stress_mwc32()) * hundredth;
+	const double ty = ((double)stress_mwc32()) * hundredth;
+	const double tz = ((double)stress_mwc32()) * hundredth;
 	const double dx = 1.0 / (double)x_max;
 	const double dy = 1.0 / (double)y_max;
 	double y;
@@ -175,9 +136,10 @@ static void OPTIMIZE3 stress_rgb_noise(
 	const int32_t	x_max,
 	const int32_t	y_max)
 {
-	int32_t i, size = x_max * y_max * 3, n;
-	uint32_t *ptr32 = (uint32_t *)rgb;
-	uint8_t *ptr8;
+	const int32_t size = x_max * y_max * 3;
+	register int32_t i, n;
+	register uint32_t *ptr32 = (uint32_t *)rgb;
+	register uint8_t *ptr8;
 
 	n = size >> 2;
 	for (i = 0; i < n; i++) {
@@ -195,7 +157,8 @@ static void OPTIMIZE3 stress_rgb_brown(
 	const int32_t	x_max,
 	const int32_t	y_max)
 {
-	int32_t i, size = x_max * y_max * 3;
+	int32_t i;
+	const int32_t size = x_max * y_max;
 	uint8_t *ptr = (uint8_t *)rgb;
 	const uint32_t val = stress_mwc32();
 	register uint8_t r = (val >> 24) & 0xff;
@@ -215,17 +178,18 @@ static void OPTIMIZE3 stress_rgb_brown(
 	}
 }
 
-
 static void OPTIMIZE3 stress_rgb_gradient(
 	uint8_t		*rgb,
 	const int32_t	x_max,
 	const int32_t	y_max)
 {
-	float y = 0.0, dy = 256.0 / y_max;
+	const float dy = 256.0 / y_max;
+	const float dx = 256.0 / x_max;
+	register float y = 0.0;
 	register int sy;
 
 	for (sy = 0; sy < y_max; sy++, y += dy) {
-		float x = 0.0, dx = 256.0 / x_max;
+		register float x = 0.0;
 		register int sx;
 
 		for (sx = 0; sx < x_max; sx++, x += dx) {
@@ -285,7 +249,10 @@ static void OPTIMIZE3 stress_rgb_flat(
  *  stress_jpeg_checksum_data()
  *	generate a 32 bit checksum on the jpeg compressed data
  */
-static void OPTIMIZE3 stress_jpeg_checksum_data(char *data, const size_t size, uint32_t *checksum)
+static void OPTIMIZE3 stress_jpeg_checksum_data(
+	char *data,
+	const size_t size,
+	uint32_t *checksum)
 {
 	register uint32_t sum = 0;
 	register uint8_t *ptr = (uint8_t *)data;
@@ -351,13 +318,16 @@ static int stress_rgb_compress_to_jpeg(
 
 PRAGMA_UNROLL_N(8)
 	for (y = 0; y < y_max; y++, rgb += row_stride) {
-		*yy %= y_max;
+
+		if (UNLIKELY(*yy >= y_max))
+			*yy = 0;
 		row_pointer[*yy] = rgb;
 		(*yy)++;
 	}
 
 	(void)jpeg_write_scanlines(&cinfo, row_pointer, (JDIMENSION)y_max);
 	jpeg_finish_compress(&cinfo);
+	(void)fflush(fp);
 	(void)fclose(fp);
 	jpeg_destroy_compress(&cinfo);
 	t2 = stress_time_now();
@@ -389,38 +359,60 @@ static int stress_jpeg(stress_args_t *args)
 	int32_t jpeg_quality = 95;
 	int32_t yy = 0;
 	size_t rgb_size, row_pointer_size;
-	int jpeg_image = JPEG_IMAGE_PLASMA;
+	size_t jpeg_image = 0; /* plasma */
 	double total_pixels = 0.0, t_start, duration, rate, ratio;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
-	(void)stress_get_setting("jpeg-width", &x_max);
-	(void)stress_get_setting("jpeg-height", &y_max);
-	(void)stress_get_setting("jpeg-quality", &jpeg_quality);
+	if (!stress_get_setting("jpeg-width", &x_max)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			x_max = MAX_JPEG_WIDTH;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			x_max = MIN_JPEG_WIDTH;
+	}
+	if (!stress_get_setting("jpeg-height", &y_max)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			y_max = MAX_JPEG_HEIGHT;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			y_max = MIN_JPEG_HEIGHT;
+	}
+	if (!stress_get_setting("jpeg-quality", &jpeg_quality)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			jpeg_quality = MAX_JPEG_QUALITY;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			jpeg_quality = MIN_JPEG_QUALITY;
+	}
 	(void)stress_get_setting("jpeg-image", &jpeg_image);
 
 	rgb_size = (size_t)x_max * (size_t)y_max * 3;
+
 	rgb = stress_mmap_populate(NULL, rgb_size,
 		PROT_READ | PROT_WRITE,
 		MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (rgb == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate RGB buffer of size %" PRId32 " x %" PRId32 " x %d, skipping stressor\n",
-			args->name, x_max, y_max, 3);
+		pr_inf_skip("%s: cannot allocate RGB buffer of size %" PRId32 " x %" PRId32 " x %d%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, x_max, y_max, 3,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(rgb, rgb_size, "rgb-data");
 	row_pointer_size = (size_t)y_max * sizeof(*row_pointer);
 	row_pointer = (JSAMPROW *)stress_mmap_populate(NULL, row_pointer_size,
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (row_pointer == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate row pointer array of size %" PRId32 " x %zu, skipping stressor\n",
-			args->name, y_max, sizeof(*row_pointer));
-		(void)munmap(rgb, rgb_size);
+		pr_inf_skip("%s: cannot allocate row pointer array of size %" PRId32 " x %zu%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, y_max, sizeof(*row_pointer),
+			stress_get_memfree_str(), errno, strerror(errno));
+		(void)munmap((void *)rgb, rgb_size);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(row_pointer, row_pointer_size, "row-pointers");
 
 	stress_mwc_set_seed(0xf1379ab2, 0x679ce25d);
 
-	switch (jpeg_image) {
+	switch (jpeg_image_types[jpeg_image].type) {
 	default:
 	case JPEG_IMAGE_PLASMA:
 		stress_rgb_plasma(rgb, x_max, y_max);
@@ -442,6 +434,8 @@ static int stress_jpeg(stress_args_t *args)
 		break;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t_jpeg = 0.0;
@@ -478,10 +472,10 @@ static int stress_jpeg(stress_args_t *args)
 
 	rate = (duration > 0) ? total_pixels / duration : 0.0;
 	stress_metrics_set(args, 0, "megapixels compressed per sec",
-		rate / 1000000.0, STRESS_HARMONIC_MEAN);
+		rate / 1000000.0, STRESS_METRIC_HARMONIC_MEAN);
 	ratio = (size_uncompressed > 0) ? 100.0 * (double)size_compressed / (double)size_uncompressed : 0.0;
 	stress_metrics_set(args, 1, "% compression ratio",
-		ratio, STRESS_HARMONIC_MEAN);
+		ratio, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -496,18 +490,18 @@ static int stress_jpeg(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_jpeg_info = {
+const stressor_info_t stress_jpeg_info = {
 	.stressor = stress_jpeg,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_jpeg_info = {
+const stressor_info_t stress_jpeg_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without jpeg library"

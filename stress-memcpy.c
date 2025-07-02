@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -51,16 +51,19 @@ typedef void * (*memmove_check_func_t)(memmove_func_t func, void *dest, const vo
 
 static memcpy_check_func_t memcpy_check;
 static memmove_check_func_t memmove_check;
+static bool memcpy_okay;
 
 static OPTIMIZE3 void *memcpy_check_func(memcpy_func_t func, void *dest, const void *src, size_t n)
 {
 	void *ptr = func(dest, src, n);
 
-	if (shim_memcmp(dest, src, n)) {
+	if (UNLIKELY(shim_memcmp(dest, src, n))) {
 		pr_fail("%s: %s: memcpy content is different than expected\n", s_args_name, s_method_name);
+		memcpy_okay = false;
 	}
-	if (ptr != dest) {
+	if (UNLIKELY(ptr != dest)) {
 		pr_fail("%s: %s: memcpy return was %p and not %p as expected\n", s_args_name, s_method_name, ptr, dest);
+		memcpy_okay = false;
 	}
 	return ptr;
 }
@@ -74,11 +77,13 @@ static OPTIMIZE3 void *memmove_check_func(memcpy_func_t func, void *dest, const 
 {
 	void *ptr = func(dest, src, n);
 
-	if (shim_memcmp(dest, src, n)) {
+	if (UNLIKELY(shim_memcmp(dest, src, n))) {
 		pr_fail("%s: %s: memmove content is different than expected\n", s_args_name, s_method_name);
+		memcpy_okay = false;
 	}
-	if (ptr != dest) {
+	if (UNLIKELY(ptr != dest)) {
 		pr_fail("%s: %s: memmove return was %p and not %p as expected\n", s_args_name, s_method_name, ptr, dest);
+		memcpy_okay = false;
 	}
 	return ptr;
 }
@@ -140,7 +145,7 @@ static NOINLINE void stress_memcpy_libc(
 	int i;
 	s_method_name = "libc";
 
-	for (i = 0; i < MEMCPY_LOOPS; i++) {
+	for (i = 0; memcpy_okay && (i < MEMCPY_LOOPS); i++) {
 		(void)memcpy_check(memcpy, str3, str2, MEMCPY_MEMSIZE);
 		(void)memcpy_check(memcpy, str2, str3, MEMCPY_MEMSIZE / 2);
 		(void)memmove_check(memmove, str3, str3 + 64, MEMCPY_MEMSIZE - 64);
@@ -176,7 +181,7 @@ static NOINLINE void stress_memcpy_builtin(
 
 	s_method_name = "builtin";
 
-	for (i = 0; i < MEMCPY_LOOPS; i++) {
+	for (i = 0; memcpy_okay && (i < MEMCPY_LOOPS); i++) {
 		(void)memcpy_check(stress_builtin_memcpy_wrapper, str3, str2, MEMCPY_MEMSIZE);
 		(void)memcpy_check(stress_builtin_memcpy_wrapper, str2, str3, MEMCPY_MEMSIZE / 2);
 		(void)memmove_check(stress_builtin_memmove_wrapper, str3, str3 + 64, MEMCPY_MEMSIZE - 64);
@@ -195,7 +200,7 @@ static NOINLINE void stress_memcpy_builtin(
 
 	s_method_name = "builtin (libc)";
 
-	for (i = 0; i < MEMCPY_LOOPS; i++) {
+	for (i = 0; memcpy_okay && (i < MEMCPY_LOOPS); i++) {
 		(void)memcpy_check(memcpy, str3, str2, MEMCPY_MEMSIZE);
 		(void)memcpy_check(memcpy, str2, str3, MEMCPY_MEMSIZE / 2);
 		(void)memmove_check(memmove, str3, str3 + 64, MEMCPY_MEMSIZE - 64);
@@ -218,7 +223,7 @@ static NOINLINE void name(							\
 										\
 	s_method_name = method;							\
 										\
-	for (i = 0; i < MEMCPY_LOOPS; i++) {					\
+	for (i = 0; memcpy_okay && (i < MEMCPY_LOOPS); i++) {			\
 		(void)memcpy_check(cpy, str3, str2, MEMCPY_MEMSIZE);		\
 		(void)memcpy_check(cpy, str2, str3, MEMCPY_MEMSIZE / 2);	\
 		(void)memmove_check(move, str3, str3 + 64, MEMCPY_MEMSIZE - 64);\
@@ -260,6 +265,14 @@ static NOINLINE void stress_memcpy_all(
 		whence++;
 		stress_memcpy_naive_o0(str1, str2, str3);
 		return;
+	case 4:
+		whence++;
+		stress_memcpy_naive_o1(str1, str2, str3);
+		return;
+	case 5:
+		whence++;
+		stress_memcpy_naive_o2(str1, str2, str3);
+		return;
 	default:
 		stress_memcpy_naive_o3(str1, str2, str3);
 		whence = 0;
@@ -279,35 +292,6 @@ static const stress_memcpy_method_info_t stress_memcpy_methods[] = {
 };
 
 /*
- *  stress_set_memcpy_method()
- *      set default memcpy stress method
- */
-static int stress_set_memcpy_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_memcpy_methods); i++) {
-		if (!strcmp(stress_memcpy_methods[i].name, name)) {
-			stress_set_setting("memcpy-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "memcpy-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_memcpy_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_memcpy_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
-static void stress_memcpy_set_default(void)
-{
-	stress_set_memcpy_method("all");
-}
-
-/*
  *  stress_memcpy()
  *	stress memory copies
  */
@@ -317,14 +301,18 @@ static int stress_memcpy(stress_args_t *args)
 	size_t memcpy_method = 0;
 	stress_memcpy_func func;
 
+	memcpy_okay = true;
 	buf = (uint8_t *)stress_mmap_populate(NULL, 3 * MEMCPY_MEMSIZE,
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1 , 0);
-
 	if (buf == MAP_FAILED) {
-		pr_inf("%s: cannot allocate %d sized buffer\n", args->name, MEMCPY_MEMSIZE * 3);
+		pr_inf("%s: mmap of %d bytes failed%s, errno=%d (%s)\n",
+			args->name, MEMCPY_MEMSIZE * 3,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(buf, 3 * MEMCPY_MEMSIZE, "memcpy-buffer");
+
 	str1 = buf;
 	str2 = str1 + MEMCPY_MEMSIZE;
 	str3 = str2 + MEMCPY_MEMSIZE;
@@ -342,12 +330,15 @@ static int stress_memcpy(stress_args_t *args)
 	(void)stress_get_setting("memcpy-method", &memcpy_method);
 	func = stress_memcpy_methods[memcpy_method].func;
 	stress_rndbuf(str3, ALIGN_SIZE);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		func(str1, str2, str3);
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while (memcpy_okay && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -356,16 +347,20 @@ static int stress_memcpy(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_memcpy_method,	stress_set_memcpy_method },
-	{ 0,			NULL }
+static const char *stress_memcpy_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(stress_memcpy_methods)) ? stress_memcpy_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_memcpy_method, "memcpy-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_memcpy_method },
+	END_OPT,
 };
 
-stressor_info_t stress_memcpy_info = {
+const stressor_info_t stress_memcpy_info = {
 	.stressor = stress_memcpy,
-	.set_default = stress_memcpy_set_default,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

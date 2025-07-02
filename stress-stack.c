@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,7 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+#include "core-cpu-cache.h"
 #include "core-mincore.h"
 #include "core-out-of-memory.h"
 #include "core-pragma.h"
@@ -46,32 +47,12 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_stack_fill(const char *opt)
-{
-	return stress_set_setting_true("stack-fill", opt);
-}
-
-static int stress_set_stack_mlock(const char *opt)
-{
-	return stress_set_setting_true("stack-mlock", opt);
-}
-
-static int stress_set_stack_pageout(const char *opt)
-{
-	return stress_set_setting_true("stack-pageout", opt);
-}
-
-static int stress_set_stack_unmap(const char *opt)
-{
-	return stress_set_setting_true("stack-unmap", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_stack_fill,	stress_set_stack_fill },
-	{ OPT_stack_mlock,	stress_set_stack_mlock },
-	{ OPT_stack_pageout,	stress_set_stack_pageout },
-	{ OPT_stack_unmap,	stress_set_stack_unmap },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_stack_fill,    "stack-fill",    TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_stack_mlock,   "stack-mlock",   TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_stack_pageout, "stack-pageout", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_stack_unmap,   "stack-unmap",   TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 /*
@@ -112,7 +93,7 @@ static bool OPTIMIZE3 stress_stack_alloc(
 		return true;
 
 	if (stack_fill) {
-		(void)shim_memset(data, 0, STRESS_DATA_SIZE);
+		(void)shim_memset(data, stress_mwc8(), STRESS_DATA_SIZE);
 	} else {
 		register size_t i;
 
@@ -128,6 +109,8 @@ static bool OPTIMIZE3 stress_stack_alloc(
 			*(ptr + 1) = stress_mwc32() | 1;
 		}
 	}
+	if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+		stress_cpu_data_cache_flush(data, STRESS_DATA_SIZE);
 #if defined(HAVE_MLOCK)
 	if (stack_mlock) {
 		intptr_t ptr = ((intptr_t)data) + ((intptr_t)page_size - 1);
@@ -174,9 +157,9 @@ static bool OPTIMIZE3 stress_stack_alloc(
 
 PRAGMA_UNROLL_N(4)
 		for (check_ptr = &check; check_ptr; check_ptr = check_ptr->prev) {
-			if (i++ >= 128)
+			if (UNLIKELY(i++ >= 128))
 				break;
-			if (check_ptr->self_addr != check_ptr) {
+			if (UNLIKELY(check_ptr->self_addr != check_ptr)) {
 				pr_fail("%s: corrupt self check data on stack, got %p, expected %p\n",
 					args->name, check_ptr->self_addr, check_ptr);
 				check_success = false;
@@ -191,7 +174,7 @@ PRAGMA_UNROLL_N(4)
 	if (!check_success)
 		return false;
 
-	if (stress_continue(args))
+	if (LIKELY(stress_continue(args)))
 		return stress_stack_alloc(args, start, &check, stack_fill, stack_mlock, stack_pageout, stack_unmap, last_size);
 	return true;
 }
@@ -208,13 +191,25 @@ static int stress_stack_child(stress_args_t *args, void *context)
 
 	(void)context;
 
-	(void)stress_get_setting("stack-fill", &stack_fill);
-	(void)stress_get_setting("stack-mlock", &stack_mlock);
-	(void)stress_get_setting("stack-pageout", &stack_pageout);
-	(void)stress_get_setting("stack-unmap", &stack_unmap);
+	if (!stress_get_setting("stack-fill", &stack_fill)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			stack_fill = true;
+	}
+	if (!stress_get_setting("stack-mlock", &stack_mlock)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			stack_mlock = true;
+	}
+	if (!stress_get_setting("stack-pageout", &stack_pageout)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			stack_pageout = true;
+	}
+	if (!stress_get_setting("stack-unmap", &stack_unmap)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			stack_unmap = true;
+	}
 
 #if !defined(MADV_PAGEOUT)
-	if (stack_pageout && (args->instance == 0)) {
+	if (stack_pageout && (stress_instance_zero(args))) {
 		pr_inf("%s: stack-pageout not supported on this system\n", args->name);
 		stack_pageout = false;
 	}
@@ -230,11 +225,13 @@ static int stress_stack_child(stress_args_t *args, void *context)
 		PROT_READ | PROT_WRITE,
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (altstack == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate %zd byte signal stack: "
+		pr_inf_skip("%s: failed to mmap %zd byte signal stack%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, (size_t)STRESS_SIGSTKSZ, errno, strerror(errno));
+			args->name, (size_t)STRESS_SIGSTKSZ,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(altstack, STRESS_SIGSTKSZ, "altstack");
 	(void)stress_mincore_touch_pages(altstack, STRESS_SIGSTKSZ);
 
 	/*
@@ -252,7 +249,7 @@ static int stress_stack_child(stress_args_t *args, void *context)
 	stress_parent_died_alarm();
 
 	if (start_ptr == (void *) -1) {
-		pr_err("%s: sbrk(0) failed: errno=%d (%s)\n",
+		pr_err("%s: sbrk(0) failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -264,20 +261,22 @@ static int stress_stack_child(stress_args_t *args, void *context)
 		struct sigaction new_action;
 		int ret;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		(void)shim_memset(&new_action, 0, sizeof new_action);
 		new_action.sa_handler = stress_segvhandler;
 		(void)sigemptyset(&new_action.sa_mask);
+#if defined(HAVE_SIGALTSTACK)
 		new_action.sa_flags = SA_ONSTACK;
+#endif
 
-		if (sigaction(SIGSEGV, &new_action, NULL) < 0) {
+		if (UNLIKELY(sigaction(SIGSEGV, &new_action, NULL) < 0)) {
 			pr_fail("%s: sigaction on SIGSEGV failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
 		}
-		if (sigaction(SIGBUS, &new_action, NULL) < 0) {
+		if (UNLIKELY(sigaction(SIGBUS, &new_action, NULL) < 0)) {
 			pr_fail("%s: sigaction on SIGBUS failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return EXIT_FAILURE;
@@ -287,7 +286,7 @@ static int stress_stack_child(stress_args_t *args, void *context)
 		 * We return here if we segfault, so
 		 * first check if we need to terminate
 		 */
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		if (ret) {
@@ -316,15 +315,17 @@ static int stress_stack_child(stress_args_t *args, void *context)
  */
 static int stress_stack(stress_args_t *args)
 {
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	return stress_oomable_child(args, NULL, stress_stack_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_stack_info = {
+const stressor_info_t stress_stack_info = {
 	.stressor = stress_stack,
-	.class = CLASS_VM | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

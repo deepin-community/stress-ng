@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -93,7 +93,7 @@ void stress_set_iopriority(const int32_t class, const int32_t level)
 	rc = shim_ioprio_set(IOPRIO_WHO_PROCESS, 0,
 		IOPRIO_PRIO_VALUE(class, data));
 	if ((rc < 0) && (errno != ENOSYS)) {
-		(void)fprintf(stderr, "Cannot set I/O priority: errno=%d (%s)\n",
+		(void)fprintf(stderr, "Cannot set I/O priority, errno=%d (%s)\n",
 			errno, strerror(errno));
 		_exit(EXIT_FAILURE);
 	}

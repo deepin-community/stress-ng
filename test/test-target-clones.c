@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,7 +42,7 @@
 
 #define TARGET_CLONES	__attribute__((target_clones(TARGET_CLONE)))
 
-static int TARGET_CLONES have_target_clones(void)
+int TARGET_CLONES have_target_clones(void)
 {
 	return 0;
 }

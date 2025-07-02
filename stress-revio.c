@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -48,11 +48,13 @@
 #define REVIO_OPT_FSYNC		(0x00200000)
 #define REVIO_OPT_FDATASYNC	(0x00400000)
 #define REVIO_OPT_SYNCFS	(0x00800000)
+#define REVIO_OPT_READAHEAD	(0x01000000)
 
 static const stress_help_t help[] = {
 	{ NULL,	"revio N",		"start N workers performing reverse I/O" },
 	{ NULL, "revio-bytes N",	"specify file size (default is 1GB)" },
 	{ NULL,	"revio-ops N",		"stop after N revio bogo operations" },
+	{ NULL, "revio-opts list",	"specify list of various stressor options" },
 	{ NULL,	NULL,			NULL }
 };
 
@@ -121,21 +123,14 @@ static const stress_revio_opts_t revio_opts[] = {
 #if defined(HAVE_FDATASYNC)
 	{ "fdatasync",	REVIO_OPT_FDATASYNC, 0, 0, 0 },
 #endif
+#if defined(HAVE_READAHEAD)
+	{ "readahead",	REVIO_OPT_READAHEAD, 0, 0, 0 },
+#endif
 #if defined(HAVE_SYNCFS)
 	{ "syncfs",	REVIO_OPT_SYNCFS, 0, 0, 0 },
 #endif
 	{ "utimes",	REVIO_OPT_UTIMES, 0, 0, 0 },
 };
-
-static int stress_set_revio_bytes(const char *opt)
-{
-	uint64_t revio_bytes;
-
-	revio_bytes = stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("revio-bytes", revio_bytes,
-		MIN_REVIO_BYTES, MAX_REVIO_BYTES);
-	return stress_set_setting("revio-bytes", TYPE_ID_UINT64, &revio_bytes);
-}
 
 /*
  *  stress_revio_write()
@@ -157,45 +152,50 @@ static ssize_t stress_revio_write(
 #endif
 
 	ret = write(fd, buf, count);
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return ret;
 
 #if defined(HAVE_FSYNC)
 	if (revio_flags & REVIO_OPT_FSYNC)
 		(void)shim_fsync(fd);
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return ret;
 #endif
 #if defined(HAVE_FDATASYNC)
 	if (revio_flags & REVIO_OPT_FDATASYNC)
 		(void)shim_fdatasync(fd);
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return ret;
 #endif
 #if defined(HAVE_SYNCFS)
 	if (revio_flags & REVIO_OPT_SYNCFS)
 		(void)syncfs(fd);
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return ret;
 #endif
-
 	return ret;
 }
 
 /*
- *  stress_set_revio_opts
+ *  stress_revio_opts
  *	parse --revio-opts option(s) list
  */
-static int stress_set_revio_opts(const char *opts)
+static void stress_revio_opts(const char *opt_name, const char *opt_arg, stress_type_id_t *type_id, void *value)
 {
-	char *str, *ptr, *token;
+	char *str, *ptr;
+	const char *token;
 	int revio_flags = 0;
 	int revio_oflags = 0;
 	bool opts_set = false;
 
-	str = stress_const_optdup(opts);
-	if (!str)
-		return -1;
+	(void)type_id;
+	(void)value;
+
+	str = stress_const_optdup(opt_arg);
+	if (!str) {
+		(void)fprintf(stderr, "%s option: cannot dup string '%s'\n", opt_name, opt_arg);
+		longjmp(g_error_env, 1);
+	}
 
 	for (ptr = str; (token = strtok(ptr, ",")) != NULL; ptr = NULL) {
 		size_t i;
@@ -203,22 +203,24 @@ static int stress_set_revio_opts(const char *opts)
 
 		for (i = 0; i < SIZEOF_ARRAY(revio_opts); i++) {
 			if (!strcmp(token, revio_opts[i].opt)) {
-				int exclude = revio_flags & revio_opts[i].exclude;
+				const int exclude = revio_flags & revio_opts[i].exclude;
+
 				if (exclude) {
 					int j;
 
 					for (j = 0; revio_opts[j].opt; j++) {
 						if ((exclude & revio_opts[j].flag) == exclude) {
 							(void)fprintf(stderr,
-								"revio-opt option '%s' is not "
+								"%s option '%s' is not "
 								"compatible with option '%s'\n",
-								token,
+								opt_name, token,
 								revio_opts[j].opt);
-							break;
+							free(str);
+							longjmp(g_error_env, 1);
 						}
 					}
 					free(str);
-					return -1;
+					return;
 				}
 				revio_flags  |= revio_opts[i].flag;
 				revio_oflags |= revio_opts[i].oflag;
@@ -227,22 +229,19 @@ static int stress_set_revio_opts(const char *opts)
 			}
 		}
 		if (!opt_ok) {
-			(void)fprintf(stderr, "revio-opt option '%s' not known, options are:", token);
+			(void)fprintf(stderr, "%s option '%s' not known, options are:", opt_name, token);
 			for (i = 0; i < SIZEOF_ARRAY(revio_opts); i++)
-				(void)fprintf(stderr, "%s %s",
-					i == 0 ? "" : ",", revio_opts[i].opt);
+				(void)fprintf(stderr, " %s", revio_opts[i].opt);
 			(void)fprintf(stderr, "\n");
 			free(str);
-			return -1;
+			longjmp(g_error_env, 1);
 		}
 	}
 
-	stress_set_setting("revio-flags", TYPE_ID_INT, &revio_flags);
-	stress_set_setting("revio-oflags", TYPE_ID_INT, &revio_oflags);
-	stress_set_setting("revio-opts-set", TYPE_ID_BOOL, &opts_set);
+	stress_set_setting("revio", "revio-flags", TYPE_ID_INT, &revio_flags);
+	stress_set_setting("revio", "revio-oflags", TYPE_ID_INT, &revio_oflags);
+	stress_set_setting("revio", "revio-opts-set", TYPE_ID_BOOL, &opts_set);
 	free(str);
-
-	return 0;
 }
 
 /*
@@ -260,7 +259,7 @@ static int stress_revio_advise(stress_args_t *args, const int fd, const int flag
 	if (!(flags & REVIO_OPT_FADV_MASK))
 		return 0;
 
-	for (i = 0; stress_continue(args) && (i < SIZEOF_ARRAY(revio_opts)); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(revio_opts))); i++) {
 		if (revio_opts[i].flag & flags) {
 			if (posix_fadvise(fd, 0, 0, revio_opts[i].advice) < 0) {
 				pr_fail("%s: posix_fadvise failed, errno=%d (%s)\n",
@@ -290,7 +289,7 @@ static int stress_revio(stress_args_t *args)
 	ssize_t ret;
 	char filename[PATH_MAX];
 	size_t opt_index = 0;
-	uint64_t revio_bytes = DEFAULT_REVIO_BYTES;
+	uint64_t revio_bytes, revio_bytes_total = DEFAULT_REVIO_BYTES;
 	uint32_t iterations = 0;
 	int revio_flags = 0, revio_oflags = 0;
 	int flags, fadvise_flags;
@@ -306,22 +305,21 @@ static int stress_revio(stress_args_t *args)
 	flags = O_CREAT | O_RDWR | O_TRUNC | revio_oflags;
 	fadvise_flags = revio_flags & REVIO_OPT_FADV_MASK;
 
-	if (!stress_get_setting("revio-bytes", &revio_bytes)) {
+	if (!stress_get_setting("revio-bytes", &revio_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			revio_bytes = MAXIMIZED_FILE_SIZE;
+			revio_bytes_total = MAXIMIZED_FILE_SIZE;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			revio_bytes = MIN_REVIO_BYTES;
+			revio_bytes_total = MIN_REVIO_BYTES;
 	}
 
-	revio_bytes /= args->num_instances;
-
+	revio_bytes = revio_bytes_total / args->instances;
 	/* Ensure complete file size is not less than the I/O size */
 	if (revio_bytes < DEFAULT_REVIO_WRITE_SIZE) {
 		revio_bytes = DEFAULT_REVIO_WRITE_SIZE;
-		pr_inf("%s: increasing file size to write size of %"
-			PRIu64 " bytes\n",
-			args->name, revio_bytes);
+		revio_bytes_total = revio_bytes * args->instance;
 	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, revio_bytes, revio_bytes_total);
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -331,7 +329,9 @@ static int stress_revio(stress_args_t *args)
 	ret = posix_memalign((void **)&alloc_buf, BUF_ALIGNMENT, (size_t)DEFAULT_REVIO_WRITE_SIZE);
 	if (ret || !alloc_buf) {
 		rc = stress_exit_status(errno);
-		pr_err("%s: cannot allocate buffer\n", args->name);
+		pr_err("%s: failed to allocate %zu byte buffer%s\n",
+			args->name, (size_t)DEFAULT_REVIO_WRITE_SIZE,
+			stress_get_memfree_str());
 		(void)stress_temp_dir_rm_args(args);
 		return rc;
 	}
@@ -340,7 +340,9 @@ static int stress_revio(stress_args_t *args)
 	/* Work around lack of posix_memalign */
 	alloc_buf = malloc((size_t)DEFAULT_REVIO_WRITE_SIZE + BUF_ALIGNMENT);
 	if (!alloc_buf) {
-		pr_err("%s: cannot allocate buffer\n", args->name);
+		pr_err("%s: failed to allocate %zu buffer%s\n",
+			args->name, (size_t)DEFAULT_REVIO_WRITE_SIZE + BUF_ALIGNEMENT,
+			stress_get_memfree_str());
 		(void)stress_temp_dir_rm_args(args);
 		return rc;
 	}
@@ -352,6 +354,8 @@ static int stress_revio(stress_args_t *args)
 	(void)stress_temp_filename_args(args,
 		filename, sizeof(filename), stress_mwc32());
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -377,6 +381,7 @@ static int stress_revio(stress_args_t *args)
 				continue;	/* Retry */
 			pr_fail("%s: open %s failed, errno=%d (%s)\n",
 				args->name, filename, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 			goto finish;
 		}
 		stress_file_rw_hint_short(fd);
@@ -387,20 +392,23 @@ static int stress_revio(stress_args_t *args)
 			pr_fail("%s: ftruncate failed, errno=%d (%s)%s\n",
 				args->name, errno, strerror(errno), fs_type);
 			(void)close(fd);
+			rc = EXIT_FAILURE;
 			goto finish;
 		}
 
 		if (UNLIKELY(stress_revio_advise(args, fd, fadvise_flags) < 0)) {
 			(void)close(fd);
+			rc = EXIT_FAILURE;
 			goto finish;
 		}
 
 		/* Sequential Reverse Write */
 		for (i = 0; i < revio_bytes; i += DEFAULT_REVIO_WRITE_SIZE * (8 + (stress_mwc8() & 7))) {
 			size_t j;
-			off_t lseek_ret, offset = (off_t)(revio_bytes - i);
+			off_t lseek_ret;
+			const off_t offset = (off_t)(revio_bytes - i);
 seq_wr_retry:
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			lseek_ret = lseek(fd, offset, SEEK_SET);
@@ -408,6 +416,7 @@ seq_wr_retry:
 				pr_fail("%s: write failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno), fs_type);
 				(void)close(fd);
+				rc = EXIT_FAILURE;
 				goto finish;
 			}
 
@@ -424,6 +433,7 @@ PRAGMA_UNROLL_N(4)
 					pr_fail("%s: write failed, errno=%d (%s)%s\n",
 						args->name, errno, strerror(errno), fs_type);
 					(void)close(fd);
+					rc = EXIT_FAILURE;
 					goto finish;
 				}
 				continue;
@@ -433,13 +443,23 @@ PRAGMA_UNROLL_N(4)
 		iterations++;
 		extents = stress_get_extents(fd);
 		avg_extents += (double)extents;
+#if defined(HAVE_READAHEAD)
+		if (revio_flags & REVIO_OPT_READAHEAD) {
+#if defined(HAVE_POSIX_FADVISE) &&	\
+    defined(POSIX_FADV_DONTNEED)
+			VOID_RET(int, posix_fadvise(fd, 0, revio_bytes, POSIX_FADV_DONTNEED));
+#endif
+			if (lseek(fd, 0, SEEK_SET) == 0)
+				(void)readahead(fd, 0, revio_bytes);
+		}
+#endif
 		(void)close(fd);
 	} while (stress_continue(args));
 
 	if ((iterations > 0) && (avg_extents > 0.0)) {
 		avg_extents /= (double)iterations;
 		stress_metrics_set(args, 0, "extents",
-			(double)avg_extents, STRESS_GEOMETRIC_MEAN);
+			(double)avg_extents, STRESS_METRIC_GEOMETRIC_MEAN);
 	}
 
 	rc = EXIT_SUCCESS;
@@ -451,17 +471,17 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_revio_bytes,	stress_set_revio_bytes },
-	{ OPT_revio_opts,	stress_set_revio_opts },
-	{ 0,			NULL }
 
+static const stress_opt_t opts[] = {
+	{ OPT_revio_bytes, "revio-bytes", TYPE_ID_UINT64_BYTES_VM, MIN_REVIO_BYTES, MAX_REVIO_BYTES, NULL },
+	{ OPT_revio_opts,  "revio-opts",  TYPE_ID_CALLBACK, 0, 0, stress_revio_opts },
+	END_OPT,
 };
 
-stressor_info_t stress_revio_info = {
+const stressor_info_t stress_revio_info = {
 	.stressor = stress_revio,
-	.class = CLASS_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

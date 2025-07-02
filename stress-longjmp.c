@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -63,6 +63,7 @@ static int OPTIMIZE1 stress_longjmp(stress_args_t *args)
 	static uint32_t check0, check1;
 	static double t_total;
 	static uint64_t n = 0;
+	NOCLOBBER int rc = EXIT_SUCCESS;
 
 	/* assume OK unless proven otherwise */
 	longjmp_failed = false;
@@ -73,6 +74,8 @@ static int OPTIMIZE1 stress_longjmp(stress_args_t *args)
 	bufchk.check0 = check0;
 	bufchk.check1 = check1;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = setjmp(bufchk.buf);
@@ -89,16 +92,18 @@ static int OPTIMIZE1 stress_longjmp(stress_args_t *args)
 		if (UNLIKELY(bufchk.check0 != check0)) {
 			pr_fail("%s: memory corrupted before jmpbuf region\n",
 				args->name);
+			return EXIT_FAILURE;
 		}
 		if (UNLIKELY(bufchk.check1 != check1)) {
 			pr_fail("%s: memory corrupted before jmpbuf region\n",
 				args->name);
+			return EXIT_FAILURE;
 		}
 		sample_counter++;
 		if (sample_counter >= 1000)
 			sample_counter = 0;
 	}
-	if (stress_continue(args)) {
+	if (LIKELY(stress_continue(args))) {
 		if (LIKELY(sample_counter > 0)) {
 			stress_longjmp_func();
 		} else {
@@ -107,24 +112,26 @@ static int OPTIMIZE1 stress_longjmp(stress_args_t *args)
 	}
 
 
-	if (longjmp_failed)
+	if (longjmp_failed) {
 		pr_fail("%s failed, did not detect any successful longjmp calls\n", args->name);
+		rc = EXIT_FAILURE;
+	}
 
 	if (n) {
 		const double rate = (double)STRESS_NANOSECOND * t_total / (double)n;
 		pr_dbg("%s: about %.3f nanosecs per longjmp call\n",
 			args->name, rate);
 		stress_metrics_set(args, 0, "nanosecs per longjmp call",
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_longjmp_info = {
+const stressor_info_t stress_longjmp_info = {
 	.stressor = stress_longjmp,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

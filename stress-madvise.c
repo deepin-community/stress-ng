@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,14 +31,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_madvise_hwpoison(const char *opt)
-{
-	return stress_set_setting_true("madvise-hwpoison", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_madvise_hwpoison,	stress_set_madvise_hwpoison },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_madvise_hwpoison,	"madvise-hwpoison", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MADVISE)
@@ -162,6 +157,14 @@ static const int madvise_options[] = {
 #if defined(MADV_POPULATE_WRITE)
 	MADV_POPULATE_WRITE,
 #endif
+/* Linux 6.12 */
+#if defined(MADV_GUARD_INSTALL) &&	\
+    defined(MADV_NORMAL)
+	MADV_GUARD_INSTALL,
+#endif
+#if defined(MADV_GUARD_REMOVE)
+	MADV_GUARD_REMOVE,
+#endif
 /* OpenBSD */
 #if defined(MADV_SPACEAVAIL)
 	MADV_SPACEAVAIL,
@@ -273,7 +276,7 @@ static int stress_random_advise(
 			}
 
 			vec = (unsigned char *)calloc(vec_size, sizeof(*vec));
-			if (vec) {
+			if (LIKELY(vec != NULL)) {
 				size_t i;
 				int ret;
 
@@ -347,15 +350,15 @@ static void *stress_madvise_pages(void *arg)
 	void *buf = ctxt->buf;
 	const size_t sz = ctxt->sz;
 	const size_t page_size = args->page_size;
-	static void *nowt = NULL;
 
 	if (ctxt->is_thread) {
 		sigset_t set;
 
-		sigemptyset(&set);
-		sigaddset(&set, SIGBUS);
-
+		(void)sigemptyset(&set);
+		(void)sigaddset(&set, SIGBUS);
 		(void)pthread_sigmask(SIG_SETMASK, &set, NULL);
+
+		stress_random_small_sleep();
 	}
 
 	for (n = 0; n < sz; n += page_size) {
@@ -367,16 +370,36 @@ static void *stress_madvise_pages(void *arg)
 		if (advise == MADV_FREE)
 			stress_read_proc_smaps(ctxt->smaps);
 #endif
+#if defined(MADV_GUARD_INSTALL) && defined(MADV_NORMAL)
+		/* avoid segfaults by setting back to normal */
+		if (advise == MADV_GUARD_INSTALL)
+			(void)shim_madvise(ptr, page_size, MADV_NORMAL);
+#endif
 		(void)shim_msync(ptr, page_size, MS_ASYNC);
 	}
 	for (n = 0; n < sz; n += page_size) {
-		size_t m = (size_t)(stress_mwc64modn((uint64_t)sz) & ~(page_size - 1));
+		const size_t m = (size_t)(stress_mwc64modn((uint64_t)sz) & ~(page_size - 1));
 		void *ptr = (void *)(((uint8_t *)buf) + m);
 		const int advise = stress_random_advise(args, ptr, page_size, ctxt->hwpoison);
 
 		(void)shim_madvise(ptr, page_size, advise);
+#if defined(MADV_GUARD_INSTALL) && defined(MADV_NORMAL)
+		/* avoid segfaults by setting back to normal */
+		if (advise == MADV_GUARD_INSTALL)
+			(void)shim_madvise(ptr, page_size, MADV_NORMAL);
+#endif
 		(void)shim_msync(ptr, page_size, MS_ASYNC);
 	}
+#if defined(MADV_PAGEOUT) && defined(MS_SYNC)
+	if (g_opt_flags & OPT_FLAGS_AGGRESSIVE) {
+		(void)shim_madvise(buf, sz, MADV_PAGEOUT);
+		(void)shim_msync(buf, sz, MS_SYNC);
+#if defined(MADV_POPULATE_WRITE)
+		(void)shim_madvise(buf, sz, MADV_POPULATE_WRITE);
+		(void)shim_msync(buf, sz, MS_SYNC);
+#endif
+	}
+#endif
 
 	/*
 	 *  Exercise a highly likely bad advice option
@@ -428,7 +451,7 @@ static void *stress_madvise_pages(void *arg)
 	}
 #endif
 
-	return &nowt;
+	return &g_nowt;
 }
 
 static void stress_process_madvise(const pid_t pid, void *buf, const size_t sz)
@@ -477,6 +500,7 @@ static int stress_madvise(stress_args_t *args)
 	const size_t sz = (4 *  MB) & ~(page_size - 1);
 	const pid_t pid = getpid();
 	int fd = -1;
+	NOCLOBBER size_t advice = 0;
 	NOCLOBBER int ret;
 	NOCLOBBER int num_mem_retries;
 	char filename[PATH_MAX];
@@ -490,7 +514,7 @@ static int stress_madvise(stress_args_t *args)
 	NOCLOBBER uint8_t madv_tries;
 #endif
 
-	(void)memset(&ctxt, 0, sizeof(ctxt));
+	(void)shim_memset(&ctxt, 0, sizeof(ctxt));
 	(void)stress_get_setting("madvise-hwpoison", &ctxt.hwpoison);
 
 	num_mem_retries = 0;
@@ -503,10 +527,12 @@ static int stress_madvise(stress_args_t *args)
 	page = (char *)stress_mmap_populate(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot allocate %zd byte page, skipping stressor\n",
-			args->name, page_size);
+		pr_inf_skip("%s: failed to mmap %zu byte page%s, errno=%d (%s), skipping stressor\n",
+			args->name, page_size, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(page, page_size, "data-page");
 
 	(void)snprintf(smaps, sizeof(smaps), "/proc/%" PRIdMAX "/smaps", (intmax_t)pid);
 
@@ -554,19 +580,21 @@ static int stress_madvise(stress_args_t *args)
 		VOID_RET(ssize_t, write(fd, page, page_size));
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		NOCLOBBER uint8_t *buf;
 		NOCLOBBER bool file_mapped;
 
-		if (num_mem_retries >= NUM_MEM_RETRIES_MAX) {
+		if (UNLIKELY(num_mem_retries >= NUM_MEM_RETRIES_MAX)) {
 			pr_err("%s: gave up trying to mmap, no available memory\n",
 				args->name);
 			break;
 		}
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		file_mapped = stress_mwc1();
@@ -575,7 +603,7 @@ static int stress_madvise(stress_args_t *args)
 								MAP_PRIVATE, fd, 0);
 		} else {
 			buf = (uint8_t *)stress_mmap_populate(NULL, sz, PROT_READ | PROT_WRITE,
-								MAP_ANONYMOUS, -1, 0);
+								MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 		}
 		if (buf == MAP_FAILED) {
 			/* Force MAP_POPULATE off, just in case */
@@ -683,6 +711,15 @@ madv_free_out:
 			(void)madvise(bad_addr, page_size * 2, MADV_NORMAL);
 		}
 #endif
+
+		/*
+		 * Some systems allow zero sized page zero madvise
+		 * to see if that madvice is implemented, so try this
+		 */
+		(void)madvise(0, 0, madvise_options[advice]);
+		advice++;
+		advice = (advice >= SIZEOF_ARRAY(madvise_options)) ? 0: advice;
+
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
@@ -704,18 +741,17 @@ madv_free_out:
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_madvise_info = {
+const stressor_info_t stress_madvise_info = {
 	.stressor = stress_madvise,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_madvise_info = {
+const stressor_info_t stress_madvise_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
-	.help = help,
-	.unimplemented_reason = "built without madvise() system call"
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
+	.help = help
 };
 #endif

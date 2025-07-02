@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,15 +21,15 @@
 #include "core-arch.h"
 
 static const stress_help_t help[] = {
-	{ NULL,	"sigtrap N",	 "start N workers generating segmentation faults" },
-	{ NULL,	"sigtrap-ops N", "stop after N bogo segmentation faults" },
+	{ NULL,	"sigtrap N",	 "start N workers generating SIGTRAP signals" },
+	{ NULL,	"sigtrap-ops N", "stop after N bogo SIGTRAP operations" },
 	{ NULL,	NULL,		 NULL }
 };
 
 #if defined(SIGTRAP)
 
 static uint64_t counter;
-double t, duration;
+static double t, duration;
 
 static void MLOCKED_TEXT stress_sigtrap_handler(int num)
 {
@@ -47,7 +47,7 @@ static void MLOCKED_TEXT stress_sigtrap_handler(int num)
  */
 static int stress_sigtrap(stress_args_t *args)
 {
-	uint64_t raised = 0;
+	uint64_t raised ALIGN64 = 0;
 	double rate = 0.0;
 
 	counter = 0;
@@ -56,6 +56,8 @@ static int stress_sigtrap(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGTRAP, stress_sigtrap_handler, NULL) < 0)
 		return EXIT_NO_RESOURCE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue(args)) {
@@ -89,14 +91,14 @@ static int stress_sigtrap(stress_args_t *args)
 	}
 	rate = (counter > 0) ? duration / (double)counter : 0.0;
 	stress_metrics_set(args, 0, "nanosecs to handle SIGTRAP",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_sigtrap_info = {
+const stressor_info_t stress_sigtrap_info = {
 	.stressor = stress_sigtrap,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
@@ -109,10 +111,10 @@ static int stress_sigtrap_supported(const char *name)
 	return -1;
 }
 
-stressor_info_t stress_sigtrap_info = {
+const stressor_info_t stress_sigtrap_info = {
         .stressor = stress_unimplemented,
         .supported = stress_sigtrap_supported,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
         .help = help,
 	.unimplemented_reason = "built without SIGTRAP signal number defined"

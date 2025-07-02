@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -17,12 +16,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
-#include <math.h>
 
-int main(int argc, char **argv)
+#include <regex.h>
+
+int main(void)
 {
-	double x = 1.48734 + (double)argc;
+	regex_t regex;
+	regmatch_t match[1];
 
-	return (int)__builtin_sqrt(x);
+	if (regcomp(&regex, "*.x", REG_NEWLINE) != 0)
+		return 1;
+	return regexec(&regex, "regex\n", 1, match, 0);
 }
-

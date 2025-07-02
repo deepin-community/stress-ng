@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-capabilities.h"
 #include "core-ftrace.h"
 #include "core-mounts.h"
+
+#include <ctype.h>
 
 #if defined(HAVE_SYS_TREE_H)
 #include <sys/tree.h>
@@ -138,7 +140,8 @@ static int stress_ftrace_parse_trace_stat_file(const char *path, const bool star
 
 	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
 		struct rb_node *tn, node;
-		char *ptr, *func_name, *num = "0";
+		char *ptr, *func_name;
+		const char *num;
 		int64_t count;
 		double time_us;
 
@@ -196,11 +199,11 @@ static int stress_ftrace_parse_trace_stat_file(const char *path, const bool star
 				tn->end_time_us += time_us;
 			}
 		} else {
-			tn = malloc(sizeof(*tn));
-			if (!tn)
+			tn = (struct rb_node *)malloc(sizeof(*tn));
+			if (UNLIKELY(!tn))
 				goto memory_fail;
-			tn->func_name = strdup(func_name);
-			if (!tn->func_name) {
+			tn->func_name = shim_strdup(func_name);
+			if (UNLIKELY(!tn->func_name)) {
 				free(tn);
 				goto memory_fail;
 			}
@@ -238,7 +241,7 @@ memory_fail:
 static int stress_ftrace_parse_stat_files(const char *path, const bool start)
 {
 	DIR *dp;
-	struct dirent *de;
+	const struct dirent *de;
 	char filename[PATH_MAX];
 
 	(void)snprintf(filename, sizeof(filename), "%s/tracing/trace_stat", path);
@@ -268,7 +271,7 @@ static int stress_ftrace_parse_stat_files(const char *path, const bool start)
 void stress_ftrace_add_pid(const pid_t pid)
 {
 	char filename[PATH_MAX];
-	char *path;
+	const char *path;
 	char buffer[32];
 	int fd;
 
@@ -298,7 +301,8 @@ void stress_ftrace_add_pid(const pid_t pid)
  */
 int stress_ftrace_start(void)
 {
-	char *path, filename[PATH_MAX];
+	const char *path;
+	char filename[PATH_MAX];
 
 	if (!(g_opt_flags & OPT_FLAGS_FTRACE))
 		return 0;
@@ -318,16 +322,16 @@ int stress_ftrace_start(void)
 
 	(void)snprintf(filename, sizeof(filename), "%s/tracing/function_profile_enabled", path);
 	if (stress_system_write(filename, "0", 1) < 0) {
-		pr_inf("ftrace: cannot enable function profiling, errno=%d (%s)\n",
-			errno, strerror(errno));
+		pr_inf("ftrace: cannot enable function profiling, cannot write to '%s', errno=%d (%s)\n",
+			filename, errno, strerror(errno));
 		return -1;
 	}
 	stress_ftrace_add_pid(-1);
 	stress_ftrace_add_pid(getpid());
 	(void)snprintf(filename, sizeof(filename), "%s/tracing/function_profile_enabled", path);
 	if (stress_system_write(filename, "1", 1) < 0) {
-		pr_inf("ftrace: cannot enable function profiling, errno=%d (%s)\n",
-			errno, strerror(errno));
+		pr_inf("ftrace: cannot enable function profiling, cannot write to '%s', errno=%d (%s)\n",
+			filename, errno, strerror(errno));
 		return -1;
 	}
 	if (stress_ftrace_parse_stat_files(path, true) < 0)
@@ -366,6 +370,7 @@ static void stress_ftrace_analyze(void)
 
 	for (tn = RB_MIN(rb_tree, &rb_root); tn; tn = next) {
 		int64_t count = tn->end_count - tn->start_count;
+
 		if (count > 0) {
 			func_calls++;
 			if (strace_ftrace_is_syscall(tn->func_name)) {
@@ -390,7 +395,8 @@ static void stress_ftrace_analyze(void)
  */
 void stress_ftrace_stop(void)
 {
-	char *path, filename[PATH_MAX];
+	const char *path;
+	char filename[PATH_MAX];
 
 	if (!(g_opt_flags & OPT_FLAGS_FTRACE))
 		return;

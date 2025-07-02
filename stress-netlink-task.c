@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2017-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -113,7 +113,7 @@ static int OPTIMIZE3 stress_netlink_sendcmd(
 	na = (struct nlattr *)GENL_MSG_DATA(&nlmsg);
 	na->nla_type = nla_type;
 	na->nla_len = nla_len + NLA_HDRLEN;
-	(void)memcpy(NLA_DATA(na), nla_data, (size_t)nla_len);
+	(void)shim_memcpy(NLA_DATA(na), nla_data, (size_t)nla_len);
 	nlmsg.n.nlmsg_len += NLMSG_ALIGN(na->nla_len);
 
 	nlmsgbuf = (char *)&nlmsg;
@@ -125,15 +125,22 @@ static int OPTIMIZE3 stress_netlink_sendcmd(
 	while (nlmsgbuf_len > 0) {
 		register ssize_t len;
 
+		/* Keep static analysis tools happy */
+		if (UNLIKELY(nlmsgbuf_len > (ssize_t)sizeof(stress_nlmsg_t)))
+			break;
+
 		len = sendto(sock, nlmsgbuf, (size_t)nlmsgbuf_len, 0,
 			(struct sockaddr *)&addr, sizeof(addr));
-		if ((len < 0) &&
-		    (errno != EAGAIN) &&
-		    (errno != EINTR)) {
-			pr_fail("%s: sendto failed: %d (%s)\n",
+		if (UNLIKELY(len < 0)) {
+			if ((errno == EAGAIN) || (errno == EINTR))
+				return 0;
+			pr_fail("%s: sendto failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			return -1;
 		}
+		/* avoid underflowing nlmsgbuf_len on subtraction */
+		if (UNLIKELY(len > nlmsgbuf_len))
+			break;
 		nlmsgbuf_len -= len;
 		nlmsgbuf += len;
 	}
@@ -165,7 +172,7 @@ static void OPTIMIZE3 stress_parse_payload(
 		case TASKSTATS_TYPE_PID:
 			task_pid = *(pid_t *)NLA_DATA(na);
 			if (UNLIKELY(task_pid != pid)) {
-				pr_fail("%s: TASKSTATS_TYPE_PID got PID %jd, "
+				pr_fail("%s: TASKSTATS_TYPE_PID got PID %" PRIdMAX ", "
 					"expected %" PRIdMAX "\n",
 					args->name,
 					(intmax_t)task_pid, (intmax_t)pid);
@@ -211,7 +218,7 @@ static int OPTIMIZE3 stress_netlink_taskstats_monitor(
 						&pid_data,
 						(uint16_t)sizeof(pid_data));
 		if (UNLIKELY(ret < 0)) {
-			pr_fail("%s: sendto TASKSTATS_CMD_GET failed: %d (%s)\n",
+			pr_fail("%s: sendto TASKSTATS_CMD_GET failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			break;
 		}
@@ -222,7 +229,7 @@ static int OPTIMIZE3 stress_netlink_taskstats_monitor(
 			continue;
 
 		if (!NLMSG_OK((&msg.n), (unsigned int)msg_len)) {
-			pr_fail("%s: recv failed: %d (%s)\n",
+			pr_fail("%s: recv failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			break;
 		}
@@ -261,7 +268,7 @@ static int stress_netlink_task(stress_args_t *args)
 				args->name, errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
-		pr_fail("%s: socket failed: errno=%d (%s)\n",
+		pr_fail("%s: socket failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -270,7 +277,7 @@ static int stress_netlink_task(stress_args_t *args)
 	addr.nl_family = AF_NETLINK;
 
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		pr_err("%s: bind failed: errno=%d (%s)\n",
+		pr_err("%s: bind failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(sock);
 		return EXIT_FAILURE;
@@ -281,12 +288,12 @@ static int stress_netlink_task(stress_args_t *args)
 					CTRL_ATTR_FAMILY_NAME,
 					(const void *)name, sizeof(name));
 	if (ret < 0) {
-		pr_fail("%s: sendto CTRL_CMD_GETFAMILY failed: %d (%s)\n",
+		pr_fail("%s: sendto CTRL_CMD_GETFAMILY failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 	}
 	len = recv(sock, &nlmsg, sizeof(nlmsg), 0);
 	if (len < 0) {
-		pr_fail("%s: recv failed: %d (%s)\n",
+		pr_fail("%s: recv failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		(void)close(sock);
 		return EXIT_FAILURE;
@@ -309,10 +316,12 @@ static int stress_netlink_task(stress_args_t *args)
 		return EXIT_FAILURE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		if (stress_netlink_taskstats_monitor(args, sock, pid, id, &nivcsw) < 0)
+		if (UNLIKELY(stress_netlink_taskstats_monitor(args, sock, pid, id, &nivcsw) < 0))
 			break;
 	} while (stress_continue(args));
 
@@ -327,17 +336,17 @@ static int stress_netlink_task(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_netlink_task_info = {
+const stressor_info_t stress_netlink_task_info = {
 	.stressor = stress_netlink_task,
 	.supported = stress_netlink_task_supported,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_netlink_task_info = {
+const stressor_info_t stress_netlink_task_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/connector.h, linux/netlink.h, linux/cn_proc.h, linux/taskstats.h or linux/genetlink.h support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-builtin.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_SOCKIOS_H)
 #include <linux/sockios.h>
@@ -55,24 +57,27 @@ static void stress_netdev_check(
 	stress_args_t *args,
 	struct ifreq *ifr,
 	const int fd,
-	const unsigned long cmd,
-	const char *cmd_name)
+	const unsigned long int cmd,
+	const char *cmd_name,
+	int *rc)
 {
-	if (ioctl(fd, cmd, ifr) < 0) {
+	if (UNLIKELY(ioctl(fd, cmd, ifr) < 0)) {
 		if ((errno != ENOTTY) &&
 		    (errno != EINVAL) &&
 		    (errno != EADDRNOTAVAIL) &&
 		    (errno != EOPNOTSUPP) &&
 		    (errno != EBUSY) &&
-		    (errno != EPERM))
+		    (errno != EPERM)) {
 			pr_fail("%s: interface '%s' ioctl %s failed, errno=%d (%s)\n",
 				args->name, ifr->ifr_name, cmd_name,
 				errno, strerror(errno));
+			*rc = EXIT_FAILURE;
+		}
 	}
 }
 
-#define STRESS_NETDEV_CHECK(args, ifr, fd, cmd)	\
-	stress_netdev_check(args, ifr, fd, cmd, #cmd)
+#define STRESS_NETDEV_CHECK(args, ifr, fd, cmd, rc)	\
+	stress_netdev_check(args, ifr, fd, cmd, #cmd, rc)
 
 /*
  *  stress_netdev
@@ -89,6 +94,8 @@ static int stress_netdev(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -98,7 +105,7 @@ static int stress_netdev(stress_args_t *args)
 		/* Get list of transport layer addresses */
 		(void)shim_memset(&ifc, 0, sizeof(ifc));
 		rc = ioctl(fd, SIOCGIFCONF, &ifc);
-		if (rc < 0) {
+		if (UNLIKELY(rc < 0)) {
 			pr_fail("%s: ioctl SIOCGIFCONF failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -107,23 +114,24 @@ static int stress_netdev(stress_args_t *args)
 
 		/* Do we have any? We should normally have at least lo */
 		n = ifc.ifc_len / (int)sizeof(struct ifreq);
-		if (!n) {
-			if (args->instance == 0)
+		if (UNLIKELY(!n)) {
+			if (stress_instance_zero(args))
 				pr_dbg_skip("%s: no network interfaces found, skipping.\n",
 					args->name);
 			break;
 		}
 
 		/* Allocate buffer for the addresses */
-		ifc.ifc_buf = malloc((size_t)ifc.ifc_len);
-		if (!ifc.ifc_buf) {
-			pr_fail("%s: out of memory allocating interface buffer\n",
-				args->name);
+		ifc.ifc_buf = (char *)malloc((size_t)ifc.ifc_len);
+		if (UNLIKELY(!ifc.ifc_buf)) {
+			pr_fail("%s: failed to allocated %zu byte interface buffer%s\n",
+				args->name, (size_t)ifc.ifc_len,
+				stress_get_memfree_str());
 			rc = EXIT_NO_RESOURCE;
 		}
 
 		/* Fetch the addresses */
-		if (ioctl(fd, SIOCGIFCONF, &ifc) < 0) {
+		if (UNLIKELY(ioctl(fd, SIOCGIFCONF, &ifc) < 0)) {
 			pr_fail("%s: ioctl SIOCGIFCONF failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			rc = EXIT_FAILURE;
@@ -136,18 +144,18 @@ static int stress_netdev(stress_args_t *args)
 
 #if defined(SIOCGIFINDEX)
 			/* We got the name, check it's index */
-			if (ioctl(fd, SIOCGIFINDEX, ifr) < 0)
+			if (UNLIKELY(ioctl(fd, SIOCGIFINDEX, ifr) < 0))
 				continue;
 #endif
 
 #if defined(SIOCGIFNAME)
 			ifr->ifr_ifindex = i;
 			/* Get name */
-			if (ioctl(fd, SIOCGIFNAME, ifr) < 0)
+			if (UNLIKELY(ioctl(fd, SIOCGIFNAME, ifr) < 0))
 				continue;
 
 			/* Check index is sane */
-			if (ifr->ifr_ifindex != i) {
+			if (UNLIKELY(ifr->ifr_ifindex != i)) {
 				pr_fail("%s: interface '%s' returned index %d, expected %d\n",
 					args->name, ifr->ifr_name,
 					ifr->ifr_ifindex, i);
@@ -156,81 +164,81 @@ static int stress_netdev(stress_args_t *args)
 
 #if defined(SIOCGIFFLAGS)
 			/* Get flags */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFFLAGS);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFFLAGS, &rc);
 #endif
 
 #if defined(SIOCGIFPFLAGS)
 			/* Get extended flags */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFPFLAGS);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFPFLAGS, &rc);
 #endif
 
 #if defined(SIOCGIFADDR)
 			/* Get address */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFADDR);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFADDR, &rc);
 #endif
 
 #if defined(SIOCGIFNETMASK)
 			/* Get netmask */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFNETMASK);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFNETMASK, &rc);
 #endif
 
 #if defined(SIOCGIFMETRIC)
 			/* Get metric (currently not supported) */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMETRIC);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMETRIC, &rc);
 #endif
 
 #if defined(SIOCGIFMTU)
 			/* Get the MTU */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMTU);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMTU, &rc);
 #endif
 
 #if defined(SIOCGIFHWADDR)
 			/* Get the hardware address */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFHWADDR);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFHWADDR, &rc);
 #endif
 
 #if defined(SIOCGIFMAP)
 			/* Get the hardware parameters */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMAP);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMAP, &rc);
 #endif
 
 #if defined(SIOCGIFTXQLEN)
 			/* Get the transmit queue length */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFTXQLEN);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFTXQLEN, &rc);
 #endif
 
 #if defined(SIOCGIFDSTADDR)
 			/* Get the destination address */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFDSTADDR);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFDSTADDR, &rc);
 #endif
 
 #if defined(SIOCGIFBRDADDR)
 			/* Get the broadcast address */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFBRDADDR);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFBRDADDR, &rc);
 #endif
 #if defined(SIOCGMIIPHY) && 0
 			/* Get from current PHY, disabled for now */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGMIIPHY);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGMIIPHY, &rc);
 #endif
 #if defined(SIOCGMIIREG) && 0
 			/* Get reg, disabled for now */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGMIIREG);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGMIIREG, &rc);
 #endif
 #if defined(SIOCSIFFLAGS) && 0
 			/* Get flags, disabled for now */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCSIFFLAGS);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCSIFFLAGS, &rc);
 #endif
 #if defined(SIOCSIFMETRIC) && 0
 			/* Get metric, disabled for now */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCSIFMETRIC);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCSIFMETRIC, &rc);
 #endif
 #if defined(SIOCGIFMEM)
 			/* Get memory space, not implemented */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMEM);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFMEM, &rc);
 #endif
 #if defined(SIOCGIFLINK)
 			/* Get if link, not implemented */
-			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFLINK);
+			STRESS_NETDEV_CHECK(args, ifr, fd, SIOCGIFLINK, &rc);
 #endif
 #if defined(SIOCGIFNAME)
 			/* Get name with illegal index */
@@ -251,7 +259,7 @@ static int stress_netdev(stress_args_t *args)
 
 		free(ifc.ifc_buf);
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -260,16 +268,16 @@ static int stress_netdev(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_netdev_info = {
+const stressor_info_t stress_netdev_info = {
 	.stressor = stress_netdev,
-	.class = CLASS_NETWORK,
+	.classifier = CLASS_NETWORK,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_netdev_info = {
+const stressor_info_t stress_netdev_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_NETWORK,
+	.classifier = CLASS_NETWORK,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/sockios.h, net/if.h, struct ifconf or ioctl() SIOCGIFCONF command support"

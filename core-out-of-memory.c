@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,8 +18,15 @@
  *
  */
 #include "stress-ng.h"
+#include "core-attribute.h"
 #include "core-killpid.h"
 #include "core-out-of-memory.h"
+
+#if defined(HAVE_SYS_PROCCTL_H)
+#include <sys/procctl.h>
+#endif
+
+#define WAIT_TIMEOUT		(120)	/* waitpid timeout, 2 minutes */
 
 #if defined(__linux__)
 
@@ -44,7 +51,8 @@ bool stress_process_oomed(const pid_t pid)
 		return oomed;
 
 	for (;;) {
-		char buf[4096], *ptr;
+		char buf[4096];
+		const char *ptr;
 		ssize_t ret;
 
 		ret = read(fd, buf, sizeof(buf) - 1);
@@ -73,11 +81,9 @@ bool stress_process_oomed(const pid_t pid)
 	return oomed;
 }
 
-static const char *stress_args_name(stress_args_t *args)
+static inline const char *stress_args_name(stress_args_t *args)
 {
-	if (!args)
-		return "main";
-	return args->name;
+	return args ? args->name : "main";
 }
 
 /*
@@ -112,7 +118,7 @@ static int stress_set_adjustment(
 			if ((saved_errno != EAGAIN) &&
 			    (saved_errno != EINTR) &&
 			    (saved_errno != EACCES)) {
-				if (args && args->instance == 0)
+				if (args && (stress_instance_zero(args)))
 					pr_dbg("%s: can't set oom_score_adj, errno=%d (%s)\n",
 						stress_args_name(args), saved_errno, strerror(saved_errno));
 				return -saved_errno;
@@ -120,7 +126,7 @@ static int stress_set_adjustment(
 		}
 	}
 	/* Unexpected failure, report why */
-	if ((args && args->instance == 0) && (saved_errno != EACCES))
+	if ((args && (stress_instance_zero(args))) && (saved_errno != EACCES))
 		pr_dbg("%s: can't set oom_score_adj, errno=%d (%s)\n", stress_args_name(args),
 			saved_errno, strerror(saved_errno));
 	return -1;
@@ -137,7 +143,7 @@ void stress_set_oom_adjustment(stress_args_t *args, const bool killable)
 {
 	bool high_priv;
 	bool make_killable = killable;
-	char *str;
+	const char *str;
 	int ret;
 
 	/*
@@ -178,13 +184,43 @@ void stress_set_oom_adjustment(stress_args_t *args, const bool killable)
 
 	(void)stress_set_adjustment(args, "/proc/self/oom_adj", str);
 }
+#elif defined(HAVE_SYS_PROCCTL_H) &&	\
+      defined(__FreeBSD__) &&		\
+      defined(PROC_SPROTECT) &&		\
+      (defined(PPROT_CLEAR) || 		\
+       defined(PPORT_SET))
+void stress_set_oom_adjustment(stress_args_t *args, const bool killable)
+{
+	bool make_killable = killable;
+	int flag;
+
+	if (g_opt_flags & OPT_FLAGS_NO_OOM_ADJUST)
+		return;
+
+	/*
+	 *  main cannot be killable; if OPT_FLAGS_OOMABLE set make
+	 *  all child procs easily OOMable
+	 */
+	if (args && (g_opt_flags & OPT_FLAGS_OOMABLE))
+		make_killable = true;
+
+	flag = make_killable ? PPROT_CLEAR : PPROT_SET;
+	(void)procctl(P_PID, 0, PROC_SPROTECT, &flag);
+}
+
+bool PURE stress_process_oomed(const pid_t pid)
+{
+	(void)pid;
+
+	return false;
+}
 #else
 void stress_set_oom_adjustment(stress_args_t *args, const bool killable)
 {
 	(void)args;
 	(void)killable;
 }
-bool stress_process_oomed(const pid_t pid)
+bool PURE stress_process_oomed(const pid_t pid)
 {
 	(void)pid;
 
@@ -225,9 +261,9 @@ int stress_oomable_child(
 	};
 
 again:
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return EXIT_SUCCESS;
-	if (valid_timeout && (stress_time_now() > args->time_end)) {
+	if (UNLIKELY(valid_timeout && (stress_time_now() > args->time_end))) {
 		return EXIT_SUCCESS;
 	}
 	pid = fork();
@@ -239,29 +275,36 @@ again:
 			goto again;
 		}
 		if (not_quiet)
-			pr_err("%s: fork failed: errno=%d: (%s)\n",
+			pr_err("%s: fork failed, errno=%d: (%s)\n",
 				args->name, errno, strerror(errno));
 		return -1;
 	} else if (pid > 0) {
 		/* Parent, wait for child */
 		int status, ret;
+		double t_end = -1.0;
 
+		args->stats->s_pid.oomable_child = pid;
 rewait:
 		stress_set_proc_state(args->name, STRESS_STATE_WAIT);
 		ret = waitpid(pid, &status, 0);
 		if (ret < 0) {
+			if (t_end < 0.0)
+				t_end = stress_time_now() + WAIT_TIMEOUT;
 			stress_set_proc_state(args->name, STRESS_STATE_RUN);
 			/* No longer alive? */
 			if (errno == ECHILD)
 				goto report;
 			if ((errno != EINTR) && not_quiet)
-				pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 
 			(void)stress_kill_sig(pid, signals[signal_idx]);
-			if (++signal_idx >= SIZEOF_ARRAY(signals))
+			if (signal_idx < SIZEOF_ARRAY(signals) - 1)
+				signal_idx++;
+			else if (UNLIKELY(stress_time_now() > t_end)) {
+				pr_warn("cannot terminate process %" PRIdMAX ", gave up after %d seconds\n", (intmax_t)pid, WAIT_TIMEOUT);
 				goto report;
-
+			}
 			/*
 			 *  First time round do fast re-wait
 			 *  in case child can be reaped quickly,
@@ -286,6 +329,10 @@ rewait:
 
 			/* If we got killed by OOM killer, re-start */
 			if ((signals[signal_idx] != SIGKILL) && (WTERMSIG(status) == SIGKILL)) {
+				bool oomed = stress_process_oomed(pid);
+
+				args->bogo.possibly_oom_killed = true;
+
 				/*
 				 *  The --oomable flag was enabled, so
 				 *  the behaviour here is to no longer
@@ -296,19 +343,25 @@ rewait:
 				if (g_opt_flags & OPT_FLAGS_OOMABLE) {
 					stress_log_system_mem_info();
 					if (not_quiet)
-						pr_dbg("%s: assuming killed by OOM "
+						pr_dbg("%s: %sPID %" PRIdMAX " killed by OOM "
 							"killer, bailing out "
 							"(instance %d)\n",
-							args->name, args->instance);
+							args->name,
+							oomed ? "" : "assuming ",
+							(intmax_t)pid,
+							args->instance);
 					stress_clean_dir(args->name, args->pid, args->instance);
 					return EXIT_SUCCESS;
 				} else {
 					stress_log_system_mem_info();
 					if (not_quiet)
-						pr_dbg("%s: assuming killed by OOM "
+						pr_dbg("%s: %sPID %" PRIdMAX " killed by OOM "
 							"killer, restarting again "
 							"(instance %d)\n",
-							args->name, args->instance);
+							args->name,
+							oomed ? "" : "assuming ",
+							(intmax_t)pid,
+							args->instance);
 					ooms++;
 					goto again;
 				}
@@ -316,10 +369,12 @@ rewait:
 			/* If we got killed by sigsegv, re-start */
 			if (WTERMSIG(status) == SIGSEGV) {
 				if (not_quiet)
-					pr_dbg("%s: killed by SIGSEGV, "
+					pr_dbg("%s: PID %" PRIdMAX " killed by SIGSEGV, "
 						"restarting again "
 						"(instance %d)\n",
-						args->name, args->instance);
+						args->name,
+						(intmax_t)pid,
+						args->instance);
 				segvs++;
 				goto again;
 			}
@@ -329,7 +384,7 @@ rewait:
 		/* Child */
 		int ret;
 
-		if (!stress_continue(args)) {
+		if (UNLIKELY(!stress_continue(args))) {
 			stress_set_proc_state(args->name, STRESS_STATE_EXIT);
 			_exit(EXIT_SUCCESS);
 		}
@@ -348,8 +403,8 @@ rewait:
 		 * fully runnable, so check for this before doing expensive
 		 * stressor invocation
 		 */
-		if (!stress_continue(args) ||
-		    (valid_timeout && (stress_time_now() > args->time_end))) {
+		if (UNLIKELY(!stress_continue(args) ||
+			     (valid_timeout && (stress_time_now() > args->time_end)))) {
 			stress_set_proc_state(args->name, STRESS_STATE_EXIT);
 			_exit(EXIT_SUCCESS);
 		}

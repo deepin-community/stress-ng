@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,9 +33,9 @@ static const stress_help_t help[] = {
 
 static void stress_nice_delay(void)
 {
-	double start = stress_time_now();
+	const double start = stress_time_now();
 	const uint16_t r = stress_mwc16();
-	double delay = 0.01 + (double)r / 3276800.0;
+	const double delay = 0.01 + (double)r / 3276800.0;
 
 	while ((stress_time_now() - start) < delay)
 		(void)shim_sched_yield();
@@ -48,9 +48,13 @@ static void stress_nice_delay(void)
 static int stress_nice(stress_args_t *args)
 {
 	const bool cap_sys_nice = stress_check_capability(SHIM_CAP_SYS_NICE);
+#if defined(HAVE_SETPRIORITY) || 	\
+    defined(HAVE_GETPRIORITY)
+#endif
+	int rc = EXIT_SUCCESS;
 #if defined(HAVE_SETPRIORITY)
 	/* Make an assumption on priority range */
-	int max_prio = 20, min_prio = -20, rc = EXIT_SUCCESS;
+	int max_prio = 20, min_prio = -20;
 
 #if defined(RLIMIT_NICE)
 	{
@@ -67,15 +71,19 @@ static int stress_nice(stress_args_t *args)
 	}
 #endif
 #endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		pid_t pid;
-		int which = stress_mwc1();
+		const int which = stress_mwc1();
 
 		pid = fork();
 		if (pid == 0) {
-#if defined(HAVE_GETPRIORITY)
+#if defined(HAVE_GETPRIORITY) &&	\
+    defined(HAVE_SETPRIORITY)
 			static const shim_priority_which_t prio_which[] = {
 				PRIO_PROCESS,
 				PRIO_USER,
@@ -99,13 +107,15 @@ static int stress_nice(stress_args_t *args)
 #if defined(HAVE_GETPRIORITY) &&	\
     defined(HAVE_SETPRIORITY)
 			for (i = 0; i < (int)SIZEOF_ARRAY(prio_which); i++) {
+				const shim_priority_which_t prio = prio_which[i];
 				int ret;
 
 				errno = 0;
-				ret = getpriority(prio_which[i], 0);
-				if ((errno == 0) && (!cap_sys_nice)) {
-					VOID_RET(int, setpriority(prio_which[i], 0, ret));
-				}
+				ret = getpriority(prio, 0);
+
+				/* Only set priority on child process */
+				if ((prio == PRIO_PROCESS) && (errno == 0) && (!cap_sys_nice))
+					VOID_RET(int, setpriority(prio, 0, ret));
 			}
 #endif
 
@@ -115,14 +125,19 @@ static int stress_nice(stress_args_t *args)
 			 *  arguments to get more kernel test coverage
 			 */
 			(void)setpriority((shim_priority_which_t)INT_MIN, 0, max_prio - 1);
+			(void)setpriority((shim_priority_which_t)INT_MIN, -1, max_prio - 1);
 			(void)setpriority((shim_priority_which_t)INT_MAX, 0, max_prio - 1);
+			(void)setpriority((shim_priority_which_t)INT_MAX, -1, max_prio - 1);
+			(void)setpriority(PRIO_PROCESS, -1, max_prio - 1);
+			(void)setpriority(PRIO_USER, -1, max_prio - 1);
+			(void)setpriority(PRIO_PGRP, -1, max_prio - 1);
 #endif
 
 			switch (which) {
 #if defined(HAVE_SETPRIORITY)
 			case 1:
 				pid = getpid();
-				for (i = min_prio; (i <= max_prio) && stress_continue(args); i++) {
+				for (i = min_prio; LIKELY((i <= max_prio) && stress_continue(args)); i++) {
 					errno = 0;
 					(void)setpriority(PRIO_PROCESS, (id_t)pid, i);
 					if (!errno)
@@ -132,7 +147,7 @@ static int stress_nice(stress_args_t *args)
 				break;
 #endif
 			default:
-				for (i = -19; (i < 20) && stress_continue(args); i++) {
+				for (i = -19; LIKELY((i < 20) && stress_continue(args)); i++) {
 					int ret;
 #if defined(HAVE_GETPRIORITY)
 					int old_prio, new_prio;
@@ -194,17 +209,17 @@ static int stress_nice(stress_args_t *args)
 ;
 }
 
-stressor_info_t stress_nice_info = {
+const stressor_info_t stress_nice_info = {
 	.stressor = stress_nice,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
-stressor_info_t stress_nice_info = {
+const stressor_info_t stress_nice_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without nice() or setpriority() system call support"

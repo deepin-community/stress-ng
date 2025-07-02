@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,7 @@
 #define CORE_NET_H
 
 #include <sys/socket.h>
+#include "core-attribute.h"
 
 /* Network domains flags */
 #define DOMAIN_INET		(0x00000001)	/* AF_INET */
@@ -31,6 +32,10 @@
 
 #define NET_ADDR_ANY		(0)
 #define NET_ADDR_LOOPBACK	(1)
+
+#define MIN_PORT		(1024)
+#define MAX_PORT		(65535)
+
 
 /* Network helpers */
 extern void stress_set_net_port(const char *optname, const char *opt,

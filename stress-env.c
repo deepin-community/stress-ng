@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,10 @@
 #include "stress-ng.h"
 #include "core-killpid.h"
 #include "core-out-of-memory.h"
+
+#if defined(HAVE_SYS_PARAM_H)
+#include <sys/param.h>
+#endif
 
 static const stress_help_t help[] = {
 	{ NULL,	"env N",	"start N workers setting environment vars" },
@@ -47,6 +51,7 @@ static int stress_env_child(stress_args_t *args, void *context)
 	const size_t arg_huge = 16 * MB;
 	char *value;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
+	int rc = EXIT_SUCCESS;
 
 	(void)context;
 
@@ -76,18 +81,21 @@ static int stress_env_child(stress_args_t *args, void *context)
 		value = (char *)mmap(NULL, arg_max, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (value == MAP_FAILED) {
-			pr_inf_skip("%s: could not allocate %zd bytes for environment variable value, "
+			pr_inf_skip("%s: could not allocate %zu bytes for environment variable value%s, "
 				"errno=%d (%s), skipping stressor\n",
-				args->name, arg_max,
+				args->name, arg_max, stress_get_memfree_str(),
 				errno, strerror(errno));
 			return EXIT_NO_RESOURCE;
 		}
-		pr_inf("%s: falling back to %zd byte sized environment variable value size\n",
+		pr_inf("%s: falling back to %zu byte sized environment variable value size\n",
 			args->name, arg_max);
 	}
+	stress_set_vma_anon_name(value, arg_max, "env-variable-value");
 
 	stress_mwc_reseed();
 	stress_rndstr(value, arg_max);
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	env_max = stress_env_max();
@@ -122,19 +130,21 @@ static int stress_env_child(stress_args_t *args, void *context)
 			for (j = 0; j < i; j++) {
 				if (verify) {
 					const size_t env_sz = stress_env_size(arg_max);
-					char *val;
+					const char *val;
 
 					(void)snprintf(name, sizeof(name), "STRESS_ENV_%" PRIx64, j);
 					val = getenv(name);
 					if (!val) {
 						pr_fail("%s: cannot fetch environment variable %s\n",
 							args->name, name);
+						rc = EXIT_FAILURE;
 					} else {
 						tmp = value[env_sz];
 						value[env_sz] = '\0';
 						if (strcmp(value, val)) {
 							pr_fail("%s: environment variable %s contains incorrect data\n",
 								args->name, name);
+							rc = EXIT_FAILURE;
 						}
 						value[env_sz] = tmp;
 					}
@@ -143,9 +153,10 @@ static int stress_env_child(stress_args_t *args, void *context)
 				if (ret < 0) {
 					pr_fail("%s: unsentenv on variable %s failed, errno=%d (%s)\n",
 						args->name, name, errno, strerror(errno));
+					rc = EXIT_FAILURE;
 				}
 				stress_bogo_inc(args);
-				if (!stress_continue(args))
+				if (UNLIKELY(!stress_continue(args)))
 					goto reap;
 			}
 			i = 0;
@@ -160,9 +171,9 @@ static int stress_env_child(stress_args_t *args, void *context)
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	(void)munmap(value, arg_max);
+	(void)munmap((void *)value, arg_max);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
 /*
@@ -174,9 +185,9 @@ static int stress_env(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_env_child, STRESS_OOMABLE_DROP_CAP | STRESS_OOMABLE_QUIET);
 }
 
-stressor_info_t stress_env_info = {
+const stressor_info_t stress_env_info = {
 	.stressor = stress_env,
-	.class = CLASS_OS | CLASS_VM,
+	.classifier = CLASS_OS | CLASS_VM,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,51 +42,15 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_ring_pipe_num()
- *	set number of pipes to use in the ring
- */
-static int stress_set_ring_pipe_num(const char *opt)
-{
-	size_t ring_pipe_num;
-
-	ring_pipe_num = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range("ring-pipe-num", ring_pipe_num,
-		STRESS_RING_PIPE_NUM_MIN, STRESS_RING_PIPE_NUM_MAX);
-	return stress_set_setting("ring-pipe-num", TYPE_ID_SIZE_T, &ring_pipe_num);
-}
-
-/*
- *  stress_set_ring_pipe_size()
- *	set size of data to be transferred in pipe
- */
-static int stress_set_ring_pipe_size(const char *opt)
-{
-	size_t ring_pipe_size;
-
-	ring_pipe_size = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range_bytes("ring-pipe-size", ring_pipe_size,
-		STRESS_RING_PIPE_SIZE_MIN, STRESS_RING_PIPE_SIZE_MAX);
-	return stress_set_setting("ring-pipe-size", TYPE_ID_SIZE_T, &ring_pipe_size);
-}
-
-/*
- *  stress_set_ring_pipe_splice()
- *	enable splice
- */
-static int stress_set_ring_pipe_splice(const char *opt)
-{
-	return stress_set_setting_true("ring-pipe-splice", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_ring_pipe_num,	stress_set_ring_pipe_num },
-	{ OPT_ring_pipe_size,	stress_set_ring_pipe_size },
-	{ OPT_ring_pipe_splice,	stress_set_ring_pipe_splice },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_ring_pipe_num,	"ring-pipe-num",    TYPE_ID_SIZE_T, STRESS_RING_PIPE_NUM_MIN, STRESS_RING_PIPE_NUM_MAX, NULL },
+	{ OPT_ring_pipe_size,	"ring-pipe-size",   TYPE_ID_SIZE_T_BYTES_VM, STRESS_RING_PIPE_SIZE_MIN, STRESS_RING_PIPE_SIZE_MAX, NULL },
+	{ OPT_ring_pipe_splice,	"ring-pipe-splice", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 static int stress_pipe_non_block(stress_args_t *args, const int fd)
 {
 	int flags, ret;
@@ -94,7 +58,7 @@ static int stress_pipe_non_block(stress_args_t *args, const int fd)
 	flags = fcntl(fd, F_GETFL);
 	flags |= O_NONBLOCK;
 	ret = fcntl(fd, F_SETFL, flags);
-	if (ret < 0) {
+	if (UNLIKELY(ret < 0)) {
 		pr_inf("%s: cannot set O_NONBLOCK on pipe fd %d\n",
 			args->name, fd);
 		return -1;
@@ -115,7 +79,7 @@ static ssize_t stress_pipe_read(
 	ssize_t sret;
 
 	sret = read(fd, buf, buf_len);
-	if (sret < 0) {
+	if (UNLIKELY(sret < 0)) {
 		pr_inf("%s: failed to read from pipe fd %d, errno=%d (%s)\n",
 			args->name, fd, errno, strerror(errno));
 		return -1;
@@ -136,7 +100,7 @@ static ssize_t stress_pipe_write(
 	ssize_t sret;
 
 	sret = write(fd, buf, buf_len);
-	if (sret < 0) {
+	if (UNLIKELY(sret < 0)) {
 		pr_inf("%s: failed to write to pipe fd %d, errno=%d (%s)\n",
 			args->name, fd, errno, strerror(errno));
 		return -1;
@@ -167,21 +131,26 @@ static int stress_ring_pipe(stress_args_t *args)
 	buf = stress_mmap_populate(NULL, (size_t)STRESS_RING_PIPE_SIZE_MAX,
 		PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (buf == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap %d size buffer, "
-			"skipping stresor\n", args->name, STRESS_RING_PIPE_SIZE_MAX);
+		pr_inf_skip("%s: failed to mmap %d size buffer%s, "
+			"errno=%d (%s), skipping stresor\n",
+			args->name, STRESS_RING_PIPE_SIZE_MAX,
+			stress_get_memfree_str(), errno, strerror(errno));
 		goto err_ret;
 	}
+	stress_set_vma_anon_name(buf, STRESS_RING_PIPE_SIZE_MAX, "ring-pipe-buffer");
 
-	pipe_fds = calloc(ring_pipe_num, sizeof(*pipe_fds));
+	pipe_fds = (pipe_fds_t *)calloc(ring_pipe_num, sizeof(*pipe_fds));
 	if (!pipe_fds) {
-		pr_inf_skip("%s: cannot allocate %zd pipe file descriptors, "
-			"skipping stresor\n", args->name, ring_pipe_num);
+		pr_inf_skip("%s: failed to allocate %zu pipe file descriptors%s, "
+			"skipping stresor\n", args->name, ring_pipe_num,
+			stress_get_memfree_str());
 		goto err_unmap_buf;
 	}
-	poll_fds = calloc(ring_pipe_num, sizeof(*poll_fds));
+	poll_fds = (struct pollfd *)calloc(ring_pipe_num, sizeof(*poll_fds));
 	if (!poll_fds) {
-		pr_inf_skip("%s: cannot allocate %zd poll descriptors, "
-			"skipping stresor\n", args->name, ring_pipe_num);
+		pr_inf_skip("%s: cannot allocate %zu poll descriptors%s, "
+			"skipping stresor\n", args->name, ring_pipe_num,
+			stress_get_memfree_str());
 		goto err_free_pipe_fds;
 	}
 
@@ -213,19 +182,21 @@ static int stress_ring_pipe(stress_args_t *args)
 	}
 
 #if !defined(HAVE_SPLICE)
-	if ((args->instance == 0) && ring_pipe_splice) {
+	if (stress_instance_zero(args) && ring_pipe_splice) {
 		pr_inf("%s: note: falling back to using read + writes as "
 			"splice is not available\n", args->name);
 		ring_pipe_splice = false;
 	}
 #endif
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: using %zd pipes with %zd byte data, %s\n",
 			args->name, n_pipes, ring_pipe_size,
 			ring_pipe_splice ? "using splice" : "using read+write");
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	(void)shim_memset(buf, 0xa5, STRESS_RING_PIPE_SIZE_MAX);
@@ -241,7 +212,7 @@ static int stress_ring_pipe(stress_args_t *args)
 			pr_inf("%s: unexpected poll timeout\n", args->name);
 			break;
 		} else {
-			for (i = 0; stress_continue(args) && (i < n_pipes); i++) {
+			for (i = 0; LIKELY(stress_continue(args) && (i < n_pipes)); i++) {
 				if (poll_fds[i].revents & POLLIN) {
 					double t;
 					register size_t j = (i + 1);
@@ -287,10 +258,10 @@ static int stress_ring_pipe(stress_args_t *args)
 finish:
 	rate = (duration > 0.0) ? (double)stress_bogo_get(args) / duration : 0.0;
 	stress_metrics_set(args, 0, "pipe read+write calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 	rate = (duration > 0.0) ? (double)bytes / duration : 0.0;
 	stress_metrics_set(args, 1, "MB per sec data pipe write",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 err_deinit:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -308,20 +279,20 @@ err_ret:
 	return rc;
 }
 
-stressor_info_t stress_ring_pipe_info = {
+const stressor_info_t stress_ring_pipe_info = {
 	.stressor = stress_ring_pipe,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_NONE,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_ring_pipe_info = {
+const stressor_info_t stress_ring_pipe_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_PIPE_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_NONE,
 	.help = help,
 	.unimplemented_reason = "built without poll.h or poll() support"

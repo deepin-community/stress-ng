@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
+#include <stdio.h>
 #include <gmp.h>
 
 /* The following functions from libgmp are used by stress-ng */
@@ -35,5 +36,9 @@ static void *gmp_funcs[] = {
 
 int main(void)
 {
+	size_t i;
+
+	for (i = 0; i < sizeof(gmp_funcs) / sizeof(gmp_funcs[0]); i++)
+		printf("%p\n", gmp_funcs[i]);
 	return 0;
 }

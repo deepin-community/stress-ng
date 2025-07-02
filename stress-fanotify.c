@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2012-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,8 @@
 #include "core-capabilities.h"
 #include "core-killpid.h"
 #include "core-mounts.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_SYS_FANOTIFY_H)
 #include <sys/fanotify.h>
@@ -163,6 +165,12 @@ static const unsigned int init_flags[] =
 #if defined(FAN_REPORT_NAME)
 	FAN_REPORT_NAME,
 #endif
+#if defined(FAN_REPORT_TID)
+	FAN_REPORT_TID,
+#endif
+#if defined(FAN_REPORT_FID)
+	FAN_REPORT_FID,
+#endif
 #if defined(FAN_REPORT_DIR_FID)
 	FAN_REPORT_DIR_FID,
 #endif
@@ -171,6 +179,12 @@ static const unsigned int init_flags[] =
 #endif
 #if defined(FAN_REPORT_TARGET_FID)
 	FAN_REPORT_TARGET_FID,
+#endif
+#if defined(FAN_REPORT_FD_ERROR)
+	FAN_REPORT_FD_ERROR,
+#endif
+#if defined(FAN_REPORT_MNT)
+	FAN_REPORT_MNT,
 #endif
 };
 
@@ -438,7 +452,7 @@ static void stress_fanotify_read_events(
 	metadata = (struct fanotify_event_metadata *)buffer;
 
 	while (FAN_EVENT_OK(metadata, len)) {
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		if ((metadata->fd != FAN_NOFD) && (metadata->fd >= 0)) {
 #if defined(FAN_OPEN)
@@ -495,6 +509,8 @@ static int stress_fanotify(stress_args_t *args)
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	pid = fork();
@@ -510,7 +526,7 @@ static int stress_fanotify(stress_args_t *args)
 	}
 
 	if (pid < 0) {
-		pr_err("%s: fork failed: errno=%d (%s)\n",
+		pr_err("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto tidy;
@@ -577,7 +593,8 @@ static int stress_fanotify(stress_args_t *args)
 		ret = posix_memalign(&buffer, BUFFER_SIZE, BUFFER_SIZE);
 		if ((ret != 0) || (buffer == NULL)) {
 			pr_err("%s: posix_memalign: cannot allocate 4K "
-				"aligned buffer\n", args->name);
+				"aligned buffer%s\n", args->name,
+				stress_get_memfree_str());
 			rc = EXIT_NO_RESOURCE;
 			goto tidy;
 		}
@@ -711,17 +728,17 @@ static int stress_fanotify(stress_args_t *args)
 #endif
 		if (duration > 0.0) {
 			stress_metrics_set(args, 0, "opens/sec",
-				(double)account.open / duration, STRESS_GEOMETRIC_MEAN);
+				(double)account.open / duration, STRESS_METRIC_GEOMETRIC_MEAN);
 			stress_metrics_set(args, 1, "close writes/sec",
-				(double)account.close_write / duration, STRESS_GEOMETRIC_MEAN);
+				(double)account.close_write / duration, STRESS_METRIC_GEOMETRIC_MEAN);
 			stress_metrics_set(args, 2, "close no-writes/sec",
-				(double)account.close_nowrite / duration, STRESS_GEOMETRIC_MEAN);
+				(double)account.close_nowrite / duration, STRESS_METRIC_GEOMETRIC_MEAN);
 			stress_metrics_set(args, 3, "accesses/sec",
-				(double)account.access / duration, STRESS_GEOMETRIC_MEAN);
+				(double)account.access / duration, STRESS_METRIC_GEOMETRIC_MEAN);
 			stress_metrics_set(args, 4, "modifies/sec",
-				(double)account.modify / duration, STRESS_GEOMETRIC_MEAN);
+				(double)account.modify / duration, STRESS_METRIC_GEOMETRIC_MEAN);
 			/* stress_metrics_set(args, 5, "renames/sec",
-				(double)account.rename / duration, STRESS_GEOMETRIC_MEAN); */
+				(double)account.rename / duration, STRESS_METRIC_GEOMETRIC_MEAN); */
 		}
 	}
 tidy:
@@ -738,17 +755,17 @@ tidy:
 	return rc;
 }
 
-stressor_info_t stress_fanotify_info = {
+const stressor_info_t stress_fanotify_info = {
 	.stressor = stress_fanotify,
 	.supported = stress_fanotify_supported,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_fanotify_info = {
+const stressor_info_t stress_fanotify_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/fanotify.h"

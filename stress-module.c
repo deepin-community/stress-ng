@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2023-2024 Luis Chamberlain <mcgrof@kernel.org>
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Luis Chamberlain <mcgrof@kernel.org>
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,8 +19,11 @@
  */
 #include "stress-ng.h"
 #include "core-attribute.h"
+#include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-module.h"
+
+#include <ctype.h>
 
 #if defined(HAVE_LINUX_MODULE_H)
 #include <linux/module.h>
@@ -67,32 +70,12 @@ static int stress_module_supported(const char *name)
 	return 0;
 }
 
-static int stress_set_module_no_unload(const char *opt)
-{
-	return stress_set_setting_true("module-no-unload", opt);
-}
-
-static int stress_set_module_no_modver(const char *opt)
-{
-	return stress_set_setting_true("module-no-modver", opt);
-}
-
-static int stress_set_module_no_vermag(const char *opt)
-{
-	return stress_set_setting_true("module-no-vermag", opt);
-}
-
-static int stress_set_module_name(const char *name)
-{
-	return stress_set_setting("module-name", TYPE_ID_STR, name);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_module_name,	stress_set_module_name},
-	{ OPT_module_no_modver,	stress_set_module_no_modver },
-	{ OPT_module_no_vermag,	stress_set_module_no_vermag },
-	{ OPT_module_no_unload,	stress_set_module_no_unload },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_module_name,      "module-name",      TYPE_ID_STR,  0, 0, NULL },
+	{ OPT_module_no_modver, "module-no-modver", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_module_no_vermag, "module-no-vermag", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_module_no_unload, "module-no-unload", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__)
@@ -223,9 +206,8 @@ static int get_modpath_name(
 		goto out_close;
 
 	while ((line_len = getline(&line, &len, fp)) != -1) {
-		char *module_pathp;
+		const char *module_pathp, *modulenamep;
 		char *start_postfix;
-		char *modulenamep;
 
 		lineno++;
 		parse_type = parse_get_line_type(line, (size_t)line_len, module, sizeof(module));
@@ -273,7 +255,14 @@ static int get_modpath_name(
 			(void)snprintf(module_path, module_path_size, "%s/%s/%s",
 				 dirname_default_prefix,
 				 u.release, module);
-			ret = 0;
+
+			/* Check for .ko end, can't decompress .zst, .xz etc yet */
+			ret = -1 ;
+			len = strlen(module_path);
+			if (len > 3) {
+				if (strncmp(module_path + len - 3, ".ko", 3) == 0)
+					ret = 0;
+			}
 			goto out_close;
 		case PARSE_INVALID:
 			ret = -1;
@@ -310,13 +299,19 @@ static int stress_module(stress_args_t *args)
 	bool module_no_unload = false;
 	bool module_no_vermag = false;
 	bool module_no_modver = false;
-	char *module_name_cli = NULL;
-	char *module_name;
-	static char default_module[] = "test_module";
+	const char *module_name_cli = NULL;
+	const char *module_name;
 	const char *finit_args1 = "";
 	unsigned int kernel_flags = 0;
 	struct stat statbuf;
 	int fd, ret = EXIT_SUCCESS;
+	static const char * const default_modules[] = {
+		"test_module",
+		"test_user_copy",
+		"test_static_key_base",
+		"test_bpf",
+		"test_firmware"
+	};
 
 	(void)stress_get_setting("module-name", &module_name_cli);
 	(void)stress_get_setting("module-no-vermag", &module_no_vermag);
@@ -328,10 +323,21 @@ static int stress_module(stress_args_t *args)
 	if (module_no_modver)
 		kernel_flags |= MODULE_INIT_IGNORE_MODVERSIONS;
 
-	module_name = module_name_cli ? module_name_cli : default_module;
-	ret = get_modpath_name(args, module_name, global_module_path, sizeof(global_module_path));
+	if (module_name_cli) {
+		module_name = module_name_cli;
+		ret = get_modpath_name(args, module_name, global_module_path, sizeof(global_module_path));
+	} else {
+		size_t i;
+
+		for (i = 0; i < SIZEOF_ARRAY(default_modules); i++) {
+			module_name = default_modules[i];
+			ret = get_modpath_name(args, module_name, global_module_path, sizeof(global_module_path));
+			if (ret == 0)
+				break;
+		}
+	}
 	if (ret < 0) {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			if (module_name_cli) {
 				pr_inf_skip("%s: could not find a module path for "
 					"the specified module '%s', ensure it "
@@ -339,12 +345,21 @@ static int stress_module(stress_args_t *args)
 					"skipping stressor\n",
 					args->name, module_name);
 			} else {
+				size_t i;
+				char buf[SIZEOF_ARRAY(default_modules) * 32];
+
+				(void)shim_memset(buf, 0, sizeof(buf));
+				for (i = 0; i < SIZEOF_ARRAY(default_modules); i++) {
+					(void)shim_strlcat(buf, (i > 0) ? ", " : "", sizeof(buf));
+					(void)shim_strlcat(buf, default_modules[i], sizeof(buf));
+				}
+
 				pr_inf_skip("%s: could not find a module path for "
-					"the default test_module '%s', perhaps "
+					"the default modules '%s', perhaps "
 					"CONFIG_TEST_LKM is disabled in your "
-					"kernel (or alternatively use --module-name "
-					"to specify module), skipping stressor\n",
-					args->name, module_name);
+					"kernel or modules are compressed. Alternatively use --module-name "
+					"to specify module. Skipping stressor\n",
+					args->name, buf);
 			}
 		}
 		return EXIT_NO_RESOURCE;
@@ -369,7 +384,7 @@ static int stress_module(stress_args_t *args)
 	 *  time-of-use) race
 	 */
 	if (shim_fstat(fd, &statbuf) < 0) {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			if (module_name_cli) {
 				pr_inf_skip("%s: could not get fstat() on "
 					"the specified module '%s', "
@@ -386,7 +401,7 @@ static int stress_module(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 	if (!S_ISREG(statbuf.st_mode)) {
-		if (args->instance == 0) {
+		if (stress_instance_zero(args)) {
 			pr_inf_skip("%s: module passed is not a regular file "
 				"'%s', skipping stressor\n",
 				args->name, global_module_path);
@@ -403,18 +418,22 @@ static int stress_module(stress_args_t *args)
 	if (!module_no_unload)
 		(void)shim_delete_module(module_name, 0);
 
+	if (stress_instance_zero(args))
+		pr_inf("%s: exercising module '%s'\n", args->name, module_name);
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		if (shim_finit_module(fd, finit_args1, kernel_flags) == 0) {
+			stress_bogo_inc(args);
 			if (!module_no_unload)
 				(void)shim_delete_module(module_name, 0);
 		}
-
-		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 out:
@@ -426,19 +445,19 @@ out:
 	return ret;
 }
 
-stressor_info_t stress_module_info = {
+const stressor_info_t stress_module_info = {
 	.stressor = stress_module,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.supported = stress_module_supported,
 	.help = help
 };
 
 #else
-stressor_info_t stress_module_info = {
+const stressor_info_t stress_module_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.supported = stress_module_supported,
 	.help = help
 };

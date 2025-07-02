@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -84,7 +84,7 @@ static void stress_mknod_tidy(
 static int stress_mknod_find_dev(mode_t mode, dev_t *dev)
 {
 	DIR *dir;
-	struct dirent *d;
+	const struct dirent *d;
 	int rc = -1;
 
 	(void)shim_memset(dev, 0, sizeof(*dev));
@@ -135,7 +135,7 @@ static int stress_mknod_check_errno(
 		return 0;
 	default:
 		/* An error occurred that is worth reporting */
-		pr_fail("%s: mknod %s on %s failed: errno=%d (%s)\n",
+		pr_fail("%s: mknod %s on %s failed, errno=%d (%s)\n",
 			args->name, mode_str, path, errno, strerror(errno));
 		break;
 	}
@@ -156,7 +156,8 @@ static int stress_do_mknod(
 	 *  50% of the time use mknodat rather than mknod
 	 */
 	if ((dir_fd >= 0) && stress_mwc1()) {
-		char tmp[PATH_MAX], *filename;
+		char tmp[PATH_MAX];
+		const char *filename;
 
 		(void)shim_strscpy(tmp, path, sizeof(tmp));
 		filename = basename(tmp);
@@ -237,23 +238,28 @@ static int stress_mknod(stress_args_t *args)
 
 #if defined(HAVE_MKNODAT) &&	\
     defined(O_DIRECTORY)
-	stress_temp_dir(pathname, sizeof(pathname), args->name, args->pid, args->instance);
+	stress_temp_dir(pathname, sizeof(pathname), args->name,
+		args->pid, args->instance);
 	dir_fd = open(pathname, O_DIRECTORY | O_RDONLY);
 #endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		uint64_t i, n = DEFAULT_DIRS;
+		register uint64_t i;
+		const uint64_t n = DEFAULT_DIRS;
 
 		if (chr_dev_ret == 0)
 			stress_mknod_test_dev(args, dir_fd, bad_fd, S_IFCHR, "S_IFCHR", chr_dev);
 		if (blk_dev_ret == 0)
 			stress_mknod_test_dev(args, dir_fd, bad_fd, S_IFBLK, "S_IFBLK", blk_dev);
 
-		for (i = 0; stress_continue(args) && (i < n); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
 			char path[PATH_MAX];
-			const uint64_t gray_code = (i >> 1) ^ i;
-			size_t j = stress_mwc32modn(num_nodes);
+			register const uint64_t gray_code = (i >> 1) ^ i;
+			register const size_t j = stress_mwc32modn(num_nodes);
 
 			(void)stress_temp_filename_args(args,
 				path, sizeof(path), gray_code);
@@ -266,7 +272,7 @@ static int stress_mknod(stress_args_t *args)
 		}
 
 		stress_mknod_tidy(args, i);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		(void)sync();
 	} while (stress_continue(args));
@@ -281,16 +287,16 @@ static int stress_mknod(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_mknod_info = {
+const stressor_info_t stress_mknod_info = {
 	.stressor = stress_mknod,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_mknod_info = {
+const stressor_info_t stress_mknod_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

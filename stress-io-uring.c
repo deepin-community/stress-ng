@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -34,29 +34,21 @@
 #include <attr/xattr.h>
 #endif
 
-#if !defined(O_DSYNC)
-#define O_DSYNC		(0)
-#endif
+#define MIN_IO_URING_ENTRIES	(1)
+#define MAX_IO_URING_ENTRIES	(16384)
 
 static const stress_help_t help[] = {
 	{ NULL,	"io-uring N",		"start N workers that issue io-uring I/O requests" },
 	{ NULL, "io-uring-entries N",	"specify number if io-uring ring entries" },
 	{ NULL,	"io-uring-ops N",	"stop after N bogo io-uring I/O requests" },
+	{ NULL,	"io-uring-rand",	"enable randomized io-uring I/O request ordering" },
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_io_uring_entries(const char *opt)
-{
-        uint32_t io_uring_entries;
-
-        io_uring_entries = stress_get_uint32(opt);
-        stress_check_range("io-uring-entries", (uint64_t)io_uring_entries, 1, 16384);
-        return stress_set_setting("io-uring-entries", TYPE_ID_UINT32, &io_uring_entries);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_io_uring_entries,	stress_set_io_uring_entries },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_io_uring_entries, "io-uring-entries", TYPE_ID_UINT32, MIN_IO_URING_ENTRIES, MAX_IO_URING_ENTRIES, NULL },
+	{ OPT_io_uring_rand,    "io-uring-rand",    TYPE_ID_BOOL,   0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_LINUX_IO_URING_H) &&	\
@@ -153,6 +145,8 @@ typedef struct {
 	const stress_io_uring_setup setup_func;	/* setup function */
 } stress_io_uring_setup_info_t;
 
+static bool io_uring_rand;
+
 static const char *stress_io_uring_opcode_name(const uint8_t opcode);
 
 /*
@@ -219,6 +213,12 @@ static int stress_setup_io_uring(
 	struct io_uring_params p;
 
 	(void)shim_memset(&p, 0, sizeof(p));
+#if defined(IORING_SETUP_COOP_TASKRUN) && 	\
+    defined(IORING_SETUP_DEFER_TASKRUN) &&	\
+    defined(IORING_SETUP_SINGLE_ISSUER)
+	p.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER;
+#endif
+
 	/*
 	 *  16 is plenty, with too many we end up with lots of cache
 	 *  misses, with too few we end up with ring filling. This
@@ -227,22 +227,24 @@ static int stress_setup_io_uring(
 	 */
 	submit->io_uring_fd = shim_io_uring_setup(io_uring_entries, &p);
 	if (submit->io_uring_fd < 0) {
-		if (errno == ENOSYS) {
-			pr_inf_skip("%s: io-uring not supported by the kernel, skipping stressor\n",
-				args->name);
+		switch (errno) {
+		case EPERM:
+			pr_inf_skip("%s: io-uring not permitted, skipping stressor\n", args->name);
 			return EXIT_NOT_IMPLEMENTED;
-		}
-		if (errno == ENOMEM) {
-			pr_inf_skip("%s: io-uring setup failed, out of memory, skipping stressor\n",
-				args->name);
+		case ENOSYS:
+			pr_inf_skip("%s: io-uring not supported by the kernel, skipping stressor\n", args->name);
+			return EXIT_NOT_IMPLEMENTED;
+		case ENOMEM:
+			pr_inf_skip("%s: io-uring setup failed, out of memory, skipping stressor\n", args->name);
 			return EXIT_NO_RESOURCE;
-		}
-		if (errno == EINVAL) {
+		case EINVAL:
 			pr_inf_skip("%s: io-uring failed, EINVAL, possibly %"
 				PRIu32 " io-uring-entries too large, "
 				"skipping stressor\n",
 				args->name, io_uring_entries);
 			return EXIT_NO_RESOURCE;
+		default:
+			break;
 		}
 		pr_fail("%s: io-uring setup failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -261,9 +263,10 @@ static int stress_setup_io_uring(
 		MAP_SHARED | MAP_POPULATE,
 		submit->io_uring_fd, IORING_OFF_SQ_RING);
 	if (submit->sq_mmap == MAP_FAILED) {
-		pr_inf_skip("%s: could not mmap submission queue buffer, "
+		pr_inf_skip("%s: could not mmap submission queue buffer%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -275,9 +278,10 @@ static int stress_setup_io_uring(
 				MAP_SHARED | MAP_POPULATE,
 				submit->io_uring_fd, IORING_OFF_CQ_RING);
 		if (submit->cq_mmap == MAP_FAILED) {
-			pr_inf_skip("%s: could not mmap completion queue buffer, "
+			pr_inf_skip("%s: could not mmap completion queue buffer%s, "
 				"errno=%d (%s), skipping stressor\n",
-				args->name, errno, strerror(errno));
+				args->name, stress_get_memfree_str(),
+				errno, strerror(errno));
 			(void)munmap(submit->sq_mmap, submit->cq_size);
 			return EXIT_NO_RESOURCE;
 		}
@@ -296,9 +300,10 @@ static int stress_setup_io_uring(
 			PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE,
 			submit->io_uring_fd, IORING_OFF_SQES);
 	if (submit->sqes_mmap == MAP_FAILED) {
-		pr_inf_skip("%s: count not mmap submission queue buffer, "
+		pr_inf_skip("%s: count not mmap submission queue buffer%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
 		if (submit->cq_mmap != submit->sq_mmap)
 			(void)munmap(submit->cq_mmap, submit->cq_size);
 		(void)munmap(submit->sq_mmap, submit->sq_size);
@@ -326,7 +331,7 @@ static void stress_close_io_uring(stress_io_uring_submit_t *submit)
 	}
 
 	if (submit->sqes_mmap) {
-		(void)munmap(submit->sqes_mmap, submit->sqes_size);
+		(void)munmap((void *)submit->sqes_mmap, submit->sqes_size);
 		submit->sqes_mmap = NULL;
 	}
 
@@ -429,15 +434,15 @@ static int stress_io_uring_submit(
 	const void *extra_data)
 {
 	stress_uring_io_sq_ring_t *sring = &submit->sq_ring;
-	unsigned index = 0, tail = 0, next_tail = 0;
+	unsigned idx = 0, tail = 0, next_tail = 0;
 	struct io_uring_sqe *sqe;
 	int ret;
 
 	next_tail = tail = *sring->tail;
 	next_tail++;
 	stress_asm_mb();
-	index = tail & *submit->sq_ring.ring_mask;
-	sqe = &submit->sqes_mmap[index];
+	idx = tail & *submit->sq_ring.ring_mask;
+	sqe = &submit->sqes_mmap[idx];
 #if !defined(SEQ_LATE_MEMSET)
 	(void)shim_memset(sqe, 0, sizeof(*sqe));
 #endif
@@ -446,7 +451,7 @@ static int stress_io_uring_submit(
 	/* Save opcode for later completion error reporting */
 	sqe->user_data = (uint64_t)(uintptr_t)user_data;
 
-	sring->array[index] = index;
+	sring->array[idx] = idx;
 	tail = next_tail;
 	if (*sring->tail != tail) {
 		stress_asm_mb();
@@ -457,10 +462,12 @@ static int stress_io_uring_submit(
 	}
 
 retry:
+	if (UNLIKELY(!stress_continue(args)))
+		return EXIT_NO_RESOURCE;
 	ret = shim_io_uring_enter(submit->io_uring_fd, 1,
 		1, IORING_ENTER_GETEVENTS);
 	if (UNLIKELY(ret < 0)) {
-		if (errno == EBUSY){
+		if (errno == EBUSY) {
 			stress_io_uring_complete(args, submit);
 			goto retry;
 		}
@@ -570,7 +577,8 @@ static void stress_io_uring_readv_setup(
 	sqe->opcode = IORING_OP_READV;
 	sqe->addr = (uintptr_t)io_uring_file->iovecs;
 	sqe->len = io_uring_file->blocks;
-	sqe->off = (uint64_t)stress_mwc8() * io_uring_file->blocks;
+	sqe->off = (uint64_t)io_uring_rand ?
+			(stress_mwc8() * io_uring_file->blocks) : 0;
 }
 #endif
 
@@ -597,7 +605,8 @@ static void stress_io_uring_writev_setup(
 	sqe->opcode = IORING_OP_WRITEV;
 	sqe->addr = (uintptr_t)io_uring_file->iovecs;
 	sqe->len = io_uring_file->blocks;
-	sqe->off = (uint64_t)stress_mwc8() * io_uring_file->blocks;
+	sqe->off = (uint64_t)io_uring_rand ?
+			(stress_mwc8() * io_uring_file->blocks) : 0;
 }
 #endif
 
@@ -624,7 +633,8 @@ static void stress_io_uring_read_setup(
 	sqe->opcode = IORING_OP_READ;
 	sqe->addr = (uintptr_t)io_uring_file->iovecs[0].iov_base;
 	sqe->len = io_uring_file->iovecs[0].iov_len;
-	sqe->off = (uint64_t)stress_mwc8() * io_uring_file->blocks;
+	sqe->off = (uint64_t)io_uring_rand ?
+			(stress_mwc8() * io_uring_file->blocks) : 0;
 }
 #endif
 
@@ -651,7 +661,8 @@ static void stress_io_uring_write_setup(
 	sqe->opcode = IORING_OP_WRITE;
 	sqe->addr = (uintptr_t)io_uring_file->iovecs[0].iov_base;
 	sqe->len = io_uring_file->iovecs[0].iov_len;
-	sqe->off = (uint64_t)stress_mwc8() * io_uring_file->blocks;
+	sqe->off = (uint64_t)io_uring_rand ?
+			(stress_mwc8() * io_uring_file->blocks) : 0;
 }
 #endif
 
@@ -756,7 +767,7 @@ static void stress_io_uring_fadvise_setup(
 	/* memset to zero already, so no need for following */
 	sqe->off = 0;			/* offset */
 #endif
-	sqe->len = stress_mwc16();	/* length */
+	sqe->len = io_uring_rand ?  stress_mwc16(): 1024;
 #if defined(POSIX_FADV_NORMAL)
 	sqe->fadvise_advice = POSIX_FADV_NORMAL;
 #else
@@ -1004,13 +1015,11 @@ static void stress_io_uring_getxattr_setup(
 static const stress_io_uring_setup_info_t stress_io_uring_setups[] = {
 #if defined(HAVE_IORING_OP_READV)
 	{ IORING_OP_READV,	"IORING_OP_READV", 	stress_io_uring_readv_setup },
-	{ IORING_OP_READV,	"IORING_OP_READV", 	stress_io_uring_readv_setup },
 #endif
 #if defined(HAVE_IORING_OP_WRITEV)
 	{ IORING_OP_WRITEV,	"IORING_OP_WRITEV",	stress_io_uring_writev_setup },
 #endif
 #if defined(HAVE_IORING_OP_READ)
-	{ IORING_OP_READ,	"IORING_OP_READ",	stress_io_uring_read_setup },
 	{ IORING_OP_READ,	"IORING_OP_READ",	stress_io_uring_read_setup },
 #endif
 #if defined(HAVE_IORING_OP_WRITE)
@@ -1020,9 +1029,6 @@ static const stress_io_uring_setup_info_t stress_io_uring_setups[] = {
 	{ IORING_OP_FSYNC,	"IORING_OP_FSYNC",	stress_io_uring_fsync_setup },
 #endif
 #if defined(HAVE_IORING_OP_NOP)
-	{ IORING_OP_NOP,	"IORING_OP_NOP",	stress_io_uring_nop_setup },
-	{ IORING_OP_NOP,	"IORING_OP_NOP",	stress_io_uring_nop_setup },
-	{ IORING_OP_NOP,	"IORING_OP_NOP",	stress_io_uring_nop_setup },
 	{ IORING_OP_NOP,	"IORING_OP_NOP",	stress_io_uring_nop_setup },
 #endif
 #if defined(HAVE_IORING_OP_FALLOCATE)
@@ -1038,7 +1044,6 @@ static const stress_io_uring_setup_info_t stress_io_uring_setups[] = {
 	{ IORING_OP_MADVISE,	"IORING_OP_MADVISE",	stress_io_uring_madvise_setup },
 #endif
 #if defined(HAVE_IORING_OP_STATX)
-	{ IORING_OP_STATX,	"IORING_OP_STATX",	stress_io_uring_statx_setup },
 	{ IORING_OP_STATX,	"IORING_OP_STATX",	stress_io_uring_statx_setup },
 #endif
 #if defined(HAVE_IORING_OP_SYNC_FILE_RANGE)
@@ -1079,7 +1084,7 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 	char filename[PATH_MAX];
 	stress_io_uring_file_t io_uring_file;
 	size_t i, j;
-	const size_t blocks = 1024;
+	const size_t blocks = 4;
 	const size_t block_size = 512;
 	off_t file_size = (off_t)blocks * block_size;
 	stress_io_uring_submit_t submit;
@@ -1087,6 +1092,7 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 	uint32_t io_uring_entries;
 	stress_io_uring_user_data_t user_data[SIZEOF_ARRAY(stress_io_uring_setups)];
 	const int32_t cpus = stress_get_processors_online();
+	int flags;
 
 	(void)context;
 
@@ -1100,7 +1106,15 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 	else
 		io_uring_entries = 14;
 
-	(void)stress_get_setting("io-uring-entries", &io_uring_entries);
+	io_uring_rand = false;
+
+	if (!stress_get_setting("io-uring-entries", &io_uring_entries)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			io_uring_entries = MAX_IO_URING_ENTRIES;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			io_uring_entries = MIN_IO_URING_ENTRIES;
+	}
+	(void)stress_get_setting("io-uring-rand", &io_uring_rand);
 
 	(void)shim_memset(&submit, 0, sizeof(submit));
 	(void)shim_memset(&io_uring_file, 0, sizeof(io_uring_file));
@@ -1121,6 +1135,7 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 				errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(io_uring_file.iovecs, io_uring_file.iovecs_sz, "iovecs");
 
 	for (i = 0; (i < blocks) && (file_size > 0); i++) {
 		const size_t iov_length = (file_size > (off_t)block_size) ? (size_t)block_size : (size_t)file_size;
@@ -1131,12 +1146,14 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 				MAP_SHARED | MAP_POPULATE | MAP_ANONYMOUS, -1, 0);
 		if (io_uring_file.iovecs[i].iov_base == MAP_FAILED) {
 			io_uring_file.iovecs[i].iov_base = NULL;
-			pr_inf_skip("%s: cannot mmap allocate iovec iov_base, errno=%d (%s), "
+			pr_inf_skip("%s: cannot mmap allocate iovec iov_base%s, errno=%d (%s), "
 				"skipping stressor\n", args->name,
+				stress_get_memfree_str(),
 				errno, strerror(errno));
 			stress_io_uring_unmap_iovecs(&io_uring_file);
 			return EXIT_NO_RESOURCE;
 		}
+		stress_set_vma_anon_name(io_uring_file.iovecs[i].iov_base, block_size, "iovec-buffer");
 		(void)shim_memset(io_uring_file.iovecs[i].iov_base, stress_mwc8(), block_size);
 		file_size -= iov_length;
 	}
@@ -1156,19 +1173,11 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 	if (rc != EXIT_SUCCESS)
 		goto clean;
 
-	if ((io_uring_file.fd = open(filename, O_CREAT | O_RDWR | O_DSYNC, S_IRUSR | S_IWUSR)) < 0) {
-		rc = stress_exit_status(errno);
-		pr_fail("%s: open on %s failed, errno=%d (%s)\n",
-			args->name, filename, errno, strerror(errno));
-		goto clean;
-	}
-#if defined(O_PATH)
-	io_uring_file.fd_at = open(filename, O_PATH);
-#else
-	io_uring_file.fd_at = -1;
-#endif
+	flags = O_CREAT | O_RDWR | O_TRUNC;
 	stress_file_rw_hint_short(io_uring_file.fd);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
@@ -1183,31 +1192,47 @@ static int stress_io_uring_child(stress_args_t *args, void *context)
 	rc = EXIT_SUCCESS;
 	i = 0;
 	do {
-		for (j = 0; (j < SIZEOF_ARRAY(stress_io_uring_setups)) && stress_continue_flag(); j++) {
-			if (user_data[j].supported) {
+		if ((io_uring_file.fd = open(filename, flags, S_IRUSR | S_IWUSR)) < 0) {
+			rc = stress_exit_status(errno);
+			pr_fail("%s: open on %s failed, errno=%d (%s)\n",
+				args->name, filename, errno, strerror(errno));
+			goto clean;
+		}
+#if defined(O_PATH)
+		io_uring_file.fd_at = open(filename, O_PATH);
+#else
+		io_uring_file.fd_at = -1;
+#endif
+		for (j = 0; j < SIZEOF_ARRAY(stress_io_uring_setups); j++) {
+			size_t idx = io_uring_rand ? (size_t)stress_mwc8modn((uint8_t)SIZEOF_ARRAY(stress_io_uring_setups)) : j;
+
+			if (UNLIKELY(!stress_continue(args)))
+				break;
+			if (user_data[idx].supported) {
 				rc = stress_io_uring_submit(args,
-					stress_io_uring_setups[j].setup_func,
-					&io_uring_file, &submit, &user_data[j], NULL);
-				if ((rc != EXIT_SUCCESS) || !stress_continue(args))
+					stress_io_uring_setups[idx].setup_func,
+					&io_uring_file, &submit, &user_data[idx], NULL);
+				if (rc != EXIT_SUCCESS)
 					break;
 			}
+			if (stress_io_uring_complete(args, &submit) < 0)
+				break;
 		}
-		stress_io_uring_complete(args, &submit);
-
 		if (i++ >= 4096) {
 			i = 0;
-			(void)stress_read_fdinfo(self, submit.io_uring_fd);
+			if (LIKELY(stress_continue(args)))
+				(void)stress_read_fdinfo(self, submit.io_uring_fd);
 		}
+		(void)close(io_uring_file.fd);
+		if (io_uring_file.fd_at >= 0)
+			(void)close(io_uring_file.fd_at);
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 #if defined(HAVE_IORING_OP_ASYNC_CANCEL)
 	stress_io_uring_cancel_rdwr(args, &io_uring_file, &submit);
 #endif
-	(void)close(io_uring_file.fd);
 clean:
-	if (io_uring_file.fd_at >= 0)
-		(void)close(io_uring_file.fd_at);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	stress_close_io_uring(&submit);
 	stress_io_uring_unmap_iovecs(&io_uring_file);
@@ -1225,18 +1250,18 @@ static int stress_io_uring(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_io_uring_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_io_uring_info = {
+const stressor_info_t stress_io_uring_info = {
 	.stressor = stress_io_uring,
-	.class = CLASS_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_io_uring_info = {
+const stressor_info_t stress_io_uring_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/io_uring.h or syscall() support"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,9 @@
 #include "core-lock.h"
 #include "core-perf.h"
 #include "core-perf-event.h"
+
+#include <ctype.h>
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_PERF_EVENT_H)
 #include <linux/perf_event.h>
@@ -50,7 +53,7 @@
 /* used for table of perf events to gather */
 typedef struct {
 	const unsigned int type;	/* perf types */
-	unsigned long config;		/* perf type specific config */
+	unsigned long int config;	/* perf type specific config */
 	const char *path;		/* perf trace point path (only for trace points) */
 	const char *label;		/* human readable name for perf type */
 } stress_perf_info_t;
@@ -244,9 +247,6 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 #if STRESS_PERF_DEFINED(SW_EMULATION_FAULTS)
 	PERF_INFO_SW(SW_EMULATION_FAULTS,	"Emulation Faults"),
 #endif
-#if STRESS_PERF_DEFINED(SW_CGROUP_SWITCHES)
-	PERF_INFO_SW(SW_CGROUP_SWITCHES,	"Cgroup Switches"),
-#endif
 	/*
 	 *  Tracepoint counters
  	 */
@@ -272,9 +272,7 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 
 	PERF_INFO_TP("mmap_lock/mmap_lock_start_locking","MMAP lock start"),
 	PERF_INFO_TP("mmap_lock/mmap_lock_released",	"MMAP lock release"),
-#if 1
 	PERF_INFO_TP("mmap_lock/mmap_lock_acquire_returned","MMAP lock acquire"),
-#endif
 
 	PERF_INFO_TP("rcu/rcu_utilization",		"RCU Utilization"),
 	PERF_INFO_TP("rcu/rcu_stall_warning",		"RCU Stall Warning"),
@@ -310,6 +308,7 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 	PERF_INFO_TP("ipi/ipi_entry",			"IPI Entry"),
 	PERF_INFO_TP("ipi/ipi_raise",			"IPI Raise"),
 	PERF_INFO_TP("ipi/ipi_send_cpu",		"IPI Send CPU"),
+	PERF_INFO_TP("ipi/ipi_send_cpumask",		"IPI Send CPU Mask"),
 	PERF_INFO_TP("ipi/ipi_exit",			"IPI Exit"),
 
 	PERF_INFO_TP("irq_vectors/x86_platform_ipi_entry", "x86 Platform IPI Entry"),
@@ -325,7 +324,8 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 	PERF_INFO_TP("iomap/iomap_writepage",		"IOMAP Write Page"),
 #endif
 
-	PERF_INFO_TP("io_uring/io_uring_submit_sqe",	"IO uring submit"),
+	PERF_INFO_TP("io_uring/io_uring_submit_sqe",	"IO uring submit SQE"),
+	PERF_INFO_TP("io_uring/io_uring_submit_req",	"IO uring submit REQ"),
 	PERF_INFO_TP("io_uring/io_uring_complete",	"IO uring complete"),
 
 	PERF_INFO_TP("writeback/writeback_dirty_inode",	"Writeback Dirty Inode"),
@@ -340,6 +340,7 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 	PERF_INFO_TP("lock/contention_begin",		"Lock Contention Begin"),
 	PERF_INFO_TP("lock/contention_end",		"Lock Contention End"),
 
+	PERF_INFO_TP("maple_tree/ma_op",		"Maple Tree Op"),
 	PERF_INFO_TP("maple_tree/ma_read",		"Maple Tree Read"),
 	PERF_INFO_TP("maple_tree/ma_write",		"Maple Tree Write"),
 
@@ -348,6 +349,7 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 
 	PERF_INFO_TP("msr/read_msr",			"MSR read"),
 	PERF_INFO_TP("msr/write_msr",			"MSR write"),
+	PERF_INFO_TP("msr/rdpmc",			"PMC read"),
 
 	PERF_INFO_TP("iommu/io_page_fault",		"IOMMU IO Page Fault"),
 	PERF_INFO_TP("iommu/map",			"IOMMU Map"),
@@ -355,9 +357,12 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 
 	PERF_INFO_TP("filemap/mm_filemap_add_to_page_cache",		"Filemap Page-Cache Add"),
 	PERF_INFO_TP("filemap/mm_filemap_delete_from_page_cache",	"Filemap Page-Cache Del"),
+	PERF_INFO_TP("filemap/mm_filemap_fault",	"Filemap Page Fault"),
+	PERF_INFO_TP("filemap/mm_filemap_map_pages",	"Filemap Map Pages"),
 
 	PERF_INFO_TP("oom/compact_retry",		"OOM Compact Retry"),
 	PERF_INFO_TP("oom/wake_reaper",			"OOM Wake Reaper"),
+	PERF_INFO_TP("oom/mark_victim",			"OOM Mark Victim"),
 	PERF_INFO_TP("oom/oom_score_adj_update",	"OOM Score Adjust Update"),
 
 	PERF_INFO_TP("thermal/thermal_zone_trip",	"Thermal Zone Trip"),
@@ -365,7 +370,7 @@ static stress_perf_info_t perf_info[STRESS_PERF_MAX] = {
 	{ 0, 0, NULL, NULL }
 };
 
-static inline size_t stress_perf_info_find(const unsigned int type, const unsigned long config)
+static inline size_t stress_perf_info_find(const unsigned int type, const unsigned long int config)
 {
 	size_t i;
 
@@ -383,7 +388,7 @@ static inline size_t stress_perf_info_find(const unsigned int type, const unsign
 static inline void stress_perf_type_tracepoint_resolve_config(stress_perf_info_t *pi)
 {
 	char path[PATH_MAX];
-	unsigned long config;
+	unsigned long int config;
 	FILE *fp;
 
 	if (!pi->path)
@@ -426,7 +431,7 @@ static inline int stress_sys_perf_event_open(
 	pid_t pid,
 	int cpu,
 	int group_fd,
-	unsigned long flags)
+	unsigned long int flags)
 {
 	return (int)syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
@@ -443,12 +448,14 @@ static char *stress_perf_yaml_label(char *dst, const char *src, const size_t n)
 		size_t i = n;
 
 		do {
-			if (*s == ' ')
+			unsigned char ch = (unsigned char)*s;
+
+			if (ch == ' ')
 				*d = '_';
-			else if (isupper(*s))
-				*d = (char)tolower(*s);
-			else if (*s)
-				*d = *s;
+			else if (isupper(ch))
+				*d = (char)tolower(ch);
+			else if (ch)
+				*d = (char)ch;
 			else {
 				while (--i != 0)
 					*d++ = 0;
@@ -638,7 +645,7 @@ out_ok:
  *  stress_perf_stat_succeeded()
  *	did perf event open work OK?
  */
-bool stress_perf_stat_succeeded(const stress_perf_t *sp)
+static bool stress_perf_stat_succeeded(const stress_perf_t *sp)
 {
 	return sp->perf_opened > 0;
 }
@@ -678,9 +685,9 @@ static const char *stress_perf_stat_scale(const uint64_t counter, const double d
  */
 typedef struct {
 	const unsigned int	type;
-	const unsigned long	config;
+	const unsigned long int	config;
 	const unsigned int	ref_type;
-	const unsigned long	ref_config;
+	const unsigned long int	ref_config;
 	const bool		percent;	/* scale by 100.0 for percentages? */
 	const char 		*fmt;		/* snprintf format */
 } perf_relative_t;
@@ -743,7 +750,6 @@ void stress_perf_stat_dump(FILE *yaml, stress_stressor_t *stressors_list, const 
 		int p;
 		uint64_t counter_totals[STRESS_PERF_MAX];
 		bool got_data = false;
-		char munged[64];
 		stress_perf_t *sp;
 
 		if (ss->ignore.run)
@@ -760,7 +766,7 @@ void stress_perf_stat_dump(FILE *yaml, stress_stressor_t *stressors_list, const 
 		for (p = 0; (p < STRESS_PERF_MAX) && perf_info[p].label; p++) {
 			int32_t j;
 
-			for (j = 0; j < ss->num_instances; j++) {
+			for (j = 0; j < ss->instances; j++) {
 				const uint64_t counter = sp->perf_stat[p].counter;
 
 				if (counter == STRESS_PERF_INVALID) {
@@ -775,16 +781,15 @@ void stress_perf_stat_dump(FILE *yaml, stress_stressor_t *stressors_list, const 
 		if (!got_data)
 			continue;
 
-		(void)stress_munge_underscore(munged, ss->stressor->name, sizeof(munged));
-		pr_inf("%s:\n", munged);
-		pr_yaml(yaml, "    - stressor: %s\n", munged);
+		pr_inf("%s:\n", ss->stressor->name);
+		pr_yaml(yaml, "    - stressor: %s\n", ss->stressor->name);
 		pr_yaml(yaml, "      duration: %f\n", duration);
 
 		for (p = 0; (p < STRESS_PERF_MAX) && perf_info[p].label; p++) {
-			const char *l = perf_info[p].label;
+			const char *label = perf_info[p].label;
 			const uint64_t ct = counter_totals[p];
 
-			if (l && (ct != STRESS_PERF_INVALID)) {
+			if (label && (ct != STRESS_PERF_INVALID)) {
 				char extra[32];
 				char yaml_label[128];
 				*extra = '\0';
@@ -809,11 +814,11 @@ void stress_perf_stat_dump(FILE *yaml, stress_stressor_t *stressors_list, const 
 				}
 
 				pr_inf("%'26" PRIu64 " %-24s %s%s\n",
-					ct, l, stress_perf_stat_scale(ct, duration),
+					ct, label, stress_perf_stat_scale(ct, duration),
 					extra);
 
 				*yaml_label = '\0';
-				stress_perf_yaml_label(yaml_label, l, sizeof(yaml_label));
+				stress_perf_yaml_label(yaml_label, label, sizeof(yaml_label));
 				pr_yaml(yaml, "      %s_total: %" PRIu64
 					"\n", yaml_label, ct);
 				pr_yaml(yaml, "      %s_per_second: %f\n",
@@ -836,7 +841,7 @@ void stress_perf_stat_dump(FILE *yaml, stress_stressor_t *stressors_list, const 
 					paranoid = true;
 			}
 			if (paranoid && (level > 1)) {
-				pr_inf("Cannot read perf counters, "
+				pr_inf("cannot read perf counters, "
 					"do not have CAP_SYS_ADMIN capability "
 					"or %s is set too high (%d)\n",
 					path, level);

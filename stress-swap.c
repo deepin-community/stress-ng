@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,8 @@
 #include "core-madvise.h"
 #include "core-out-of-memory.h"
 
+#include <sys/ioctl.h>
+
 #if defined(__sun__)
 /* Disable for SunOs/Solaris because */
 #undef HAVE_SYS_SWAP_H
@@ -31,13 +33,14 @@
 #include <sys/swap.h>
 #endif
 
-#define SHIM_EXT2_IOC_GETFLAGS		_IOR('f', 1, long)
-#define SHIM_EXT2_IOC_SETFLAGS		_IOW('f', 2, long)
+#define SHIM_EXT2_IOC_GETFLAGS		_IOR('f', 1, long int)
+#define SHIM_EXT2_IOC_SETFLAGS		_IOW('f', 2, long int)
 #define SHIM_FS_NOCOW_FL		0x00800000 /* No Copy-on-Write file */
 
 static const stress_help_t help[] = {
 	{ NULL,	"swap N",	"start N workers exercising swapon/swapoff" },
 	{ NULL,	"swap-ops N",	"stop after N swapon/swapoff operations" },
+	{ NULL,	"swap-self",	"attempt to swap stressors pages out" },
 	{ NULL,	NULL,		NULL }
 };
 
@@ -100,6 +103,74 @@ static int stress_swap_supported(const char *name)
 	}
 	return 0;
 }
+
+#endif
+
+static const stress_opt_t opts[] = {
+	{ OPT_swap_self, "swap-self", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
+};
+
+#if defined(HAVE_SYS_SWAP_H) &&	\
+    defined(HAVE_SWAP)
+
+#if defined(MADV_PAGEOUT) &&	\
+    defined(__linux__)
+
+/*
+ *  stress_swap_self()
+ *	swap pages out of process
+ */
+static void stress_swap_self(const size_t page_size)
+{
+	char buffer[4096];
+	FILE *fp;
+	const uintmax_t max_addr = UINTMAX_MAX - (UINTMAX_MAX >> 1);
+
+	fp = fopen("/proc/self/maps", "r");
+	if (!fp)
+		return;
+
+	/*
+	 * Look for field 0060b000-0060c000 r--p 0000b000 08:01 1901726
+	 */
+	while (fgets(buffer, sizeof(buffer), fp)) {
+		uint64_t begin, end, len, offset;
+		char tmppath[1024];
+		char prot[6];
+
+		tmppath[0] = '\0';
+		if (sscanf(buffer, "%" SCNx64 "-%" SCNx64
+		           " %5s %" SCNx64 " %*x:%*x %*d %1023s", &begin, &end, prot, &offset, tmppath) != 5) {
+			continue;
+		}
+#if 0
+		if ((prot[2] != 'x') && (prot[1] != 'w'))
+			continue;
+		if (tmppath[0] == '\0')
+			continue;
+#endif
+		/* Avoid VDSO */
+		if (strncmp("[v", tmppath, 2) == 0)
+			continue;
+
+		if ((begin > UINTPTR_MAX) || (end > UINTPTR_MAX))
+			continue;
+
+		/* Ignore bad ranges */
+		if ((begin >= end) || (begin == 0) || (end == 0) || (end >= max_addr))
+			continue;
+
+		len = end - begin;
+		/* Skip invalid ranges */
+		if ((len < page_size) || (len > 0x80000000UL))
+			continue;
+
+		(void)madvise((void *)(uintptr_t)begin, len, MADV_PAGEOUT);
+	}
+	(void)fclose(fp);
+}
+#endif
 
 static int32_t stress_swap_zero(
 	stress_args_t *args,
@@ -194,40 +265,42 @@ static int stress_swap_set_size(
 	return 0;
 }
 
-static void stress_swap_check_swapped(
-	void *addr,
-	const size_t page_size,
-	const uint32_t npages,
-	uint64_t *swapped_out,
-	uint64_t *swapped_total)
+static void stress_swap_check_swapped(uint64_t *swapped_out)
 {
-	unsigned char *vec;
-	register size_t n = 0;
+	FILE *fp;
+	char buf[4096];
+	uint64_t swapout = 0;
+	static uint64_t prev_swapout = 0;
 
-	*swapped_total += npages;
-
-	vec = calloc((size_t)npages, sizeof(*vec));
-	if (!vec)
+	fp = fopen("/proc/vmstat", "r");
+	if (!fp)
 		return;
 
-	if (shim_mincore(addr, page_size * (size_t)npages, vec) == 0) {
-		register uint32_t i;
+	while (fgets(buf, sizeof(buf), fp) != NULL) {
+		if (strncmp(buf, "pswpout", 7) == 0) {
+			swapout = (uint64_t)atoll(buf + 8);
+			break;
+		}
+	}
+	(void)fclose(fp);
 
-		for (i = 0; i < npages; i++)
-			n += ((vec[i] & 1) == 0);
+	if (prev_swapout == 0) {
+		prev_swapout = swapout;
+		return;
 	}
 
-	*swapped_out += n;
-	free(vec);
+	*swapped_out += swapout - prev_swapout;
+	prev_swapout = swapout;
 }
 
 static void stress_swap_clean_dir(stress_args_t *args)
 {
 	char path[PATH_MAX];
 	DIR *dir;
-	struct dirent *d;
+	const struct dirent *d;
 
-	stress_temp_dir(path, sizeof(path), args->name, args->pid, args->instance);
+	stress_temp_dir(path, sizeof(path), args->name,
+		args->pid, args->instance);
 	dir = opendir(path);
 	if (!dir)
 		return;
@@ -258,21 +331,27 @@ static int stress_swap_child(stress_args_t *args, void *context)
 	int fd, ret;
 	uint8_t *page;
 	uint64_t swapped_out = 0;
-	uint64_t swapped_total = 0;
 	int32_t max_swap_pages;
 	const size_t page_size = args->page_size;
-	double swapped_percent;
+	bool swap_self = false;
+	double t, duration, rate;
 
 	(void)context;
+
+	if (!stress_get_setting("swap-self", &swap_self)) {
+		if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+			swap_self = true;
+	}
 
 	page = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (page == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate 1 page: errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap 1 page%s, errno=%d (%s), skipping stressor\n",
+			args->name, stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto tidy_ret;
 	}
+	stress_set_vma_anon_name(page, page_size, "swap-page");
 	(void)stress_madvise_mergeable(page, page_size);
 
 	stress_swap_clean_dir(args);
@@ -294,7 +373,7 @@ static int stress_swap_child(stress_args_t *args, void *context)
 
 #if defined(__linux__)
 	{
-		unsigned long flags;
+		unsigned long int flags;
 
 		/*
 		 *  Disable Copy-on-Write on file where possible, since
@@ -317,8 +396,11 @@ static int stress_swap_child(stress_args_t *args, void *context)
 		goto tidy_close;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
+	t = stress_time_now();
 	do {
 		int swapflags = 0;
 		int bad_flags;
@@ -359,22 +441,22 @@ static int stress_swap_child(stress_args_t *args, void *context)
 				 * keep the pressure up.
 				 */
 				if (stress_check_capability(SHIM_CAP_SYS_ADMIN)) {
-					shim_usleep(100000);
+					(void)shim_usleep(100000);
 					continue;
 				}
-				pr_inf_skip("%s: cannot enable swap file on the filesystem '%s', skipping test\n",
+				pr_inf_skip("%s: cannot enable swap%s, skipping test\n",
 					args->name, stress_get_fs_type(filename));
 				ret = EXIT_NO_RESOURCE;
 				break;
 			case EINVAL:
-				pr_inf_skip("%s: cannot enable swap file on the filesystem '%s', skipping test\n",
+				pr_inf_skip("%s: cannot enable swap%s, skipping test\n",
 					args->name, stress_get_fs_type(filename));
 				ret = EXIT_NO_RESOURCE;
 				break;
 			case EBUSY:
 				continue;
 			default:
-				pr_fail("%s: swapon failed on the filesystem '%s', errno=%d (%s)\n",
+				pr_fail("%s: swapon failed%s, errno=%d (%s)\n",
 					args->name, stress_get_fs_type(filename),
 					errno, strerror(errno));
 				ret = EXIT_FAILURE;
@@ -390,6 +472,7 @@ static int stress_swap_child(stress_args_t *args, void *context)
 			const char *p_end = ptr + mmap_size;
 			char *p;
 
+			(void)shim_madvise(ptr, mmap_size, MADV_WILLNEED);
 			/* Add simple check value to start of each page */
 			for (i = 0, p = ptr; p < p_end; p += page_size, i++) {
 				uintptr_t *up = (uintptr_t *)(uintptr_t)p;
@@ -400,15 +483,19 @@ static int stress_swap_child(stress_args_t *args, void *context)
 #if defined(MADV_PAGEOUT)
 			(void)shim_madvise(ptr, mmap_size, MADV_PAGEOUT);
 #endif
-			stress_swap_check_swapped(ptr, page_size, npages,
-				&swapped_out, &swapped_total);
+#if defined(MADV_PAGEOUT) &&	\
+    defined(__linux__)
+			if (swap_self)
+				stress_swap_self(args->page_size);
+#endif
+			stress_swap_check_swapped(&swapped_out);
 
 			/* Check page has check address value */
 			for (i = 0, p = ptr; p < p_end; p += page_size, i++) {
-				uintptr_t *up = (uintptr_t *)(uintptr_t)p;
+				const uintptr_t *up = (uintptr_t *)(uintptr_t)p;
 
 				if (*up != (uintptr_t)p) {
-					pr_fail("%s: failed: address %p contains "
+					pr_fail("%s: failed, address %p contains "
 						"%" PRIuPTR " and not %" PRIuPTR "\n",
 						args->name, (void *)p, *up, (uintptr_t)p);
 				}
@@ -418,7 +505,7 @@ static int stress_swap_child(stress_args_t *args, void *context)
 
 		ret = stress_swapoff(filename);
 		if ((bad_flags == SWAP_HDR_SANE) && (ret < 0)) {
-			pr_fail("%s: swapoff failed on filesystem '%s', errno=%d (%s)\n",
+			pr_fail("%s: swapoff failed%s, errno=%d (%s)\n",
 				args->name, stress_get_fs_type(filename),
 				errno, strerror(errno));
 			ret = EXIT_FAILURE;
@@ -443,10 +530,9 @@ static int stress_swap_child(stress_args_t *args, void *context)
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
-	swapped_percent = (swapped_total == 0) ?
-		0.0 : (100.0 * (double)swapped_out) / (double)swapped_total;
-	pr_inf("%s: %" PRIu64 " of %" PRIu64 " (%.2f%%) pages were swapped out\n",
-		args->name, swapped_out, swapped_total, swapped_percent);
+	duration = stress_time_now() - t;
+	rate = (duration > 0.0) ? swapped_out / duration : 0.0;
+	stress_metrics_set(args, 0, "pages swapped out per second", rate, STRESS_METRIC_GEOMETRIC_MEAN);
 
 	ret = EXIT_SUCCESS;
 tidy_close:
@@ -474,17 +560,19 @@ static int stress_swap(stress_args_t *args)
 	return ret;
 }
 
-stressor_info_t stress_swap_info = {
+const stressor_info_t stress_swap_info = {
 	.stressor = stress_swap,
 	.supported = stress_swap_supported,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_swap_info = {
+const stressor_info_t stress_swap_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/swap.h or swap() system call"

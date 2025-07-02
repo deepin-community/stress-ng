@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King.
+ * Copyright (C) 2023-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,7 @@
 #include "core-builtin.h"
 #include "core-processes.h"
 
+#include <ctype.h>
 #include <pwd.h>
 
 #if defined(__linux__)
@@ -29,7 +30,7 @@
  */
 static int stress_dump_processes_filter(const struct dirent *d)
 {
-	if (!d)
+	if (UNLIKELY(!d))
 		return 0;
 
 	return isdigit((int)d->d_name[0]);
@@ -43,10 +44,10 @@ void stress_dump_processes(void)
 {
 	int i, n, pid_width = 5;
 
-	struct dirent **namelist;
+	struct dirent **namelist = NULL;
 
 	n = scandir("/proc", &namelist, stress_dump_processes_filter, alphasort);
-	if (n <= 0)
+	if (UNLIKELY(n <= 0))
 		return;
 
 	for (i = 0; i < n; i++) {
@@ -111,7 +112,7 @@ void stress_dump_processes(void)
 		(void)snprintf(path, sizeof(path), "/proc/%s/status", namelist[i]->d_name);
 		ret = stress_system_read(path, buf, sizeof(buf));
 		if (ret > 0) {
-			char *ptr;
+			const char *ptr;
 
 			ptr = strstr(buf, "\nPPid:");
 			if (ptr) {

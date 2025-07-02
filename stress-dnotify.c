@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2012-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -89,14 +89,14 @@ static int dnotify_exercise(
 	const char *filename,		/* Filename in test */
 	const char *watchname,		/* File or directory to watch using dnotify */
 	const stress_dnotify_helper func,/* Helper func */
-	const unsigned long flags,	/* DN_* flags to watch for */
+	const unsigned long int flags,	/* DN_* flags to watch for */
 	void *private)			/* Helper func private data */
 {
 	int fd, i = 0, rc = 0;
 #if defined(DN_MULTISHOT)
-	unsigned long flags_ms = flags | DN_MULTISHOT;
+	unsigned long int flags_ms = flags | DN_MULTISHOT;
 #else
-	unsigned long flags_ms = flags;
+	unsigned long int flags_ms = flags;
 #endif
 
 	if ((fd = open(watchname, O_RDONLY)) < 0) {
@@ -125,7 +125,7 @@ static int dnotify_exercise(
 
 	/* Wait for up to 2 seconds for event */
 	while ((i < 2000) && (dnotify_fd == -1)) {
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto cleanup;
 		i++;
 		(void)shim_usleep(1000);
@@ -160,7 +160,7 @@ cleanup:
 static int rm_file(stress_args_t *args, const char *path)
 {
 	if ((shim_force_unlink(path) < 0) && (errno != ENOENT)) {
-		pr_err("%s: cannot remove file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot remove file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -181,21 +181,21 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 	if ((fd = open(filename, O_CREAT | O_RDWR, FILE_FLAGS)) < 0) {
 		if ((errno == ENFILE) || (errno == ENOMEM) || (errno == ENOSPC))
 			return -1;
-		pr_err("%s: cannot create file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot create file %s, errno=%d (%s)\n",
 			args->name, filename, errno, strerror(errno));
 		return -1;
 	}
 
 	(void)shim_memset(buffer, 'x', BUF_SIZE);
-	while (stress_continue(args) && (sz > 0)) {
-		size_t n = (sz > BUF_SIZE) ? BUF_SIZE : sz;
+	while (LIKELY(stress_continue(args) && (sz > 0))) {
+		const size_t n = (sz > BUF_SIZE) ? BUF_SIZE : sz;
 		ssize_t ret;
 
 		ret = write(fd, buffer, n);
 		if (ret < 0) {
 			if (errno == ENOSPC)
 				break;
-			pr_err("%s: error writing to file %s: errno=%d (%s)\n",
+			pr_err("%s: error writing to file %s, errno=%d (%s)\n",
 				args->name, filename, errno, strerror(errno));
 			(void)close(fd);
 			return -1;
@@ -204,7 +204,7 @@ static int mk_file(stress_args_t *args, const char *filename, const size_t len)
 	}
 
 	if (close(fd) < 0) {
-		pr_err("%s: cannot close file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot close file %s, errno=%d (%s)\n",
 			args->name, filename, errno, strerror(errno));
 		return -1;
 	}
@@ -218,7 +218,7 @@ static int dnotify_attrib_helper(
 {
 	(void)signum;
 	if (chmod(path, S_IRUSR | S_IWUSR) < 0) {
-		pr_err("%s: cannot chmod file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot chmod file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -252,7 +252,7 @@ static int dnotify_access_helper(
 
 	(void)signum;
 	if ((fd = open(path, O_RDONLY)) < 0) {
-		pr_err("%s: cannot open file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -262,7 +262,7 @@ do_access:
 	if (stress_continue(args) && (read(fd, buffer, 1) < 0)) {
 		if ((errno == EAGAIN) || (errno == EINTR))
 			goto do_access;
-		pr_err("%s: cannot read file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot read file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		rc = -1;
 	}
@@ -297,7 +297,7 @@ static int dnotify_modify_helper(
 	if (mk_file(args, path, 4096) < 0)
 		return -1;
 	if ((fd = open(path, O_RDWR)) < 0) {
-		pr_err("%s: cannot open file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot open file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		rc = -1;
 		goto remove;
@@ -307,7 +307,7 @@ do_modify:
 		if ((errno == EAGAIN) || (errno == EINTR))
 			goto do_modify;
 		if (errno != ENOSPC) {
-			pr_err("%s: cannot write to file %s: errno=%d (%s)\n",
+			pr_err("%s: cannot write to file %s, errno=%d (%s)\n",
 				args->name, path, errno, strerror(errno));
 			rc = -1;
 		}
@@ -338,7 +338,7 @@ static int dnotify_creat_helper(
 	(void)signum;
 
 	if ((fd = creat(path, FILE_FLAGS)) < 0) {
-		pr_err("%s: cannot create file %s: errno=%d (%s)\n",
+		pr_err("%s: cannot create file %s, errno=%d (%s)\n",
 			args->name, path, errno, strerror(errno));
 		return -1;
 	}
@@ -391,7 +391,7 @@ static int dnotify_rename_helper(
 	const char *newpath = (const char *)private;
 
 	if (rename(oldpath, newpath) < 0) {
-		pr_err("%s: cannot rename %s to %s: errno=%d (%s)\n",
+		pr_err("%s: cannot rename %s to %s, errno=%d (%s)\n",
 			args->name, oldpath, newpath, errno, strerror(errno));
 		return -1;
 	}
@@ -440,7 +440,7 @@ static int stress_dnotify(stress_args_t *args)
 	(void)sigemptyset(&act.sa_mask);
 	act.sa_flags = SA_SIGINFO;
 	if (sigaction(SIGRTMIN + 1, &act, NULL) < 0) {
-		pr_err("%s: sigaction failed: errno=%d (%s)\n",
+		pr_err("%s: sigaction failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
@@ -453,10 +453,12 @@ static int stress_dnotify(stress_args_t *args)
 	if (ret < 0)
 		return stress_exit_status(-ret);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		for (i = 0; stress_continue(args) && i < SIZEOF_ARRAY(dnotify_stressors); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(dnotify_stressors))); i++) {
 			ret = dnotify_stressors[i].func(args, pathname);
 			if (ret < 0) {
 				rc = EXIT_FAILURE;
@@ -472,17 +474,17 @@ tidy:
 
 	return rc;
 }
-stressor_info_t stress_dnotify_info = {
+const stressor_info_t stress_dnotify_info = {
 	.stressor = stress_dnotify,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
 	.supported = stress_dnotify_supported,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_dnotify_info = {
+const stressor_info_t stress_dnotify_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
+	.classifier = CLASS_FILESYSTEM | CLASS_SCHEDULER | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without dnotify support or sys/select.h"

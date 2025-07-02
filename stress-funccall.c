@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,8 @@
 #include "core-arch.h"
 #include "core-builtin.h"
 #include "core-pragma.h"
+
+#include <math.h>
 
 #if defined(STRESS_ARCH_S390)
 #undef ALWAYS_INLINE
@@ -166,15 +168,15 @@ stress_funccall_ ## type(stress_args_t *args)			\
 	register int ii;						\
 	type res_old;							\
 									\
-	type a = rndfunc();						\
-	type b = rndfunc();						\
-	type c = rndfunc();						\
-	type d = rndfunc();						\
-	type e = rndfunc();						\
-	type f = rndfunc();						\
-	type g = rndfunc();						\
-	type h = rndfunc();						\
-	type i = rndfunc();						\
+	const type a = rndfunc();					\
+	const type b = rndfunc();					\
+	const type c = rndfunc();					\
+	const type d = rndfunc();					\
+	const type e = rndfunc();					\
+	const type f = rndfunc();					\
+	const type g = rndfunc();					\
+	const type h = rndfunc();					\
+	const type i = rndfunc();					\
 									\
 	(void)shim_memset(&res_old, 0, sizeof(res_old));		\
 									\
@@ -1204,7 +1206,9 @@ static const stress_funccall_method_info_t stress_funccall_methods[] = {
 #endif
 };
 
-static stress_metrics_t stress_funccall_metrics[SIZEOF_ARRAY(stress_funccall_methods)];
+#define NUM_STRESS_FUNCCALL_METHODS	(SIZEOF_ARRAY(stress_funccall_methods))
+
+static stress_metrics_t stress_funccall_metrics[NUM_STRESS_FUNCCALL_METHODS];
 
 static bool stress_funccall_exercise(stress_args_t *args, const size_t method)
 {
@@ -1228,34 +1232,10 @@ static bool stress_funccall_all(stress_args_t *args)
 	size_t i;
 	bool success = true;
 
-	for (i = 1; success && (i < SIZEOF_ARRAY(stress_funccall_methods)); i++) {
+	for (i = 1; success && (i < NUM_STRESS_FUNCCALL_METHODS); i++) {
 		success &= stress_funccall_exercise(args, i);
 	}
 	return success;
-}
-
-/*
- *  stress_set_funccall_method()
- *	set the default funccal stress method
- */
-static int stress_set_funccall_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_funccall_methods); i++) {
-		if (!strcmp(stress_funccall_methods[i].name, name)) {
-			stress_set_setting("funccall-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "funccall-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_funccall_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_funccall_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
 }
 
 /*
@@ -1269,13 +1249,12 @@ static int stress_funccall(stress_args_t *args)
 
 	size_t i, j;
 
-	for (i = 0; i < SIZEOF_ARRAY(stress_funccall_metrics); i++) {
-		stress_funccall_metrics[i].duration = 0.0;
-		stress_funccall_metrics[i].count = 0.0;
-	}
+	stress_zero_metrics(stress_funccall_metrics, NUM_STRESS_FUNCCALL_METHODS);
 
 	(void)stress_get_setting("funccall-method", &funccall_method);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -1284,8 +1263,8 @@ static int stress_funccall(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	for (i = 1, j = 0; i < SIZEOF_ARRAY(stress_funccall_metrics); i++) {
-		double rate = (stress_funccall_metrics[i].duration > 0) ?
+	for (i = 1, j = 0; i < NUM_STRESS_FUNCCALL_METHODS; i++) {
+		const double rate = (stress_funccall_metrics[i].duration > 0) ?
 			stress_funccall_metrics[i].count / stress_funccall_metrics[i].duration : 0.0;
 
 		if (rate > 0.0) {
@@ -1293,7 +1272,7 @@ static int stress_funccall(stress_args_t *args)
 
 			(void)snprintf(msg, sizeof(msg), "%s function invocations per sec",
 					stress_funccall_methods[i].name);
-			stress_metrics_set(args, j, msg, rate, STRESS_HARMONIC_MEAN);
+			stress_metrics_set(args, j, msg, rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
@@ -1301,15 +1280,20 @@ static int stress_funccall(stress_args_t *args)
 	return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_funccall_method,	stress_set_funccall_method },
-	{ 0,			NULL }
+static const char *stress_funccall_method(const size_t i)
+{
+	return (i < NUM_STRESS_FUNCCALL_METHODS) ? stress_funccall_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_funccall_method, "funccall-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_funccall_method },
+	END_OPT,
 };
 
-stressor_info_t stress_funccall_info = {
+const stressor_info_t stress_funccall_info = {
 	.stressor = stress_funccall,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

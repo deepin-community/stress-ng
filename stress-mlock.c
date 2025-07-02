@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -89,7 +89,7 @@ static int do_mlock(
 					0 : MLOCK_ONFAULT;
 
 				ret = shim_mlock2(addr, len, flags);
-				if (ret == 0)
+				if (LIKELY(ret == 0))
 					return 0;
 				if (errno != ENOSYS)
 					return ret;
@@ -115,7 +115,7 @@ static int do_mlock(
 
 				t = stress_time_now();
 				ret = shim_mlock2(addr, len, flags);
-				if (ret == 0) {
+				if (LIKELY(ret == 0)) {
 					(*duration) += stress_time_now() - t;
 					(*count) += 1.0;
 					return 0;
@@ -131,7 +131,7 @@ static int do_mlock(
 		/* Just do mlock */
 		t = stress_time_now();
 		ret = shim_mlock((const void *)addr, len);
-		if (ret == 0) {
+		if (LIKELY(ret == 0)) {
 			(*duration) += stress_time_now() - t;
 			(*count) += 1.0;
 		}
@@ -178,7 +178,7 @@ static size_t stress_mlock_max_lockable(void)
 
 #if defined(_SC_MEMLOCK)
 	{
-		const long lockmax = sysconf(_SC_MEMLOCK);
+		const long int lockmax = sysconf(_SC_MEMLOCK);
 
 		sysconf_max = (lockmax > 0) ? (size_t)lockmax : MLOCK_MAX;
 	}
@@ -187,7 +187,7 @@ static size_t stress_mlock_max_lockable(void)
 	{
 		struct rlimit rlim;
 
-		if (getrlimit(RLIMIT_MEMLOCK, &rlim) == 0)
+		if (LIKELY(getrlimit(RLIMIT_MEMLOCK, &rlim) == 0))
 			rlimit_max = (size_t)rlim.rlim_max;
 	}
 #endif
@@ -230,7 +230,7 @@ static void stress_mlock_misc(stress_args_t *args, const size_t page_size, const
 		/* Low memory avoidance, re-start */
 		if (oom_avoid && stress_low_memory(page_size * 3))
 			return;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		(void)shim_mlockall(MCL_CURRENT);
 		flag |= MCL_CURRENT;
@@ -243,7 +243,7 @@ static void stress_mlock_misc(stress_args_t *args, const size_t page_size, const
 		/* Low memory avoidance, re-start */
 		if (oom_avoid && stress_low_memory(page_size * 3))
 			return;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		(void)shim_mlockall(MCL_FUTURE);
 		flag |= MCL_FUTURE;
@@ -253,7 +253,7 @@ static void stress_mlock_misc(stress_args_t *args, const size_t page_size, const
 		/* Low memory avoidance, re-start */
 		if (oom_avoid && stress_low_memory(page_size * 3))
 			return;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		if (shim_mlockall(MCL_ONFAULT | MCL_CURRENT) == 0)
 			flag |= (MCL_ONFAULT | MCL_CURRENT);
@@ -263,7 +263,7 @@ static void stress_mlock_misc(stress_args_t *args, const size_t page_size, const
 		/* Low memory avoidance, re-start */
 		if (oom_avoid && stress_low_memory(page_size * 3))
 			return;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		if (shim_mlockall(MCL_ONFAULT | MCL_FUTURE) == 0)
 			flag |= (MCL_ONFAULT | MCL_FUTURE);
@@ -272,17 +272,17 @@ static void stress_mlock_misc(stress_args_t *args, const size_t page_size, const
 		/* Low memory avoidance, re-start */
 		if (oom_avoid && stress_low_memory(page_size * 3))
 			return;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		/* Exercising Invalid mlockall syscall and ignoring failure */
 		(void)shim_mlockall(MCL_ONFAULT);
 #endif
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return;
 		/* Exercise Invalid mlockall syscall with invalid flag */
 		(void)shim_mlockall(~0);
 		if (flag) { /* cppcheck-suppress knownConditionTrueFalse */
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				return;
 			(void)shim_mlockall(flag);
 		}
@@ -295,7 +295,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 	size_t i, n;
 	uint8_t **mappings;
 	const size_t page_size = args->page_size;
-	const size_t max = stress_mlock_max_lockable();
+	size_t max = stress_mlock_max_lockable(), mappings_max;
 	size_t mappings_len = max * sizeof(*mappings);
 	size_t shmall, freemem, totalmem, freeswap, totalswap;
 	double mlock_duration = 0.0, mlock_count = 0.0;
@@ -317,7 +317,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 	 *  keep stressing before attempting a calloc that can
 	 *  for a OOM and a respawn if this function
 	 */
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return EXIT_SUCCESS;
 
 	/*
@@ -345,14 +345,22 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 		}
 		mappings_len = mappings_len >> 1;
 		/* mmap failed, yield a bit before retry */
-		shim_sched_yield();
+		(void)shim_sched_yield();
 	}
 	if (mappings == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap mappings table: errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: cannot mmap mappings table%s, errno=%d (%s), skipping stressor\n",
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(mappings, mappings_len, "mmap-mappings");
 
+	mappings_max = mappings_len / sizeof(*mappings);
+	if (max > mappings_max)
+		max = mappings_max;
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -361,7 +369,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 		uint64_t mlocked_pages = 0, prev_mlocked_pages;
 #endif
 		for (n = 0; n < max; n++) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Low memory avoidance, re-start */
@@ -371,11 +379,11 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 			mappings[n] = (uint8_t *)mmap(NULL, page_size * 3,
 				PROT_READ | PROT_WRITE,
 				MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-			if (mappings[n] == MAP_FAILED)
+			if (UNLIKELY(mappings[n] == MAP_FAILED))
 				break;
 
 #if defined(HAVE_MLOCK2)
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			/* Invalid mlock2 syscall with invalid flags and ignoring failure*/
 			(void)shim_mlock2((void *)(mappings[n] + page_size), page_size, ~0);
@@ -384,14 +392,14 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 			/*
 			 *  Attempt a bogus mlock, ignore failure
 			 */
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			(void)do_mlock((void *)(mappings[n] + page_size), 0, &mlock_duration, &mlock_count);
 
 			/*
 			 *  Attempt a correct mlock
 			 */
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			ret = do_mlock((void *)(mappings[n] + page_size), page_size, &mlock_duration, &mlock_count);
 			if (ret < 0) {
@@ -415,7 +423,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 #if defined(__linux__)
 				prev_mlocked_pages = mlocked_pages;
 				mlocked_pages = stress_mlock_pages(page_size);
-				if ((mlocked_pages > 0) && (mlocked_pages < prev_mlocked_pages)) {
+				if (UNLIKELY((mlocked_pages > 0) && (mlocked_pages < prev_mlocked_pages))) {
 					pr_dbg("%s: mlocked pages shrunk, before mlock: %" PRIu64 " pages mlocked, after: %" PRIu64 " pages mlocked\n",
 						args->name, prev_mlocked_pages, mlocked_pages);
 				}
@@ -425,23 +433,23 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 				stress_bogo_inc(args);
 			}
 
-			if ((n & 1023) == 0)
+			if (UNLIKELY((n & 1023) == 0))
 				stress_mlock_misc(args, page_size, oom_avoid);
 		}
 
 		for (i = 0; i < n; i++) {
 			intptr_t addr = (intptr_t)mappings[i];
-			intptr_t mlocked = addr & 1;
+			const intptr_t mlocked = addr & 1;
 
 			addr &= ~(intptr_t)1;
 
-			if (stress_continue(args)) {
+			if (LIKELY(stress_continue(args))) {
 				if (mlocked) {
 					double t;
 
 					t = stress_time_now();
 					ret = shim_munlock((void *)((uint8_t *)addr + page_size), page_size);
-					if (ret == 0) {
+					if (LIKELY(ret == 0)) {
 						munlock_duration += stress_time_now() - t;
 						munlock_count += 1.0;
 					}
@@ -456,7 +464,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 		}
 
 		for (n = 0; n < max; n++) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* Low memory avoidance, re-start */
@@ -465,7 +473,7 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 			mappings[n] = (uint8_t *)mmap(NULL, page_size,
 				PROT_READ | PROT_WRITE,
 				MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-			if (mappings[n] == MAP_FAILED)
+			if (UNLIKELY(mappings[n] == MAP_FAILED))
 				break;
 		}
 #if defined(HAVE_MUNLOCKALL)
@@ -489,11 +497,11 @@ static int stress_mlock_child(stress_args_t *args, void *context)
 
 	rate = (mlock_count > 0.0) ? mlock_duration / mlock_count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per mlock call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	if (munlock_count > 0.0) {
 		rate =  munlock_duration / munlock_count;
 		stress_metrics_set(args, 1, "nanosecs per munlock call",
-			rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+			rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
 	(void)munmap((void *)mappings, mappings_len);
@@ -510,16 +518,16 @@ static int stress_mlock(stress_args_t *args)
 	return stress_oomable_child(args, NULL, stress_mlock_child, STRESS_OOMABLE_NORMAL);
 }
 
-stressor_info_t stress_mlock_info = {
+const stressor_info_t stress_mlock_info = {
 	.stressor = stress_mlock,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_mlock_info = {
+const stressor_info_t stress_mlock_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
+	.classifier = CLASS_VM | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without mlock() support or _POSIX_MEMLOCK_RANGE defined"

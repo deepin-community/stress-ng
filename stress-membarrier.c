@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -41,6 +41,7 @@ static const stress_help_t help[] = {
 typedef struct {
 	pthread_t pthread;	/* thread handle */
 	int pthread_ret;	/* thread create return */
+	int rc;			/* thread return value */
 	double duration;	/* membarrier duration */
 	double count;		/* membarrier call count */
 } membarrier_info_t;
@@ -80,6 +81,7 @@ static int stress_membarrier_exercise(stress_args_t *args, membarrier_info_t *in
 	if (ret < 0) {
 		pr_fail("%s: membarrier CMD QUERY failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
+		info->rc = EXIT_FAILURE;
 		return -1;
 	}
 	mask = (unsigned int)ret;
@@ -87,7 +89,6 @@ static int stress_membarrier_exercise(stress_args_t *args, membarrier_info_t *in
 	t = stress_time_now();
 	for (i = 1; i; i <<= 1) {
 		if (i & mask) {
-
 			VOID_RET(int, shim_membarrier((int)i, 0, 0));
 			info->count += 1.0;
 
@@ -122,7 +123,6 @@ static int stress_membarrier_exercise(stress_args_t *args, membarrier_info_t *in
 
 static void *stress_membarrier_thread(void *arg)
 {
-	static void *nowt = NULL;
 	const stress_pthread_args_t *pargs = (stress_pthread_args_t *)arg;
 	stress_args_t *args = pargs->args;
 	membarrier_info_t *info = (membarrier_info_t *)pargs->data;
@@ -133,12 +133,14 @@ static void *stress_membarrier_thread(void *arg)
 	 */
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
-	while (keep_running && stress_continue_flag()) {
-		if (stress_membarrier_exercise(args, info) < 0)
+	stress_random_small_sleep();
+
+	while (LIKELY(keep_running && stress_continue_flag())) {
+		if (UNLIKELY(stress_membarrier_exercise(args, info) < 0))
 			break;
 	}
 
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -147,7 +149,7 @@ static void *stress_membarrier_thread(void *arg)
  */
 static int stress_membarrier(stress_args_t *args)
 {
-	int ret;
+	int ret, rc = EXIT_SUCCESS;
 	/* We have MAX_MEMBARRIER_THREADS plus the stressor process */
 	membarrier_info_t info[MAX_MEMBARRIER_THREADS + 1];
 	size_t i;
@@ -155,15 +157,15 @@ static int stress_membarrier(stress_args_t *args)
 	double duration = 0.0, count = 0.0, rate;
 
 	ret = shim_membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
-	if (ret < 0) {
+	if (UNLIKELY(ret < 0)) {
 		if (errno == ENOSYS) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: stressor will be skipped, "
 					"membarrier not supported\n",
 					args->name);
 			return EXIT_NOT_IMPLEMENTED;
 		}
-		pr_fail("%s: membarrier failed: errno=%d: (%s)\n",
+		pr_fail("%s: membarrier failed, errno=%d: (%s)\n",
 			args->name, errno, strerror(errno));
 		return EXIT_FAILURE;
 	}
@@ -176,6 +178,7 @@ static int stress_membarrier(stress_args_t *args)
 	(void)sigfillset(&set);
 	for (i = 0; i < MAX_MEMBARRIER_THREADS + 1; i++) {
 		info[i].pthread_ret = -1;
+		info[i].rc = EXIT_SUCCESS;
 		(void)shim_memset(&info[i].pthread, 0, sizeof(info[i].pthread));
 		info[i].duration = 0.0;
 		info[i].count = 0.0;
@@ -189,12 +192,15 @@ static int stress_membarrier(stress_args_t *args)
 				stress_membarrier_thread, (void *)&pargs);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		if (stress_membarrier_exercise(args, &info[MAX_MEMBARRIER_THREADS]) < 0) {
-			pr_fail("%s: membarrier failed: errno=%d: (%s)\n",
+		if (UNLIKELY(stress_membarrier_exercise(args, &info[MAX_MEMBARRIER_THREADS]) < 0)) {
+			pr_fail("%s: membarrier failed, errno=%d: (%s)\n",
 				args->name, errno, strerror(errno));
+			rc = EXIT_FAILURE;
 		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
@@ -209,24 +215,27 @@ static int stress_membarrier(stress_args_t *args)
 	}
 	rate = (duration > 0) ? count / duration : 0.0;
 	stress_metrics_set(args, 0, "membarrier calls per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	for (i = 0; i < MAX_MEMBARRIER_THREADS; i++) {
-		if (info[i].pthread_ret == 0)
+		if (info[i].pthread_ret == 0) {
 			(void)pthread_join(info[i].pthread, NULL);
+			if (info[i].rc == EXIT_FAILURE)
+				rc = EXIT_FAILURE;
+		}
 	}
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_membarrier_info = {
+const stressor_info_t stress_membarrier_info = {
 	.stressor = stress_membarrier,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
 	.help = help
 };
 #else
-stressor_info_t stress_membarrier_info = {
+const stressor_info_t stress_membarrier_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU_CACHE | CLASS_MEMORY,
+	.classifier = CLASS_CPU_CACHE | CLASS_MEMORY,
 	.help = help,
 	.unimplemented_reason = "built without pthread support or membarrier() system call"
 };

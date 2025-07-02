@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,7 +22,11 @@
 #include "core-builtin.h"
 #include "core-io-priority.h"
 
+#include <math.h>
 #include <sched.h>
+#include <time.h>
+#include <sys/file.h>
+#include <sys/times.h>
 
 #define SYSCALL_METHOD_ALL	(0)
 #define SYSCALL_METHOD_FAST10	(1)
@@ -34,7 +38,7 @@
 #define SYSCALL_METHOD_GEOMEAN2 (12)
 #define SYSCALL_METHOD_GEOMEAN3 (13)
 
-#define NUMA_LONG_BITS	(sizeof(unsigned long) * 8)
+#define NUMA_LONG_BITS	(sizeof(unsigned long int) * 8)
 
 /* 1 day in nanoseconds */
 #define SYSCALL_DAY_NS		(8.64E13)
@@ -248,6 +252,7 @@ typedef struct {
 	double total_duration;		/* syscall duration in ns */
 	double average_duration;	/* average syscall duration */
 	uint64_t min_duration;		/* syscall min duration in ns */
+	uint64_t max_duration;		/* syscall max duration in ns */
 	uint64_t max_test_duration;	/* maximum test duration */
 	int syscall_errno;		/* syscall errno */
 	bool ignore;			/* true if too slow */
@@ -401,6 +406,7 @@ static const shim_rlimit_resource_t limits[] = {
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 static const int sched_policies[] = {
 #if defined(SCHED_DEADLINE)
@@ -503,27 +509,41 @@ static void syscall_shared_error(const int ret)
 }
 
 /*
- *  syscall_shared_error()
+ *  syscall_time_now()
  *	get nanosecond time delta since the first call
- *	this allows 18446744073 days of run time, or ~584 years
- *	of run time before overflow occurs.
+ *	this allows a couple of hundredd years of run
+ *	time before overflow occurs.
  */
 static uint64_t syscall_time_now(void)
 {
+#if defined(HAVE_CLOCK_GETTIME)
 	static struct timespec base_ts = { 0, 0 };
 	struct timespec ts;
-	uint64_t sec, ns;
+	int64_t sec, ns;
 
 	syscall_errno = errno;
 	if (UNLIKELY(clock_gettime(CLOCK_MONOTONIC, &ts) < 0))
-		return 0.0;
+		return 0;
 	if (base_ts.tv_sec == 0)
 		base_ts = ts;	/* first call, save the baseline time */
 
 	/* now return time delta since baseline time */
 	ns = ts.tv_nsec - base_ts.tv_nsec;
 	sec = (ts.tv_sec - base_ts.tv_sec) * 1000000000;
-	return sec + ns;
+	return (uint64_t)sec + ns;
+#else
+	static struct timeval base_tv = { 0, 0 };
+	struct timeval tv;
+	int64_t sec, ns;
+
+        if (gettimeofday(&tv, NULL) < 0)
+		return 0;
+	if (base_tv.tv_sec == 0)
+		base_tv = tv;
+	ns = (tv.tv_usec - base_tv.tv_usec) * 1000;
+	sec = (tv.tv_sec - base_tv.tv_sec) * 1000000000;
+	return (uint64_t)sec + ns;
+#endif
 }
 
 static const stress_help_t help[] = {
@@ -545,39 +565,6 @@ static const syscall_method_t syscall_methods[] = {
 	{ "geomean2",	SYSCALL_METHOD_GEOMEAN2 },
 	{ "geomean3",	SYSCALL_METHOD_GEOMEAN3 },
 };
-
-/*
- *  stress_syscall_method()
- *	set the method of testing some or all of the system calls
- */
-static int stress_set_syscall_method(const char *opt)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(syscall_methods); i++) {
-		if (!strcmp(syscall_methods[i].opt, opt)) {
-			stress_set_setting("syscall-method", TYPE_ID_INT, &syscall_methods[i].method);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "syscall-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(syscall_methods); i++) {
-		(void)fprintf(stderr, " %s", syscall_methods[i].opt);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
-static int stress_set_syscall_top(const char *opt)
-{
-	size_t syscall_top;
-
-	syscall_top = (size_t)stress_get_uint32(opt);
-	stress_check_range("syscall-top", (uint64_t)syscall_top, 0, (uint64_t)1000);
-	return stress_set_setting("syscall-top", TYPE_ID_SIZE_T, &syscall_top);
-}
 
 #if defined(HAVE_SYS_UN_H) &&	\
     defined(AF_UNIX)
@@ -823,7 +810,7 @@ close_sfd:
 		}
 		(void)close(sfd);
 reap_child:
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 	t1 = syscall_shared_info->t1;
 	t2 = syscall_shared_info->t2;
@@ -923,7 +910,7 @@ static int syscall_alarm(void)
 	} else {
 		int status;
 
-		(void)waitpid(pid, &status, 0);
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 		t1 = syscall_shared_info->t1;
 		t2 = syscall_shared_info->t2;
 		ret = syscall_shared_info->syscall_ret;
@@ -1083,7 +1070,7 @@ static int syscall_chroot(void)
 	} else {
 		int status;
 
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 		t1 = syscall_shared_info->t1;
 		t2 = syscall_shared_info->t2;
 		syscall_errno = syscall_shared_info->syscall_errno;
@@ -1102,14 +1089,14 @@ static int syscall_clock_adjtime(void)
 	shim_timex_t t;
 	static size_t i = 0;
 	int ret;
-	const int clock = clocks[i];
+	const int clock_id = clocks[i];
 
 	(void)shim_memset(&t, 0, sizeof(t));
 	i++;
 	if (i >= SIZEOF_ARRAY(clocks))
 		i = 0;
 	t1 = syscall_time_now();
-	ret = shim_clock_adjtime(clock, &t);
+	ret = shim_clock_adjtime(clock_id, &t);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -1122,13 +1109,13 @@ static int syscall_clock_getres(void)
 	struct timespec t;
 	static size_t i = 0;
 	int ret;
-	const int clock = clocks[i];
+	const int clock_id = clocks[i];
 
 	i++;
 	if (i >= SIZEOF_ARRAY(clocks))
 		i = 0;
 	t1 = syscall_time_now();
-	ret = shim_clock_getres(clock, &t);
+	ret = shim_clock_getres(clock_id, &t);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -1141,13 +1128,13 @@ static int syscall_clock_gettime(void)
 	struct timespec t;
 	static size_t i = 0;
 	int ret;
-	const int clock = clocks[i];
+	const int clock_id = clocks[i];
 
 	i++;
 	if (i >= SIZEOF_ARRAY(clocks))
 		i = 0;
 	t1 = syscall_time_now();
-	ret = shim_clock_gettime(clock, &t);
+	ret = shim_clock_gettime(clock_id, &t);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -1197,16 +1184,16 @@ static int syscall_clock_settime(void)
 	struct timespec t;
 	static size_t i = 0;
 	int ret;
-	const int clock = clocks[i];
+	const int clock_id = clocks[i];
 
 	i++;
 	if (i >= SIZEOF_ARRAY(clocks))
 		i = 0;
-	ret = shim_clock_gettime(clock, &t);
+	ret = shim_clock_gettime(clock_id, &t);
 	if (ret < 0)
 		return -1;
 	t1 = syscall_time_now();
-	ret = shim_clock_settime(clock, &t);
+	ret = shim_clock_settime(clock_id, &t);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -1248,7 +1235,7 @@ static int syscall_clone(void)
 		    &parent_tid, NULL, &child_tid);
 	if (pid < 0)
 		return -1;
-	VOID_RET(int, waitpid(pid, &status, 0));
+	VOID_RET(pid_t, waitpid(pid, &status, 0));
 	t2 = syscall_shared_info->t2;
 	return pid;
 }
@@ -1290,7 +1277,7 @@ static int syscall_clone3(void)
 		syscall_shared_info->t_set = true;
 		_exit(0);
 	}
-	VOID_RET(int, waitpid(pid, &status, 0));
+	VOID_RET(pid_t, waitpid(pid, &status, 0));
 	t2 = syscall_shared_info->t2;
 	return pid;
 }
@@ -1612,7 +1599,7 @@ static int syscall_execve(void)
 	} else {
 		int status;
 
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 		t1 = syscall_shared_info->t1;
 		t2 = syscall_time_now();
 	}
@@ -1674,7 +1661,7 @@ static int syscall_execveat(void)
 	} else {
 		int status;
 
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 		t1 = syscall_shared_info->t1;
 		t2 = syscall_time_now();
 	}
@@ -1698,7 +1685,7 @@ static int syscall_exit(void)
 	} else {
 		int status;
 
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
 	}
@@ -1996,7 +1983,7 @@ static int syscall_fork(void)
 		int status;
 
 		t2 = syscall_time_now();
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 	return 0;
 }
@@ -2088,7 +2075,7 @@ static int syscall_futimes(void)
 }
 #endif
 
-#if defined(HAVE_FUTIMESAT)
+#if defined(HAVE_FUTIMESAT_DEPRECATED)
 #define HAVE_SYSCALL_FUTIMESAT
 static int syscall_futimesat(void)
 {
@@ -2142,7 +2129,7 @@ static int syscall_getdents(void)
 	struct shim_linux_dirent *buf;
 	const size_t ndents = 32;
 
-	buf = calloc(ndents, sizeof(*buf));
+	buf = (struct shim_linux_dirent *)calloc(ndents, sizeof(*buf));
 	if (!buf)
 		return -1;
 
@@ -2250,8 +2237,8 @@ static int syscall_getitimer(void)
 #define HAVE_SYSCALL_GET_MEMPOLICY
 static int syscall_get_mempolicy(void)
 {
-	unsigned long node_mask[NUMA_LONG_BITS];
-	unsigned long max_nodes = 1;
+	unsigned long int node_mask[NUMA_LONG_BITS];
+	unsigned long int max_nodes = 1;
 	int ret, mode;
 	void *buf;
 
@@ -2851,7 +2838,7 @@ static int syscall_io_uring_setup(void)
 
 	(void)shim_memset(&p, 0, sizeof(p));
 	t1 = syscall_time_now();
-	fd = syscall(__NR_io_uring_setup, (unsigned long)SIZEOF_ARRAY(p), &p);
+	fd = syscall(__NR_io_uring_setup, (unsigned long int)SIZEOF_ARRAY(p), &p);
 	t2 = syscall_time_now();
 	if (fd >= 0)
 		(void)close(fd);
@@ -2970,7 +2957,7 @@ static int syscall_kill(void)
 		ret = kill(pid, SIGKILL);
 		t2 = syscall_time_now();
 
-		(void)waitpid(pid, &status, 0);
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 #else
 	t1 = syscall_time_now();
@@ -3187,6 +3174,41 @@ static int syscall_lstat(void)
 	return ret;
 }
 
+#if defined(HAVE_LSM_GET_SELF_ATTR) && 	\
+    defined(LSM_ATTR_CURRENT)
+#define HAVE_SYSCALL_LSM_GET_SELF_ATTR
+static int syscall_lsm_get_self_attr(void)
+{
+	int ret;
+	char buf[4096];
+	struct lsm_ctx *ctx = (struct lsm_ctx *)buf;
+	size_t size = sizeof(buf);
+
+	t1 = syscall_time_now();
+	ret = lsm_get_self_attr(LSM_ATTR_CURRENT, ctx, &size, 0);
+	t2 = syscall_time_now();
+
+	return ret;
+}
+#endif
+
+#if defined(HAVE_LSM_LIST_MODULES)
+#define HAVE_SYSCALL_LSM_LIST_MODULES
+static int syscall_lsm_list_modules(void)
+{
+	int ret;
+	char buf[4096];
+	uint64_t *ids = (uint64_t *)buf;
+	size_t size = sizeof(buf);
+
+	t1 = syscall_time_now();
+	ret = lsm_list_modules(ids, &size, 0);
+	t2 = syscall_time_now();
+
+	return ret;
+}
+#endif
+
 #if defined(HAVE_MADVISE)
 #define HAVE_SYSCALL_MADVISE
 static int syscall_madvise(void)
@@ -3240,8 +3262,8 @@ static int syscall_map_shadow_stack(void)
 #define HAVE_SYSCALL_MBIND
 static int syscall_mbind(void)
 {
-	unsigned long node_mask[NUMA_LONG_BITS];
-	long ret;
+	unsigned long int node_mask[NUMA_LONG_BITS];
+	long int ret;
 	void *buf;
 
 	buf = mmap(NULL, syscall_page_size, PROT_READ | PROT_WRITE,
@@ -3297,9 +3319,9 @@ static int syscall_memfd_create(void)
 #define HAVE_SYSCALL_MIGRATE_PAGES
 static int syscall_migrate_pages(void)
 {
-	long ret;
-	unsigned long old_node_mask[NUMA_LONG_BITS];
-	unsigned long new_node_mask[NUMA_LONG_BITS];
+	long int ret;
+	unsigned long int old_node_mask[NUMA_LONG_BITS];
+	unsigned long int new_node_mask[NUMA_LONG_BITS];
 
 	(void)shim_memset(old_node_mask, 0, sizeof(old_node_mask));
 	STRESS_SETBIT(old_node_mask, 0);
@@ -3573,7 +3595,7 @@ static int syscall_mmap(void)
 #define HAVE_SYSCALL_MOVE_PAGES
 static int syscall_move_pages(void)
 {
-	long ret;
+	long int ret;
 	void *buf;
 	void *pages[1];
 	int status[1];
@@ -3993,7 +4015,7 @@ static int syscall_msgrcv(void)
 	int msgq_id, ret;
 
 	struct syscall_msgbuf {
-		long mtype;
+		long int mtype;
 		uint32_t value;
 	} msg_snd, msg_rcv;
 
@@ -4028,7 +4050,7 @@ static int syscall_msgsnd(void)
 	int msgq_id, ret;
 
 	struct syscall_msgbuf {
-		long mtype;
+		long int mtype;
 		uint32_t value;
 	} msg_snd;
 
@@ -4108,7 +4130,7 @@ static int syscall_name_to_handle_at(void)
 	int ret, mount_id;
 	struct file_handle *fhp, *tmp;
 
-	fhp = malloc(sizeof(*fhp));
+	fhp = (struct file_handle *)malloc(sizeof(*fhp));
 	if (!fhp)
 		return -1;
 
@@ -4153,12 +4175,11 @@ static int syscall_nanosleep(void)
 #define HAVE_SYSCALL_NICE
 static int syscall_nice(void)
 {
-	int ret;
-
 	t1 = syscall_time_now();
-	ret = nice(0);
+	VOID_RET(int, nice(0));
 	t2 = syscall_time_now();
-	return ret;
+
+	return errno ? -errno : 0;
 }
 
 #define HAVE_SYSCALL_OPEN
@@ -4212,7 +4233,7 @@ static int syscall_open_by_handle_at(void)
 	char buffer[5000];
 	char path[PATH_MAX + 1];
 
-	fhp = malloc(sizeof(*fhp));
+	fhp = (struct file_handle *)malloc(sizeof(*fhp));
 	if (!fhp)
 		return -1;
 
@@ -4287,14 +4308,15 @@ static int syscall_pause(void)
 		_exit(0);
 	} else {
 		for (;;) {
-			int status, ret;
+			pid_t ret;
+			int status;
 
 			VOID_RET(int, kill(pid, SIGUSR1));
 
 			ret = waitpid(pid, &status, WNOHANG);
 			if (ret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 	}
 	t1 = syscall_shared_info->t1;
@@ -4478,7 +4500,8 @@ static int syscall_pkey_set(void)
 }
 #endif
 
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 #define HAVE_SYSCALL_POLL
 static int syscall_poll(void)
 {
@@ -4515,7 +4538,7 @@ static int syscall_ppoll(void)
 {
 	struct pollfd fds[4];
 	struct timespec ts;
-	sigset_t sigset;
+	sigset_t sigmask;
 	int ret;
 
 	fds[0].fd = fileno(stdin);
@@ -4537,10 +4560,10 @@ static int syscall_ppoll(void)
 	ts.tv_sec = 0;
 	ts.tv_nsec = 1;
 
-	VOID_RET(int, sigemptyset(&sigset));
+	VOID_RET(int, sigemptyset(&sigmask));
 
 	t1 = syscall_time_now();
-	ret = ppoll(fds, SIZEOF_ARRAY(fds), &ts, &sigset);
+	ret = shim_ppoll(fds, SIZEOF_ARRAY(fds), &ts, &sigmask);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -4823,7 +4846,7 @@ static int syscall_pselect(void)
 	int fds[4], nfds = -1, ret;
 	size_t i;
 	struct timespec ts;
-	sigset_t sigset;
+	sigset_t sigmask;
 
 	fds[0] = fileno(stdin);
 	fds[1] = fileno(stdout);
@@ -4845,10 +4868,10 @@ static int syscall_pselect(void)
 	ts.tv_sec = 0;
 	ts.tv_nsec = 0;
 
-	VOID_RET(int, sigemptyset(&sigset));
+	VOID_RET(int, sigemptyset(&sigmask));
 
 	t1 = syscall_time_now();
-	ret = pselect(nfds + 1, &rd_set, &wr_set, NULL, &ts, &sigset);
+	ret = pselect(nfds + 1, &rd_set, &wr_set, NULL, &ts, &sigmask);
 	t2 = syscall_time_now();
 	return ret;
 }
@@ -5096,7 +5119,7 @@ static int syscall_rfork(void)
 		int status;
 
 		t2 = syscall_time_now();
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 	return 0;
 }
@@ -5258,9 +5281,9 @@ static int syscall_riscv_hwprobe(void)
 	};
 
 	int ret;
-	long i;
+	long int i;
 	struct shim_riscv_hwprobe pairs[8];
-	unsigned long cpus;
+	unsigned long int cpus;
 
 	for (i = 0; i < 8; i++)
                 pairs[i].key = i;
@@ -5341,6 +5364,7 @@ static int syscall_sched_getattr(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_GETPARAM
 static int syscall_sched_getparam(void)
@@ -5360,6 +5384,7 @@ static int syscall_sched_getparam(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_GET_PRIORITY_MAX
 static int syscall_sched_get_priority_max(void)
@@ -5382,6 +5407,7 @@ static int syscall_sched_get_priority_max(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_GET_PRIORITY_MIN
 static int syscall_sched_get_priority_min(void)
@@ -5404,6 +5430,7 @@ static int syscall_sched_get_priority_min(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_GETSCHEDULER
 static int syscall_sched_getscheduler(void)
@@ -5422,6 +5449,7 @@ static int syscall_sched_getscheduler(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_RR_GET_INTERVAL
 static int syscall_sched_rr_get_interval(void)
@@ -5479,6 +5507,7 @@ static int syscall_sched_setattr(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_SETPARAM
 static int syscall_sched_setparam(void)
@@ -5501,6 +5530,7 @@ static int syscall_sched_setparam(void)
      !defined(__OpenBSD__) &&						\
      !defined(__minix__) &&						\
      !defined(__APPLE__) &&						\
+     !defined(__HAIKU__) &&						\
      !defined(__serenity__)
 #define HAVE_SYSCALL_SCHED_SETSCHEDULER
 static int syscall_sched_setscheduler(void)
@@ -5549,7 +5579,7 @@ static int syscall_seccomp(void)
 	};
 
 	static struct sock_fprog prog_allow_all = {
-		.len = (unsigned short)SIZEOF_ARRAY(filter_allow_all),
+		.len = (unsigned short int)SIZEOF_ARRAY(filter_allow_all),
 		.filter = filter_allow_all
 	};
 	int ret;
@@ -5830,8 +5860,8 @@ static int syscall_setitimer(void)
 #define HAVE_SYSCALL_SET_MEMPOLICY
 static int syscall_set_mempolicy(void)
 {
-	unsigned long node_mask[NUMA_LONG_BITS];
-	unsigned long max_nodes = 1;
+	unsigned long int node_mask[NUMA_LONG_BITS];
+	unsigned long int max_nodes = 1;
 	int ret, mode;
 	void *buf;
 
@@ -6362,17 +6392,18 @@ static int syscall_sigsuspend(void)
 		int status;
 
 		do {
+			pid_t wret;
 
 			VOID_RET(int, kill(pid, SIGUSR1));
 
-			ret = waitpid(pid, &status, WNOHANG);
-			if (ret == pid)
+			wret = waitpid(pid, &status, WNOHANG);
+			if (wret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		} while (stress_continue_flag());
 
 		VOID_RET(int, kill(pid, SIGKILL));
-		VOID_RET(int, waitpid(pid, &status, WNOHANG));
+		VOID_RET(pid_t, waitpid(pid, &status, WNOHANG));
 	}
 	t1 = syscall_shared_info->t1;
 	t2 = syscall_shared_info->t2;
@@ -6655,22 +6686,28 @@ static int syscall_tee(void)
 
 	if (pipe(fd1) < 0)
 		return -1;
-	if (pipe(fd2) < 0)
-		return -1;
+	if (pipe(fd2) < 0) {
+		ret = -1;
+		goto close_fd1;
+	}
 
 	sret = write(fd1[1], "test", 4);
-	if (sret < 0)
-		return -1;
+	if (sret < 0) {
+		ret = -1;
+		goto close_fd2;
+	}
 	t1 = syscall_time_now();
 	ret = tee(fd1[0], fd2[1], 1, SPLICE_F_NONBLOCK);
 	t2 = syscall_time_now();
 	sret = read(fd2[0], buf, 4);
 	if (sret < 0)
 		ret = -1;
-	(void)close(fd1[0]);
-	(void)close(fd1[1]);
+close_fd2:
 	(void)close(fd2[0]);
 	(void)close(fd2[1]);
+close_fd1:
+	(void)close(fd1[0]);
+	(void)close(fd1[1]);
 	return ret;
 }
 #endif
@@ -7087,7 +7124,7 @@ static int syscall_unshare(void)
 		    &parent_tid, NULL, &child_tid);
 	if (pid < 0)
 		return -1;
-	VOID_RET(int, waitpid(pid, &status, 0));
+	VOID_RET(pid_t, waitpid(pid, &status, 0));
 	t1 = syscall_shared_info->t1;
 	t2 = syscall_shared_info->t2;
 
@@ -7186,7 +7223,7 @@ static int syscall_vfork(void)
 		int status;
 
 		t2 = syscall_time_now();
-		VOID_RET(int, waitpid(pid, &status, 0));
+		VOID_RET(pid_t, waitpid(pid, &status, 0));
 	}
 	return 0;
 }
@@ -7246,7 +7283,7 @@ static int syscall_waitid(void)
 			ret = waitid(P_PID, pid, &info, WEXITED);
 			if ((ret == 0) && (info.si_pid == pid))
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
@@ -7274,7 +7311,7 @@ static int syscall_wait(void)
 			ret = wait(&status);
 			if (ret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
@@ -7303,7 +7340,7 @@ static int syscall_wait3(void)
 			ret = wait3(&status, 0, &usage);
 			if (ret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
@@ -7333,7 +7370,7 @@ static int syscall_wait4(void)
 			ret = wait4(pid, &status, 0, &usage);
 			if (ret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
@@ -7358,12 +7395,12 @@ static int syscall_waitpid(void)
 		int status;
 
 		for (;;) {
-			int ret;
+			pid_t ret;
 
 			ret = waitpid(pid, &status, 0);
 			if (ret == pid)
 				break;
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 		t2 = syscall_time_now();
 		t1 = syscall_shared_info->t1;
@@ -7799,6 +7836,12 @@ static const syscall_t syscalls[] = {
 #endif
 #if defined(HAVE_SYSCALL_LSTAT)
 	SYSCALL(syscall_lstat),
+#endif
+#if defined(HAVE_SYSCALL_LSM_GET_SELF_ATTR)
+	SYSCALL(syscall_lsm_get_self_attr),
+#endif
+#if defined(HAVE_SYSCALL_LSM_LIST_MODULES)
+	SYSCALL(syscall_lsm_list_modules),
 #endif
 #if defined(HAVE_SYSCALL_MADVISE)
 	SYSCALL(syscall_madvise),
@@ -8516,17 +8559,19 @@ static void stress_syscall_report_syscall_top10(stress_args_t *args)
 	pr_block_begin();
 	pr_inf("%s: Top %zu fastest system calls (timings in nanosecs):\n",
 		args->name, syscall_top);
-	pr_inf("%s: %25s %10s %10s\n", args->name, "System Call", "Avg (ns)", "Min (ns)");
+	pr_inf("%s: %25s %10s %10s %10s\n", args->name,
+		"System Call", "Avg (ns)", "Min (ns)", "Max (ns)");
 	for (i = 0; i < syscall_top; i++) {
 		const size_t j = sort_index[i];
 		syscall_stats_t *ss = &syscall_stats[j];
 
 		if (ss->succeed) {
-			pr_inf("%s: %25s %10.1f %10" PRIu64 "\n",
+			pr_inf("%s: %25s %10.1f %10" PRIu64 " %10" PRIu64 "\n",
 				args->name,
 				syscalls[j].name,
 				ss->total_duration / (double)ss->count,
-				ss->min_duration);
+				ss->min_duration,
+				ss->max_duration);
 		}
 	}
 	pr_block_end();
@@ -8667,6 +8712,8 @@ static void stress_syscall_benchmark_calls(stress_args_t *args)
 		if ((d > 0) && (ret >= 0) && (t1 != ~0ULL) && (t2 != ~0ULL)) {
 			if (ss->min_duration > d)
 				ss->min_duration = d;
+			if (ss->max_duration < d)
+				ss->max_duration = d;
 			ss->total_duration += (double)d;
 			ss->succeed = true;
 			ss->count++;
@@ -8690,7 +8737,7 @@ static int stress_syscall(stress_args_t *args)
 
 	(void)stress_get_setting("syscall-method", &syscall_method);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		for (i = 0; i < SIZEOF_ARRAY(syscall_methods); i++) {
 			if (syscall_method == syscall_methods[i].method) {
 				pr_inf("%s: using method '%s'\n", args->name, syscall_methods[i].opt);
@@ -8742,7 +8789,9 @@ static int stress_syscall(stress_args_t *args)
 	syscall_2_pages = mmap(NULL, args->page_size * 2, PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (syscall_2_pages == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate 2 pages, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), "
+			"skipping stressor\n", args->name, args->page_size * 2,
+			stress_get_memfree_str(), errno, strerror(errno));
 		goto err_rmdir;
 	}
 	stress_uint8rnd4(syscall_2_pages, syscall_2_pages_size);
@@ -8752,7 +8801,9 @@ static int stress_syscall(stress_args_t *args)
 				PROT_READ | PROT_WRITE,
 				MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (syscall_shared_info == MAP_FAILED) {
-		pr_inf_skip("%s: failed to allocate single page, skipping stressor\n", args->name);
+		pr_inf_skip("%s: failed to mmap %zu bytes%s, errno=%d (%s), "
+			"skipping stressor\n", args->name, sizeof(*syscall_shared_info),
+			stress_get_memfree_str(), errno, strerror(errno));
 		goto err_unmap_syscall_page;
 	}
 
@@ -8773,6 +8824,7 @@ static int stress_syscall(stress_args_t *args)
 		ss->total_duration = 0.0;
 		ss->count = 0ULL;
 		ss->min_duration = ~0ULL;
+		ss->max_duration = 0ULL;
 		ss->max_test_duration = 0ULL;
 		ss->succeed = false;
 		ss->ignore = false;
@@ -8780,6 +8832,8 @@ static int stress_syscall(stress_args_t *args)
 
 	syscall_brk_addr = shim_sbrk(0);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
@@ -8811,7 +8865,7 @@ static int stress_syscall(stress_args_t *args)
 			exercised++;
 	}
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_inf("%s: %zd system call tests, %zd (%.1f%%) fastest non-failing tests fully exercised\n",
 			args->name, STRESS_SYSCALLS_MAX, exercised,
 			(double)exercised * 100.0 / (double)STRESS_SYSCALLS_MAX);
@@ -8843,15 +8897,20 @@ err_close_dir_fd:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_syscall_method, 	stress_set_syscall_method },
-	{ OPT_syscall_top,	stress_set_syscall_top },
-	{ 0,			NULL },
+static const char *stress_syscall_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(syscall_methods)) ? syscall_methods[i].opt : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_syscall_method, "syscall-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_syscall_method },
+	{ OPT_syscall_top,    "syscall-top",    TYPE_ID_SIZE_T, 0, 1000, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_syscall_info = {
+const stressor_info_t stress_syscall_info = {
 	.stressor = stress_syscall,
-	.class = CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help
 };

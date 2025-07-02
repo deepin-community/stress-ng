@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -73,16 +73,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_nanosleep_threads(const char *opt)
-{
-	uint32_t nanosleep_threads;
-
-	nanosleep_threads = stress_get_uint32(opt);
-	stress_check_range("nanosleep_threads", nanosleep_threads,
-		MIN_NANOSLEEP_THREADS, MAX_NANOSLEEP_THREADS);
-	return stress_set_setting("nanosleep-threads", TYPE_ID_UINT32, &nanosleep_threads);
-}
-
 static const stress_nanosleep_method_t stress_nanosleep_methods[] = {
 	{ "all",	STRESS_NANOSLEEP_ALL },
 	{ "cstate",	STRESS_NANOSLEEP_CSTATE },
@@ -92,34 +82,15 @@ static const stress_nanosleep_method_t stress_nanosleep_methods[] = {
 	{ "ms",		STRESS_NANOSLEEP_MS },
 };
 
-/*
- *  stress_set_nanosleep_method()
- *	set the default nanosleep time method
- */
-static int stress_set_nanosleep_method(const char *name)
+static const char *stress_nanosleep_method(const size_t i)
 {
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(stress_nanosleep_methods); i++) {
-		if (!strcmp(stress_nanosleep_methods[i].name, name)) {
-			stress_set_setting("stress-nanosleep-method", TYPE_ID_INT, &stress_nanosleep_methods[i].mask);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "nanosleep-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(stress_nanosleep_methods); i++) {
-		(void)fprintf(stderr, " %s", stress_nanosleep_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	return (i < SIZEOF_ARRAY(stress_nanosleep_methods)) ? stress_nanosleep_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_nanosleep_threads,	stress_set_nanosleep_threads },
-	{ OPT_nanosleep_method,		stress_set_nanosleep_method },
-	{ 0,				NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_nanosleep_threads, "nanosleep-threads", TYPE_ID_UINT32, MIN_NANOSLEEP_THREADS, MAX_NANOSLEEP_THREADS, NULL },
+	{ OPT_nanosleep_method,  "nanosleep-method",  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_nanosleep_method },
+	END_OPT,
 };
 
 #if defined(HAVE_LIB_PTHREAD)
@@ -135,7 +106,7 @@ static void MLOCKED_TEXT stress_sigalrm_handler(int signum)
  *  stress_nanosleep_ns()
  *	nanosleep for a given number of nanoseconds
  */
-static int stress_nanosleep_ns(stress_ctxt_t *ctxt, const long nsec)
+static int stress_nanosleep_ns(stress_ctxt_t *ctxt, const long int nsec)
 {
 	struct timespec tv;
 #if defined(HAVE_CLOCK_GETTIME) &&	\
@@ -150,7 +121,7 @@ static int stress_nanosleep_ns(stress_ctxt_t *ctxt, const long nsec)
 		struct timespec t2;
 
 		if (clock_gettime(CLOCK_MONOTONIC, &t2) == 0) {
-			long long dt_nsec;
+			long long int dt_nsec;
 
 			dt_nsec = (t2.tv_sec - t1.tv_sec) * 1000000000;
 			dt_nsec += t2.tv_nsec - t1.tv_nsec;
@@ -184,26 +155,26 @@ static int stress_nanosleep_ns(stress_ctxt_t *ctxt, const long nsec)
  */
 static void *stress_nanosleep_pthread(void *c)
 {
-	static void *nowt = NULL;
 	stress_ctxt_t *ctxt = (stress_ctxt_t *)c;
 	stress_args_t *args = ctxt->args;
 
 	while (stress_continue(args) &&
 	       !thread_terminate &&
 	       (!ctxt->max_ops || (ctxt->counter < ctxt->max_ops))) {
-		register unsigned long i;
 		cpu_cstate_t *cc;
 
 		if (ctxt->mask & STRESS_NANOSLEEP_CSTATE) {
 			for (cc = ctxt->cstate_list; cc; cc = cc->next) {
 				if (cc->residency > 0)
-					stress_nanosleep_ns(ctxt, 1000 * (long)(cc->residency + 1));
+					stress_nanosleep_ns(ctxt, 1000 * (long int)(cc->residency + 1));
 			}
 		}
 		if (ctxt->mask & STRESS_NANOSLEEP_RANDOM) {
+			register unsigned long int i;
+
 			for (i = 1 << 18; i > 0; i >>=1) {
-				register const unsigned long mask = (i - 1);
-				long nsec = (long)(stress_mwc32() & mask) + 8;
+				register const unsigned long int mask = (i - 1);
+				register const long int nsec = (long int)(stress_mwc32() & mask) + 8;
 
 				if (stress_nanosleep_ns(ctxt, nsec) < 0)
 					break;
@@ -218,7 +189,7 @@ static void *stress_nanosleep_pthread(void *c)
 
 		ctxt->counter++;
 	}
-	return &nowt;
+	return &g_nowt;
 }
 
 /*
@@ -242,17 +213,22 @@ static int stress_nanosleep(stress_args_t *args)
 #endif
 	cpu_cstate_t *cstate_list = stress_cpuidle_cstate_list_head();
 
-	(void)stress_get_setting("nanosleep-threads", &nanosleep_threads);
-	max_ops = args->max_ops ? (args->max_ops / nanosleep_threads) + 1 : 0;
+	if (!stress_get_setting("nanosleep-threads", &nanosleep_threads)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			nanosleep_threads = MAX_NANOSLEEP_THREADS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			nanosleep_threads = MIN_NANOSLEEP_THREADS;
+	}
+	max_ops = args->bogo.max_ops ? (args->bogo.max_ops / nanosleep_threads) + 1 : 0;
 
 	(void)stress_get_setting("stress-nanosleep-method", &mask);
 	if (mask & STRESS_NANOSLEEP_CSTATE) {
 		if (cstate_list == NULL) {
-			if (args->instance == 0)
-				pr_inf("%s: no C states found, using just random nanosleeps instead\n", args->name);
+			if (stress_instance_zero(args))
+				pr_inf("%s: no C states found, using random nanosleeps instead\n", args->name);
 			mask = STRESS_NANOSLEEP_RANDOM;
 		} else {
-			if ((args->instance == 0) &&
+			if (stress_instance_zero(args) &&
 			    ((mask & ~STRESS_NANOSLEEP_CSTATE) == 0) &&
 			    (nanosleep_threads > 1)) {
 				pr_inf("%s: nanosleep-method cstate exercises C "
@@ -265,11 +241,12 @@ static int stress_nanosleep(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGALRM, stress_sigalrm_handler, NULL) < 0)
 		return EXIT_FAILURE;
 
-	ctxts = calloc(nanosleep_threads, sizeof(*ctxts));
+	ctxts = (stress_ctxt_t *)calloc(nanosleep_threads, sizeof(*ctxts));
 	if (!ctxts) {
 		pr_inf_skip("%s: could not allocate context for %" PRIu32
-			" pthreads, skipping stressor\n",
-			args->name, nanosleep_threads);
+			" pthreads%s, skipping stressor\n",
+			args->name, nanosleep_threads,
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
@@ -304,10 +281,12 @@ static int stress_nanosleep(stress_args_t *args)
 			goto tidy;
 		}
 		/* Timed out? abort! */
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			goto tidy;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -332,7 +311,7 @@ tidy:
 	overhead_nsec = 0.0;
 	for (i = 0; i < benchmark_loops; i++) {
 		struct timespec t1, t2;
-		long long dt_nsec;
+		long long int dt_nsec;
 
 		(void)clock_gettime(CLOCK_MONOTONIC, &t1);
 		(void)clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -364,11 +343,11 @@ tidy:
 	overrun_nsec -= overhead_nsec;
 	overrun_nsec = (overrun_count > 0.0) ? overrun_nsec / overrun_count : 0.0;
 	stress_metrics_set(args, 0, "nanosec sleep overrun",
-		overrun_nsec, STRESS_GEOMETRIC_MEAN);
+		overrun_nsec, STRESS_METRIC_GEOMETRIC_MEAN);
 	underrun_nsec -= overhead_nsec;
 	underrun_nsec = (underrun_count > 0.0) ? underrun_nsec / underrun_count : 0.0;
 	stress_metrics_set(args, 1, "nanosec sleep underrun",
-		underrun_nsec, STRESS_GEOMETRIC_MEAN);
+		underrun_nsec, STRESS_METRIC_GEOMETRIC_MEAN);
 #endif
 
 	if (limited) {
@@ -385,18 +364,18 @@ tidy:
 	return ret;
 }
 
-stressor_info_t stress_nanosleep_info = {
+const stressor_info_t stress_nanosleep_info = {
 	.stressor = stress_nanosleep,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_nanosleep_info = {
+const stressor_info_t stress_nanosleep_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without pthread, librt or nanosleep() system call support"

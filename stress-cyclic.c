@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,13 +21,21 @@
 #include "core-builtin.h"
 #include "core-capabilities.h"
 #include "core-killpid.h"
+#include "core-lock.h"
 
+#include <math.h>
 #include <sched.h>
+#include <time.h>
 
 #define DEFAULT_DELAY_NS	(100000)
 #define MAX_SAMPLES		(100000000)
 #define DEFAULT_SAMPLES		(10000)
 #define MAX_BUCKETS		(250)
+
+typedef struct {
+	void *lock;			/* lock protecting count */
+	uint32_t count;			/* count of error messages emitted */
+} stress_cyclic_state_t;
 
 typedef struct {
 	const int	policy;		/* scheduler policy */
@@ -70,7 +78,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static const stress_policy_t policies[] = {
+static stress_cyclic_state_t *stress_cyclic_state = MAP_FAILED;
+
+static const stress_policy_t cyclic_policies[] = {
 #if defined(SCHED_DEADLINE)
 	{ SCHED_DEADLINE, "SCHED_DEADLINE",  "deadline" },
 #endif
@@ -82,61 +92,30 @@ static const stress_policy_t policies[] = {
 #endif
 };
 
-static const size_t num_policies = SIZEOF_ARRAY(policies);
+#define NUM_CYCLIC_POLICIES	(SIZEOF_ARRAY(cyclic_policies))
 
-static int stress_set_cyclic_sleep(const char *opt)
+static void stress_cyclic_init(const uint32_t instances)
 {
-	uint64_t cyclic_sleep;
+	(void)instances;
 
-	cyclic_sleep = stress_get_uint64(opt);
-	stress_check_range("cyclic-sleep", cyclic_sleep,
-		1, STRESS_NANOSECOND);
-	return stress_set_setting("cyclic-sleep", TYPE_ID_UINT64, &cyclic_sleep);
+	stress_cyclic_state = (stress_cyclic_state_t *)
+		stress_mmap_populate(NULL, sizeof(*stress_cyclic_state),
+				PROT_READ | PROT_WRITE,
+				MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	if (stress_cyclic_state == MAP_FAILED)
+		return;
+
+	stress_set_vma_anon_name(stress_cyclic_state, sizeof(*stress_cyclic_state), "cyclic-state");
+	stress_cyclic_state->lock = stress_lock_create("cyclic-state");
 }
 
-static int stress_set_cyclic_policy(const char *opt)
+static void stress_cyclic_deinit(void)
 {
-	size_t policy;
-
-	for (policy = 0; policy < num_policies; policy++) {
-		if (!strcmp(opt, policies[policy].opt_name)) {
-			stress_set_setting("cyclic-policy", TYPE_ID_SIZE_T, &policy);
-			return 0;
-		}
+	if (stress_cyclic_state != MAP_FAILED) {
+		if (stress_cyclic_state->lock)
+			stress_lock_destroy(stress_cyclic_state->lock);
+		(void)munmap((void *)stress_cyclic_state, sizeof(*stress_cyclic_state));
 	}
-	(void)fprintf(stderr, "invalid cyclic-policy '%s', policies allowed are:", opt);
-	for (policy = 0; policy < num_policies; policy++) {
-		(void)fprintf(stderr, " %s", policies[policy].opt_name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-static int stress_set_cyclic_prio(const char *opt)
-{
-	int32_t cyclic_prio;
-
-	cyclic_prio = stress_get_int32(opt);
-	stress_check_range("cyclic-prio", (uint64_t)cyclic_prio, 1, 100);
-	return stress_set_setting("cyclic-prio", TYPE_ID_INT32, &cyclic_prio);
-}
-
-static int stress_set_cyclic_dist(const char *opt)
-{
-	uint64_t cyclic_dist;
-
-	cyclic_dist = stress_get_uint64(opt);
-	stress_check_range("cyclic-dist", cyclic_dist, 1, 10000000);
-	return stress_set_setting("cyclic-dist", TYPE_ID_UINT64, &cyclic_dist);
-}
-
-static int stress_set_cyclic_samples(const char *opt)
-{
-	size_t cyclic_samples;
-
-	cyclic_samples = (size_t)stress_get_uint64(opt);
-	stress_check_range("cyclic-samples", cyclic_samples, 1, MAX_SAMPLES);
-	return stress_set_setting("cyclic-samples", TYPE_ID_SIZE_T, &cyclic_samples);
 }
 
 #if (defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_NANOSLEEP)) ||	\
@@ -186,7 +165,7 @@ static int stress_cyclic_clock_nanosleep(
 	(void)clock_gettime(CLOCK_REALTIME, &t1);
 	ret = clock_nanosleep(CLOCK_REALTIME, 0, &t, &trem);
 	(void)clock_gettime(CLOCK_REALTIME, &t2);
-	if (ret == 0)
+	if (LIKELY(ret == 0))
 		stress_cyclic_stats(rt_stats, cyclic_sleep, &t1, &t2);
 	return 0;
 }
@@ -215,7 +194,7 @@ static int stress_cyclic_posix_nanosleep(
 	(void)clock_gettime(CLOCK_REALTIME, &t1);
 	ret = nanosleep(&t, &trem);
 	(void)clock_gettime(CLOCK_REALTIME, &t2);
-	if (ret == 0)
+	if (LIKELY(ret == 0))
 		stress_cyclic_stats(rt_stats, cyclic_sleep, &t1, &t2);
 	return 0;
 }
@@ -291,7 +270,7 @@ static int stress_cyclic_pselect(
 	(void)clock_gettime(CLOCK_REALTIME, &t1);
 	ret = pselect(0, NULL, NULL,NULL, &t, NULL);
 	(void)clock_gettime(CLOCK_REALTIME, &t2);
-	if (ret == 0)
+	if (LIKELY(ret == 0))
 		stress_cyclic_stats(rt_stats, cyclic_sleep, &t1, &t2);
 	return 0;
 }
@@ -396,7 +375,7 @@ static int stress_cyclic_usleep(
 	(void)clock_gettime(CLOCK_REALTIME, &t1);
 	ret = usleep(usecs);
 	(void)clock_gettime(CLOCK_REALTIME, &t2);
-	if (ret == 0)
+	if (LIKELY(ret == 0))
 		stress_cyclic_stats(rt_stats, cyclic_sleep, &t1, &t2);
 	return 0;
 }
@@ -449,7 +428,7 @@ static void stress_rt_stats(stress_rt_stats_t *rt_stats)
 	rt_stats->latency_mode = 0;
 
 	for (i = 0; i < rt_stats->index; i++) {
-		int64_t ns = rt_stats->latencies[i];
+		const int64_t ns = rt_stats->latencies[i];
 
 		if (ns > rt_stats->max_ns)
 			rt_stats->max_ns = ns;
@@ -466,7 +445,7 @@ static void stress_rt_stats(stress_rt_stats_t *rt_stats)
 	current = rt_stats->latency_mode = rt_stats->latencies[0];
 
 	for (i = 0; i < rt_stats->index; i++) {
-		int64_t ns = rt_stats->latencies[i];
+		const int64_t ns = rt_stats->latencies[i];
 		double diff;
 
 		if (ns == current) {
@@ -523,29 +502,7 @@ static const stress_cyclic_method_info_t cyclic_methods[] = {
 #endif
 };
 
-/*
- *  stress_set_cyclic_method()
- *	set the default cyclic method
- */
-static int stress_set_cyclic_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(cyclic_methods); i++) {
-		if (!strcmp(cyclic_methods[i].name, name)) {
-			stress_set_setting("cyclic-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "cyclic-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(cyclic_methods); i++) {
-		(void)fprintf(stderr, " %s", cyclic_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
+#define NUM_CYCLIC_METHODS	(SIZEOF_ARRAY(cyclic_methods))
 
 /*
  *  stress_rt_dist()
@@ -573,7 +530,7 @@ static void stress_rt_dist(
 	}
 
 	for (i = 0; i < (ssize_t)rt_stats->index; i++) {
-		int64_t lat = rt_stats->latencies[i] / cyclic_dist;
+		const int64_t lat = rt_stats->latencies[i] / cyclic_dist;
 
 		if (lat < (int64_t)dist_size)
 			dist[lat]++;
@@ -628,7 +585,7 @@ static int stress_cyclic_supported(const char *name)
 
 static int stress_cyclic(stress_args_t *args)
 {
-	const uint32_t num_instances = args->num_instances;
+	const uint32_t instances = args->instances;
 	struct sigaction old_action_xcpu;
 	struct rlimit rlim;
 	pid_t pid;
@@ -637,7 +594,8 @@ static int stress_cyclic(stress_args_t *args)
 	uint64_t cyclic_dist = 0;
 	int32_t cyclic_prio = INT32_MAX;
 	size_t cyclic_samples = DEFAULT_SAMPLES;
-	int policy, rc = EXIT_SUCCESS;
+	NOCLOBBER int policy;
+	int rc = EXIT_SUCCESS;
 	size_t cyclic_policy = 0;
 	size_t cyclic_method = 0;
 	const double start = stress_time_now();
@@ -654,17 +612,39 @@ static int stress_cyclic(stress_args_t *args)
 	(void)stress_get_setting("cyclic-samples", &cyclic_samples);
 	(void)stress_get_setting("cyclic-sleep", &cyclic_sleep);
 
-	func = cyclic_methods[cyclic_method].func;
-	policy = policies[cyclic_policy].policy;
-
-	if (!args->instance) {
-		if (num_policies == 0) {
+	if (NUM_CYCLIC_POLICIES == 0) {
+		if (!args->instance) {
 			pr_inf_skip("%s: no scheduling policies "
 				"available, skipping test\n",
 				args->name);
-			return EXIT_NOT_IMPLEMENTED;
 		}
+		return EXIT_NOT_IMPLEMENTED;
 	}
+	if ((ssize_t)cyclic_policy >= (ssize_t)NUM_CYCLIC_POLICIES) {
+		if (!args->instance) {
+			pr_err("%s: cyclic-policy %zu is out of range\n",
+				args->name, cyclic_policy);
+		}
+		return EXIT_FAILURE;
+	}
+	if (NUM_CYCLIC_METHODS == 0) {
+		if (!args->instance) {
+			pr_inf_skip("%s: no cyclic methods"
+				"available, skipping test\n",
+				args->name);
+		}
+		return EXIT_NOT_IMPLEMENTED;
+	}
+	if ((ssize_t)cyclic_method >= (ssize_t)NUM_CYCLIC_METHODS) {
+		if (!args->instance) {
+			pr_err("%s: cyclic-method %zu is out of range\n",
+				args->name, cyclic_method);
+		}
+		return EXIT_FAILURE;
+	}
+
+	func = cyclic_methods[cyclic_method].func;
+	policy = cyclic_policies[cyclic_policy].policy;
 
 	if (g_opt_timeout == TIMEOUT_NOT_SET) {
 		timeout = 60;
@@ -672,7 +652,7 @@ static int stress_cyclic(stress_args_t *args)
 			"be %" PRIu64 " seconds\n", args->name, timeout);
 	}
 
-	if ((num_instances > 1) && (args->instance == 0)) {
+	if ((instances > 1) && (stress_instance_zero(args))) {
 		pr_inf("%s: for best results, run just 1 instance of "
 			"this stressor\n", args->name);
 	}
@@ -681,10 +661,12 @@ static int stress_cyclic(stress_args_t *args)
 						PROT_READ | PROT_WRITE,
 						MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (rt_stats == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of shared statistics data failed: %d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: mmap of shared statistics data failed%s, errno=%d (%s)\n",
+			args->name, stress_get_memfree_str(),
+			errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(rt_stats, size, "rt-statistics");
 	rt_stats->cyclic_samples = cyclic_samples;
 	rt_stats->latencies_size = cyclic_samples * sizeof(*rt_stats->latencies);
 	rt_stats->latencies = (int64_t *)stress_mmap_populate(NULL,
@@ -692,11 +674,13 @@ static int stress_cyclic(stress_args_t *args)
 						PROT_READ | PROT_WRITE,
 						MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (rt_stats->latencies == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of %zd samples failed: %d (%s)\n",
-			args->name, cyclic_samples, errno, strerror(errno));
+		pr_inf_skip("%s: mmap of %zu samples failed%s, errno=%d (%s)\n",
+			args->name, cyclic_samples, stress_get_memfree_str(),
+			errno, strerror(errno));
 		(void)munmap((void *)rt_stats, size);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(rt_stats->latencies, rt_stats->latencies_size, "latencies");
 	rt_stats->min_ns = INT64_MAX;
 	rt_stats->max_ns = INT64_MIN;
 	rt_stats->ns = 0.0;
@@ -718,9 +702,11 @@ static int stress_cyclic(stress_args_t *args)
 		}
 	}
 
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_dbg("%s: using method '%s'\n", args->name, cyclic_methods[cyclic_method].name);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 again:
@@ -728,7 +714,7 @@ again:
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			goto finish;
 		pr_inf("%s: cannot fork, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -782,35 +768,44 @@ redo_policy:
 			 *  which users the older and smaller attr structure.
 			 */
 			if ((errno == E2BIG) &&
-			    (policies[cyclic_policy].policy == SCHED_DEADLINE)) {
+			    (cyclic_policies[cyclic_policy].policy == SCHED_DEADLINE)) {
 				cyclic_policy = 1;
-				if (cyclic_policy >= SIZEOF_ARRAY(policies)) {
+				if ((ssize_t)cyclic_policy >= (ssize_t)NUM_CYCLIC_POLICIES) {
 					pr_inf("%s: DEADLINE not supported by kernel, no other policies "
 						"available. skipping stressor\n", args->name);
 					ncrc = EXIT_NO_RESOURCE;
 					goto finish;
 				}
-				policy = policies[cyclic_policy].policy;
+				policy = cyclic_policies[cyclic_policy].policy;
 #if defined(HAVE_SCHED_GET_PRIORITY_MAX)
 				rt_stats->max_prio = sched_get_priority_max(policy);
 #else
 				rt_stats->max_prio = 0;
 #endif
 				pr_inf("%s: DEADLINE not supported by kernel, defaulting to %s\n",
-					args->name, policies[cyclic_policy].name);
+					args->name, cyclic_policies[cyclic_policy].name);
 				goto redo_policy;
 			}
 #endif
 			if (errno != EPERM) {
+				uint32_t count = 0;
 				const char *msg = (errno == EBUSY) ?
-					", (recommend setting --sched-runtime to less than 90000)" : "";
+					", (recommend setting --sched-runtime to less than 90000 or run one instance of cyclic stressor)" : "";
 
-				pr_fail("%s: sched_setscheduler "
-					"failed: errno=%d (%s) "
-					"for scheduler policy %s%s\n",
-					args->name, errno, strerror(errno),
-					policies[cyclic_policy].name,
-					msg);
+				if (stress_cyclic_state != MAP_FAILED) {
+					(void)stress_lock_acquire(stress_cyclic_state->lock);
+					count = stress_cyclic_state->count;
+					stress_cyclic_state->count++;
+					(void)stress_lock_release(stress_cyclic_state->lock);
+				}
+
+				if (count == 0)
+					pr_fail("%s: sched_setscheduler "
+						"failed, errno=%d (%s) "
+						"for scheduler policy %s%s\n",
+						args->name, errno, strerror(errno),
+						cyclic_policies[cyclic_policy].name,
+						msg);
 			}
 			goto tidy;
 		}
@@ -820,7 +815,7 @@ redo_policy:
 			stress_bogo_inc(args);
 
 			/* Ensure we NEVER spin forever */
-			if ((stress_time_now() - start) > (double)timeout)
+			if (UNLIKELY((stress_time_now() - start) > (double)timeout))
 				break;
 		} while (stress_continue(args));
 
@@ -841,7 +836,7 @@ tidy:
 
 	stress_rt_stats(rt_stats);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		if (rt_stats->index) {
 			size_t i;
 
@@ -860,7 +855,7 @@ tidy:
 			pr_block_begin();
 			pr_inf("%s: sched %s: %" PRIu64 " ns delay, %zd samples\n",
 				args->name,
-				policies[cyclic_policy].name,
+				cyclic_policies[cyclic_policy].name,
 				cyclic_sleep,
 				rt_stats->index);
 			pr_inf( "%s:   mean: %.2f ns, mode: %" PRId64 " ns\n",
@@ -890,7 +885,7 @@ tidy:
 		} else {
 			pr_inf("%s: %10s: no latency information available\n",
 				args->name,
-				policies[cyclic_policy].name);
+				cyclic_policies[cyclic_policy].name);
 		}
 	}
 
@@ -903,20 +898,34 @@ finish:
 	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_cyclic_dist,	stress_set_cyclic_dist },
-	{ OPT_cyclic_method,	stress_set_cyclic_method },
-	{ OPT_cyclic_policy,	stress_set_cyclic_policy },
-	{ OPT_cyclic_prio, 	stress_set_cyclic_prio },
-	{ OPT_cyclic_sleep,	stress_set_cyclic_sleep },
-	{ OPT_cyclic_samples,	stress_set_cyclic_samples },
-	{ 0,			NULL }
+static const char *stress_cyclic_methods(const size_t i)
+{
+	return (NUM_CYCLIC_METHODS == 0) ? NULL :
+		(((ssize_t)i < (ssize_t)NUM_CYCLIC_METHODS) ? cyclic_methods[i].name : NULL);
+}
+
+static const char *stress_cyclic_policies(const size_t i)
+{
+	return (NUM_CYCLIC_POLICIES == 0) ? NULL :
+		(((ssize_t)i < (ssize_t)NUM_CYCLIC_POLICIES) ? cyclic_policies[i].opt_name : NULL);
 };
 
-stressor_info_t stress_cyclic_info = {
+static const stress_opt_t opts[] = {
+	{ OPT_cyclic_dist,    "cyclic-dist",    TYPE_ID_UINT64, 1, 10000000, NULL },
+	{ OPT_cyclic_method,  "cyclic-method",  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_cyclic_methods },
+	{ OPT_cyclic_policy,  "cyclic-policy",  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_cyclic_policies },
+	{ OPT_cyclic_prio,    "cyclic-prio",    TYPE_ID_INT32, 1, 100, NULL },
+	{ OPT_cyclic_sleep,   "cyclic-sleep",   TYPE_ID_UINT64, 1, STRESS_NANOSECOND, NULL },
+	{ OPT_cyclic_samples, "cyclic-samples", TYPE_ID_SIZE_T, 1, MAX_SAMPLES, NULL },
+	END_OPT,
+};
+
+const stressor_info_t stress_cyclic_info = {
 	.stressor = stress_cyclic,
 	.supported = stress_cyclic_supported,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
+	.init = stress_cyclic_init,
+	.deinit = stress_cyclic_deinit,
 	.help = help
 };

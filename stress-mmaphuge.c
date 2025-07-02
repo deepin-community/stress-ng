@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,46 +19,28 @@
  */
 #include "stress-ng.h"
 #include "core-mmap.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
+
+#define MIN_MMAPHUGE_MMAPS	(1)
+#define MAX_MMAPHUGE_MMAPS	(65536)
 
 static const stress_help_t help[] = {
 	{ NULL,	"mmaphuge N",		"start N workers stressing mmap with huge mappings" },
 	{ NULL, "mmaphuge-file",	"perform mappings on a temporary file" },
 	{ NULL,	"mmaphuge-mlock",	"attempt to mlock pages into memory" },
 	{ NULL, "mmaphuge-mmaps N",	"select number of memory mappings per iteration" },
+	{ NULL, "mmaphuge-numa",	"bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	"mmaphuge-ops N",	"stop after N mmaphuge bogo operations" },
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_mmaphuge_mlock(const char *opt)
-{
-	return stress_set_setting_true("mmaphuge-mlock", opt);
-}
-
-/*
- *  stress_set_mmaphuge_mmaps()
- *      set number of huge memory mappings to make per loop
- */
-static int stress_set_mmaphuge_mmaps(const char *opt)
-{
-	size_t mmaphuge_mmaps;
-
-	mmaphuge_mmaps = (size_t)stress_get_uint64(opt);
-	stress_check_range("mmaphuge-mmaps", mmaphuge_mmaps,
-		1, 65536 );
-	return stress_set_setting("mmaphuge-mmaps", TYPE_ID_SIZE_T, &mmaphuge_mmaps);
-}
-
-static int stress_set_mmaphuge_file(const char *opt)
-{
-	return stress_set_setting_true("mmaphuge-file", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mmaphuge_file,	stress_set_mmaphuge_file },
-	{ OPT_mmaphuge_mlock,	stress_set_mmaphuge_mlock },
-	{ OPT_mmaphuge_mmaps,	stress_set_mmaphuge_mmaps },
-	{ 0,                    NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mmaphuge_file,  "mmaphuge-file",  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmaphuge_mlock, "mmaphuge-mlock", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_mmaphuge_mmaps, "mmaphuge-mmaps", TYPE_ID_SIZE_T, MIN_MMAPHUGE_MMAPS, MAX_MMAPHUGE_MMAPS, NULL },
+	{ OPT_mmaphuge_numa,  "mmaphuge-numa",  TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT
 };
 
 #if defined(MAP_HUGETLB)
@@ -88,7 +70,13 @@ typedef struct {
 	size_t mmaphuge_mmaps;	/* number of mmap'd buffers */
 	size_t sz;		/* size of mmap'd file */
 	bool mmaphuge_file;	/* true if using mmap'd file */
+	bool mmaphuge_mlock;	/* true if using mlocked mmaps */
+	bool mmaphuge_numa;	/* true if using numa binding */
 	int fd;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask;
+	stress_numa_mask_t *numa_nodes;
+#endif
 } stress_mmaphuge_context_t;
 
 static const stress_mmaphuge_setting_t stress_mmap_settings[] =
@@ -107,26 +95,25 @@ static const stress_mmaphuge_setting_t stress_mmap_settings[] =
 	{ 0, 2 * MB },			/* for THP */
 };
 
-static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
+static int stress_mmaphuge_child(stress_args_t *args, void *v_context)
 {
-	stress_mmaphuge_context_t *ctxt = (stress_mmaphuge_context_t *)v_ctxt;
+	stress_mmaphuge_context_t *context = (stress_mmaphuge_context_t *)v_context;
 	const size_t page_size = args->page_size;
-	stress_mmaphuge_buf_t *bufs = (stress_mmaphuge_buf_t *)ctxt->bufs;
+	stress_mmaphuge_buf_t *bufs = (stress_mmaphuge_buf_t *)context->bufs;
 	size_t idx = 0;
 	int rc = EXIT_SUCCESS;
-	bool mmaphuge_mlock = false;
 
-	(void)stress_get_setting("mmaphuge-mlock", &mmaphuge_mlock);
-
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		size_t i;
 
-		for (i = 0; i < ctxt->mmaphuge_mmaps; i++)
+		for (i = 0; i < context->mmaphuge_mmaps; i++)
 			bufs[i].buf = MAP_FAILED;
 
-		for (i = 0; stress_continue(args) && (i < ctxt->mmaphuge_mmaps); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < context->mmaphuge_mmaps)); i++) {
 			size_t shmall, freemem, totalmem, freeswap, totalswap, last_freeswap, last_totalswap;
 			size_t j;
 
@@ -145,17 +132,17 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
 
 				bufs[i].sz = sz;
 				/* If we're mapping onto a file, try it first */
-				if (ctxt->mmaphuge_file) {
-					off_t offset = 4096 * stress_mwc8modn(16);
+				if (context->mmaphuge_file) {
+					const off_t offset = 4096 * stress_mwc8modn(16);
 
-					if (sz + offset < ctxt->sz) {
+					if (sz + offset < context->sz) {
 						buf = (uint8_t *)mmap(NULL, sz,
 								PROT_READ | PROT_WRITE,
-								flags & ~MAP_ANONYMOUS, ctxt->fd, offset);
+								flags & ~MAP_ANONYMOUS, context->fd, offset);
 						if (buf == MAP_FAILED)
 							buf = (uint8_t *)mmap(NULL, sz,
 								PROT_READ | PROT_WRITE,
-								flags & ~MAP_ANONYMOUS, ctxt->fd, 0);
+								flags & ~MAP_ANONYMOUS, context->fd, 0);
 					}
 				}
 				/* file mapping failed or not mapped yet, try anonymous map */
@@ -166,16 +153,21 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
 				}
 				bufs[i].buf = buf;
 				idx++;
-				if (idx >= SIZEOF_ARRAY(stress_mmap_settings))
+				if (UNLIKELY(idx >= SIZEOF_ARRAY(stress_mmap_settings)))
 					idx = 0;
 
 				if (buf != MAP_FAILED) {
-					uint64_t rndval = stress_mwc64();
+					const uint64_t rndval = stress_mwc64();
 					register const size_t stride = (page_size * 64) / sizeof(uint64_t);
 					register uint64_t *ptr, val;
 					const uint64_t *buf_end = (uint64_t *)(buf + sz);
 
-					if (mmaphuge_mlock)
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+					if (context->mmaphuge_numa)
+						stress_numa_randomize_pages(args, context->numa_nodes, context->numa_mask, buf, page_size, sz);
+#endif
+
+					if (context->mmaphuge_mlock)
 						(void)shim_mlock(buf, sz);
 
 					/* Touch every other 64 pages.. */
@@ -184,7 +176,7 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
 					}
 					/* ..and sanity check */
 					for (val = rndval, ptr = (uint64_t *)buf; ptr < buf_end; ptr += stride, val++) {
-						if (*ptr != val) {
+						if (UNLIKELY(*ptr != val)) {
 							pr_fail("%s: memory %p at offset 0x%zx check error, "
 								"got 0x%" PRIx64 ", expecting 0x%" PRIx64 "\n",
 								args->name, buf, (uint8_t *)ptr - buf, *ptr, val);
@@ -203,8 +195,8 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
 				break;
 		}
 
-		for (i = 0; stress_continue(args) && (i < ctxt->mmaphuge_mmaps); i++) {
-			if (bufs[i].buf != MAP_FAILED)
+		for (i = 0; LIKELY(stress_continue(args) && (i < context->mmaphuge_mmaps)); i++) {
+			if (bufs[i].buf == MAP_FAILED)
 				continue;
 			/* Try Transparent Huge Pages THP */
 #if defined(MADV_HUGEPAGE)
@@ -215,7 +207,7 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
 #endif
 		}
 
-		for (i = 0; i < ctxt->mmaphuge_mmaps; i++) {
+		for (i = 0; i < context->mmaphuge_mmaps; i++) {
 			uint8_t *buf = bufs[i].buf;
 			size_t sz;
 
@@ -254,96 +246,130 @@ static int stress_mmaphuge_child(stress_args_t *args, void *v_ctxt)
  */
 static int stress_mmaphuge(stress_args_t *args)
 {
-	stress_mmaphuge_context_t ctxt;
-	char filename[PATH_MAX];
+	stress_mmaphuge_context_t context;
 
 	int ret;
 
-	ctxt.sz = 16 * MB;
-	ctxt.mmaphuge_mmaps = MAX_MMAP_BUFS;
-	(void)stress_get_setting("mmaphuge-mmaps", &ctxt.mmaphuge_mmaps);
-	ctxt.mmaphuge_file = false;
-	(void)stress_get_setting("mmaphuge-file", &ctxt.mmaphuge_file);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	context.numa_mask = NULL;
+	context.numa_nodes = NULL;
+#endif
+	context.sz = 16 * MB;
+	context.fd = -1;
+	context.mmaphuge_mmaps = MAX_MMAP_BUFS;
+	if (!stress_get_setting("mmaphuge-mmaps", &context.mmaphuge_mmaps)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			context.mmaphuge_mmaps = MAX_MMAPHUGE_MMAPS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			context.mmaphuge_mmaps = MIN_MMAPHUGE_MMAPS;
+	}
+	context.mmaphuge_file = false;
+	(void)stress_get_setting("mmaphuge-file", &context.mmaphuge_file);
+	context.mmaphuge_numa = false;
+	(void)stress_get_setting("mmaphuge-numa", &context.mmaphuge_numa);
+	context.mmaphuge_mlock = false;
+	(void)stress_get_setting("mmaphuge-mlock", &context.mmaphuge_mlock);
 
-	ctxt.bufs = calloc(ctxt.mmaphuge_mmaps, sizeof(*ctxt.bufs));
-	if (!ctxt.bufs) {
-		pr_inf_skip("%s: cannot allocate buffer array, skipping stressor\n",
-			args->name);
+	context.bufs = (stress_mmaphuge_buf_t *)calloc(context.mmaphuge_mmaps, sizeof(*context.bufs));
+	if (!context.bufs) {
+		pr_inf_skip("%s: cannot allocate %zu byte buffer array%s, skipping stressor\n",
+			args->name, sizeof(context.mmaphuge_mmaps) * sizeof(*context.bufs),
+			stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
-	if (ctxt.mmaphuge_file) {
-		int file_flags = O_CREAT | O_RDWR;
+	if (context.mmaphuge_file) {
+		char filename[PATH_MAX];
 		ssize_t rc;
 
 		rc = stress_temp_dir_mk_args(args);
 		if (rc < 0) {
-			free(ctxt.bufs);
+			free(context.bufs);
 			return stress_exit_status((int)-rc);
 		}
 
 		(void)stress_temp_filename_args(args,
 			filename, sizeof(filename), stress_mwc32());
-		ctxt.fd = open(filename, file_flags, S_IRUSR | S_IWUSR);
-		if (ctxt.fd < 0) {
+		context.fd = open(filename, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+		if (context.fd < 0) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: open %s failed, errno=%d (%s)\n",
 				args->name, filename, errno, strerror(errno));
 			(void)shim_unlink(filename);
 			(void)stress_temp_dir_rm_args(args);
-			free(ctxt.bufs);
+			free(context.bufs);
 
 			return (int)rc;
 		}
 		(void)shim_unlink(filename);
-		if (lseek(ctxt.fd, (off_t)(ctxt.sz - args->page_size), SEEK_SET) < 0) {
+		if (lseek(context.fd, (off_t)(context.sz - args->page_size), SEEK_SET) < 0) {
 			pr_fail("%s: lseek failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
-			(void)close(ctxt.fd);
+			(void)close(context.fd);
 			(void)stress_temp_dir_rm_args(args);
-			free(ctxt.bufs);
+			free(context.bufs);
 
 			return EXIT_FAILURE;
 		}
 		/*
 		 *  Allocate a 16 MB aligned chunk of data.
 		 */
-		if (shim_fallocate(ctxt.fd, 0, 0, (off_t)ctxt.sz) < 0) {
+		if (shim_fallocate(context.fd, 0, 0, (off_t)context.sz) < 0) {
 			rc = stress_exit_status(errno);
 			pr_fail("%s: fallocate of %zu MB failed, errno=%d (%s)\n",
-				args->name, (size_t)(ctxt.fd / MB), errno, strerror(errno));
-			(void)close(ctxt.fd);
+				args->name, (size_t)(context.fd / MB), errno, strerror(errno));
+			(void)close(context.fd);
 			(void)stress_temp_dir_rm_args(args);
-			free(ctxt.bufs);
+			free(context.bufs);
 			return (int)rc;
 		}
 	}
 
-	ret = stress_oomable_child(args, (void *)&ctxt, stress_mmaphuge_child, STRESS_OOMABLE_QUIET);
-	free(ctxt.bufs);
+	if (context.mmaphuge_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &context.numa_nodes,
+						&context.numa_mask, "--mmaphuge-numa",
+						&context.mmaphuge_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --mmaphuge-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		context.mmaphuge_numa = false;
+#endif
+	}
 
-	if (ctxt.mmaphuge_file) {
-		(void)close(ctxt.fd);
+	ret = stress_oomable_child(args, (void *)&context, stress_mmaphuge_child, STRESS_OOMABLE_QUIET);
+
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (context.numa_mask)
+		stress_numa_mask_free(context.numa_mask);
+	if (context.numa_nodes)
+		stress_numa_mask_free(context.numa_nodes);
+#endif
+	free(context.bufs);
+
+	if (context.mmaphuge_file) {
+		(void)close(context.fd);
 		(void)stress_temp_dir_rm_args(args);
 	}
 
 	return ret;
 }
 
-stressor_info_t stress_mmaphuge_info = {
+const stressor_info_t stress_mmaphuge_info = {
 	.stressor = stress_mmaphuge,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_mmaphuge_info = {
+const stressor_info_t stress_mmaphuge_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_VM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without mmap() MAP_HUGETLB support"

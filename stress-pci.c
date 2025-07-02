@@ -1,6 +1,6 @@
 /*
  * Copyright (C)      2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,11 +19,19 @@
  */
 #include "stress-ng.h"
 #include "core-attribute.h"
+#include "core-builtin.h"
 
 static const stress_help_t help[] = {
-	{ NULL,	"pci N",	"start N workers that read and mmap PCI regions" },
-	{ NULL,	"pci-ops N",	"stop after N PCI bogo operations" },
-	{ NULL,	NULL,		NULL }
+	{ NULL,	"pci N",	 "start N workers that read and mmap PCI regions" },
+	{ NULL,	"pci-dev name ", "specify the pci device 'xxxx:xx:xx.x' to exercise" },
+	{ NULL,	"pci-ops N",	 "stop after N PCI bogo operations" },
+	{ NULL,	NULL,		 NULL }
+};
+
+static const stress_opt_t opts[] = {
+	{ OPT_pci_dev,      "pci-dev",      TYPE_ID_STR, 0, 0, NULL },
+	{ OPT_pci_ops_rate, "pci-ops-rate", TYPE_ID_UINT32, 1, 1000000, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__)
@@ -74,10 +82,10 @@ static int PURE stress_pci_dot_filter(const struct dirent *d)
  */
 static void stress_pci_info_free(stress_pci_info_t *pci_info_list)
 {
-	stress_pci_info_t *pci_info = pci_info_list, *next;
+	stress_pci_info_t *pci_info = pci_info_list;
 
 	while (pci_info) {
-		next = pci_info->next;
+		stress_pci_info_t *next = pci_info->next;
 
 		free(pci_info->path);
 		free(pci_info->name);
@@ -88,7 +96,42 @@ static void stress_pci_info_free(stress_pci_info_t *pci_info_list)
 
 static int stress_pci_rev_sort(const struct dirent **a, const struct dirent **b)
 {
-	return alphasort(b, a);
+	return strcmp((*b)->d_name, (*a)->d_name);
+}
+
+static const char sys_pci_devices[] = "/sys/bus/pci/devices";
+
+/*
+ *  stress_pci_info_get_by_name()
+ *	find PCI info with given name, add to pci_info_list
+ */
+static void stress_pci_info_get_by_name(stress_pci_info_t **pci_info_list, const char *name)
+{
+	stress_pci_info_t *pci_info = NULL;
+
+	pci_info = (stress_pci_info_t *)calloc(1, sizeof(*pci_info));
+	if (LIKELY(pci_info != NULL)) {
+		char pci_path[PATH_MAX];
+
+		(void)snprintf(pci_path, sizeof(pci_path),
+			"%s/%s", sys_pci_devices, name);
+		pci_info->path = shim_strdup(pci_path);
+		if (UNLIKELY(!pci_info->path)) {
+			free(pci_info);
+			return;
+		}
+		pci_info->name = shim_strdup(name);
+		if (UNLIKELY(!pci_info->name)) {
+			free(pci_info->path);
+			free(pci_info);
+			return;
+		}
+
+		stress_zero_metrics(pci_info->metrics, PCI_METRICS_MAX);
+		pci_info->ignore = false;
+		pci_info->next = *pci_info_list;
+		*pci_info_list = pci_info;
+	}
 }
 
 /*
@@ -97,45 +140,32 @@ static int stress_pci_rev_sort(const struct dirent **a, const struct dirent **b)
  */
 static stress_pci_info_t *stress_pci_info_get(void)
 {
-	static const char sys_devices[] = "/sys/bus/pci/devices";
 	stress_pci_info_t *pci_info_list = NULL;
 
-	int n_devs, i;
 	struct dirent **pci_list = NULL;
+	char *pci_dev = NULL;
 
-	n_devs = scandir(sys_devices, &pci_list, stress_pci_dev_filter, stress_pci_rev_sort);
-	for (i = 0; i < n_devs; i++) {
-		stress_pci_info_t *pci_info;
+	(void)stress_get_setting("pci-dev", &pci_dev);
 
-		pci_info = calloc(1, sizeof(*pci_info));
-		if (pci_info) {
-			char pci_path[PATH_MAX];
-			int j;
+	if (pci_dev) {
+		char pci_path[PATH_MAX];
+		struct stat statbuf;
 
-			(void)snprintf(pci_path, sizeof(pci_path),
-				"%s/%s", sys_devices, pci_list[i]->d_name);
-			pci_info->path = strdup(pci_path);
-			if (!pci_info->path) {
-				free(pci_info);
-				continue;
-			}
-			pci_info->name = strdup(pci_list[i]->d_name);
-			if (!pci_info->name) {
-				free(pci_info->path);
-				free(pci_info);
-				continue;
-			}
-			for (j = 0; j < PCI_METRICS_MAX; j++) {
-				pci_info->metrics[j].duration = 0.0;
-				pci_info->metrics[j].count = 0.0;
-			}
-			pci_info->ignore = false;
-			pci_info->next = pci_info_list;
-			pci_info_list = pci_info;
+		(void)snprintf(pci_path, sizeof(pci_path),
+			"%s/%s", sys_pci_devices, pci_dev);
+		if (shim_stat(pci_path, &statbuf) == 0) {
+			stress_pci_info_get_by_name(&pci_info_list, pci_dev);
 		}
-		free(pci_list[i]);
+	} else {
+		int n_devs, i;
+
+		n_devs = scandir(sys_pci_devices, &pci_list, stress_pci_dev_filter, stress_pci_rev_sort);
+		for (i = 0; i < n_devs; i++) {
+			stress_pci_info_get_by_name(&pci_info_list, pci_list[i]->d_name);
+			free(pci_list[i]);
+		}
+		free(pci_list);
 	}
-	free(pci_list);
 
 	return pci_info_list;
 }
@@ -170,7 +200,7 @@ static void stress_pci_exercise_file(
 			goto err;
 
 		sz = STRESS_MINIMUM(sizeof(buf), (size_t)statbuf.st_size);
-		if (rom) {
+		if (UNLIKELY(rom)) {
 			VOID_RET(ssize_t, write(fd, "1\n", 2));
 		}
 
@@ -184,7 +214,7 @@ static void stress_pci_exercise_file(
 		 *  read memory for ROMs at the moment, cf.:
 		 *  https://github.com/ColinIanKing/stress-ng/issues/255
 		 */
-		if (!rom) {
+		if (LIKELY(!rom)) {
 			n_left = sz;
 			n_read = 0;
 			t = stress_time_now();
@@ -198,7 +228,7 @@ static void stress_pci_exercise_file(
 				n_left -= n;
 				n_read += n;
 			}
-			if (n_read > 0) {
+			if (LIKELY(n_read > 0)) {
 				if (config) {
 					pci_info->metrics[PCI_METRICS_CONFIG].duration += stress_time_now() - t;
 					pci_info->metrics[PCI_METRICS_CONFIG].count += n_read;
@@ -207,8 +237,7 @@ static void stress_pci_exercise_file(
 					pci_info->metrics[PCI_METRICS_RESOURCE].count += n_read;
 				}
 			}
-		}
-		if (rom) {
+		} else {
 			VOID_RET(ssize_t, write(fd, "0\n", 2));
 		}
 err:
@@ -229,7 +258,7 @@ static void stress_pci_exercise(stress_args_t *args, stress_pci_info_t *pci_info
 	if (n == 0)
 		pci_info->ignore = true;
 
-	for (i = 0; stress_continue(args) && (i < n); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
 		const char *name = list[i]->d_name;
 		const bool config = !strcmp(name, "config");
 		const bool resource = !strncmp(name, "resource", 8);
@@ -274,7 +303,15 @@ static int stress_pci(stress_args_t *args)
 	NOCLOBBER stress_pci_info_t *pci_info_list;
 	NOCLOBBER stress_pci_info_t *pci_info;
 	int ret;
+	uint32_t pci_ops_rate = 0;	/* zero = unlimited */
+	double t_start;
+	NOCLOBBER double t_delta;
 
+	(void)stress_get_setting("pci-ops-rate", &pci_ops_rate);
+	t_delta = pci_ops_rate > 0 ? (double)args->instances / (double)pci_ops_rate : 0.0;
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = sigsetjmp(jmp_env, 1);
@@ -295,9 +332,10 @@ static int stress_pci(stress_args_t *args)
 		return EXIT_NO_RESOURCE;
 	}
 
+	t_start = stress_time_now();
 	do {
 		for (pci_info = pci_info_list; pci_info; pci_info = pci_info->next) {
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 			ret = sigsetjmp(jmp_env, 1);
 
@@ -308,14 +346,25 @@ static int stress_pci(stress_args_t *args)
 
 			if (pci_info->ignore)
 				continue;
+
 			stress_pci_exercise(args, pci_info);
 			stress_bogo_inc(args);
+			if (pci_ops_rate > 0) {
+				const double t_next = t_start + (stress_bogo_get(args) * t_delta);
+				const double t_sleep = t_next - stress_time_now();
+
+				if (LIKELY(t_sleep > 0.0)) {
+					const uint64_t ns = (uint64_t)(t_sleep * STRESS_DBL_NANOSECOND);
+
+					shim_nanosleep_uint64(ns);
+				}
+			}
 		}
 	} while (stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_block_begin();
 		pr_inf("%s: PCI space read rates in MB per sec for stressor instance 0:\n", args->name);
 		pr_inf("%s: PCI Device     Config Resource\n", args->name);
@@ -335,15 +384,17 @@ static int stress_pci(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_pci_info = {
+const stressor_info_t stress_pci_info = {
 	.stressor = stress_pci,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_pci_info = {
+const stressor_info_t stress_pci_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"
 };

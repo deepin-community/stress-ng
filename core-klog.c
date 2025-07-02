@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,7 +32,7 @@ static const char name[] = "klog-check";
 /*
  *  strings that are to be ignored as an error
  */
-static const char *err_exceptions[] = {
+static const char * const err_exceptions[] = {
 	"audit: backlog",
 	"x86/split lock detection",
 	"detected capacity change from",
@@ -80,7 +80,7 @@ static void stress_klog_kernel_cmdline(void)
 	if (ret < 0)
 		return;
 
-	for (ptr = buffer; *ptr && ptr < (buffer + ret); ptr++) {
+	for (ptr = buffer; *ptr && (ptr < (buffer + ret)); ptr++) {
 		if (*ptr == '\n') {
 			*ptr = '\0';
 			break;
@@ -88,6 +88,28 @@ static void stress_klog_kernel_cmdline(void)
 	}
 	pr_inf("%s: kernel cmdline: '%s'\n", name, buffer);
 	already_dumped = true;
+}
+#endif
+
+#if defined(__linux__)
+/*
+ *  stress_klog_convert_nl()
+ *	convert escaped nl to space
+ */
+static void stress_klog_convert_nl(char *buf)
+{
+	for (;;) {
+		char *ptr = strstr(buf, "\\x0a");
+
+		if (!ptr)
+			return;
+
+		*(ptr++) = ' ';
+		while (*ptr) {
+			*ptr = *(ptr + 3);
+			ptr++;
+		}
+	}
 }
 #endif
 
@@ -126,7 +148,7 @@ void stress_klog_start(void)
 			uint64_t timestamp;
 			char *ptr;
 			char ts[32];
-			char *msg = "";
+			char *msg;
 			bool dump_procs = false;
 
 			ptr = strchr(buf, '\n');
@@ -144,6 +166,13 @@ void stress_klog_start(void)
 
 			(void)snprintf(ts, sizeof(ts), "[%" PRIu64 ".%6.6" PRIu64 "]",
 				timestamp / 1000000, timestamp % 1000000);
+
+			stress_klog_convert_nl(buf);
+
+			if (strstr(buf, "audit:")) {
+				msg = "audit";
+				goto log_info;
+			}
 
 			/* Check for CPU throttling messages */
 			if ((strstr(buf, "CPU") || strstr(buf, "cpu")) &&
@@ -218,9 +247,11 @@ log_info:
 				last_logged = stress_time_now();
 			}
 		}
+		(void)fflush(klog_fp);
 		(void)fclose(klog_fp);
 		_exit(EXIT_SUCCESS);
 	}
+	(void)fflush(klog_fp);
 	(void)fclose(klog_fp);
 #endif
 }

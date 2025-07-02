@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +25,8 @@
 #include "core-pthread.h"
 #include "core-put.h"
 #include "core-try-open.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_FS_H)
 #include <linux/fs.h>
@@ -88,7 +90,7 @@ static void stress_sysfs_sys_power_disk(const char *path)
 	(void)stress_system_write(path, "test_resume", 11);
 }
 
-static stress_sysfs_wr_func_t stress_sysfs_wr_funcs[] = {
+static const stress_sysfs_wr_func_t stress_sysfs_wr_funcs[] = {
 #if defined(__linux__)
 	{ "/sys/power/disk",	stress_sysfs_sys_power_disk },
 #endif
@@ -119,7 +121,7 @@ static bool stress_kmsg_drain(const int fd)
 {
 	int count = 0;
 
-	if (fd == -1)
+	if (UNLIKELY(fd == -1))
 		return false;
 
 	for (;;) {
@@ -186,15 +188,15 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		ssize_t rret;
 
 		ret = shim_pthread_spin_lock(&lock);
-		if (ret)
+		if (UNLIKELY(ret))
 			return false;
 		(void)shim_strscpy(path, ctxt->sysfs_path, sizeof(path));
 		counter++;
 		(void)shim_pthread_spin_unlock(&lock);
 		if (counter > OPS_PER_SYSFS_FILE)
-			shim_sched_yield();
+			(void)shim_sched_yield();
 
-		if (!*path || !stress_continue_flag())
+		if (UNLIKELY(!*path || !stress_continue_flag()))
 			break;
 
 		t_start = stress_time_now();
@@ -208,14 +210,14 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 			goto next;
 		}
 		ret = shim_pthread_spin_lock(&open_lock);
-		if (ret) {
+		if (UNLIKELY(ret)) {
 			(void)close(fd);
 			return false;
 		}
 		ctxt->sysfs_files_opened++;
 		(void)shim_pthread_spin_unlock(&open_lock);
 
-		if (stress_time_now() - t_start > threshold) {
+		if (UNLIKELY(stress_time_now() - t_start > threshold)) {
 			(void)close(fd);
 			goto next;
 		}
@@ -226,10 +228,10 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		while (i < (4096 * SYS_BUF_SZ)) {
 			const ssize_t sz = 1 + stress_mwc32modn(sizeof(buffer) - 1);
 
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			rret = read(fd, buffer, (size_t)sz);
-			if (rret < 0)
+			if (UNLIKELY(rret < 0))
 				break;
 			if (rret < sz)
 				break;
@@ -240,7 +242,7 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 				(void)close(fd);
 				goto drain;
 			}
-			if (stress_time_now() - t_start > threshold) {
+			if (UNLIKELY(stress_time_now() - t_start > threshold)) {
 				(void)close(fd);
 				goto next;
 			}
@@ -250,13 +252,13 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		if (g_opt_flags & OPT_FLAGS_VERIFY) {
 			struct stat statbuf;
 
-			if (shim_fstat(fd, &statbuf) < 0)
+			if (UNLIKELY(shim_fstat(fd, &statbuf) < 0))
 				pr_fail("%s: stat failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 		}
 		(void)close(fd);
 
-		if (stress_time_now() - t_start > threshold)
+		if (UNLIKELY(stress_time_now() - t_start > threshold))
 			goto next;
 		if ((fd = open(path, O_RDONLY | O_NONBLOCK)) < 0)
 			goto next;
@@ -264,9 +266,9 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		 *  Zero sized reads
 		 */
 		rret = read(fd, buffer, 0);
-		if (rret < 0)
+		if (UNLIKELY(rret < 0))
 			goto err;
-		if (stress_time_now() - t_start > threshold)
+		if (UNLIKELY(stress_time_now() - t_start > threshold))
 			goto next;
 		if (stress_kmsg_drain(ctxt->kmsgfd)) {
 			drain_kmsg = true;
@@ -276,13 +278,13 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		/*
 		 *  mmap it
 		 */
-		ptr = mmap(NULL, page_size, PROT_READ,
+		ptr = (uint8_t *)mmap(NULL, page_size, PROT_READ,
 			MAP_SHARED | MAP_ANONYMOUS, fd, 0);
 		if (ptr != MAP_FAILED) {
 			stress_uint8_put(*ptr);
-			(void)munmap(ptr, page_size);
+			(void)munmap((void *)ptr, page_size);
 		}
-		if (stress_time_now() - t_start > threshold)
+		if (UNLIKELY(stress_time_now() - t_start > threshold))
 			goto next;
 
 		/*
@@ -292,10 +294,11 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		tv.tv_usec = 0;
 		FD_ZERO(&rfds);
 		VOID_RET(int, select(fd + 1, &rfds, NULL, NULL, &tv));
-		if (stress_time_now() - t_start > threshold)
+		if (UNLIKELY(stress_time_now() - t_start > threshold))
 			goto next;
 
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 		{
 			struct pollfd fds[1];
 
@@ -304,7 +307,7 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 			fds[0].revents = 0;
 
 			VOID_RET(int, poll(fds, 1, 1));
-			if (stress_time_now() - t_start > threshold)
+			if (UNLIKELY(stress_time_now() - t_start > threshold))
 				goto next;
 		}
 #else
@@ -325,7 +328,7 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 			ts.tv_nsec = 1000;
 
 			(void)sigemptyset(&sigmask);
-			VOID_RET(int, ppoll(fds, 1, &ts, &sigmask));
+			VOID_RET(int, shim_ppoll(fds, 1, &ts, &sigmask));
 		}
 #else
 		UNEXPECTED
@@ -371,7 +374,7 @@ static inline bool stress_sys_rw(stress_ctxt_t *ctxt)
 		}
 err:
 		(void)close(fd);
-		if (stress_time_now() - t_start > threshold)
+		if (UNLIKELY(stress_time_now() - t_start > threshold))
 			goto next;
 
 		/*
@@ -387,7 +390,7 @@ err:
 			VOID_RET(ssize_t, write(fd, buffer, 0));
 			(void)close(fd);
 
-			if (stress_time_now() - t_start > threshold)
+			if (UNLIKELY(stress_time_now() - t_start > threshold))
 				goto next;
 		} else {
 			/*
@@ -425,8 +428,8 @@ err:
 
 				/* Disable ROM read */
 				ret = write(fd, "0", 1);
-				if (ret < 0) {
-					(void)close(fd);
+				(void)close(fd);
+				if (UNLIKELY(ret < 0)) {
 					goto next;
 				}
 			}
@@ -453,7 +456,6 @@ drain:
  */
 static void *stress_sys_rw_thread(void *ctxt_ptr)
 {
-	static void *nowt = NULL;
 	stress_ctxt_t *ctxt = (stress_ctxt_t *)ctxt_ptr;
 	stress_args_t *args = ctxt->args;
 
@@ -466,10 +468,10 @@ static void *stress_sys_rw_thread(void *ctxt_ptr)
 	while (stress_continue(args))
 		stress_sys_rw(ctxt);
 
-	return &nowt;
+	return &g_nowt;
 }
 
-static const char *sys_skip_paths[] = {
+static const char * const sys_skip_paths[] = {
 	"/sys/class/zram-control/hot_add",	/* reading this will add a new zram dev */
 	"/sys/kernel/debug",			/* don't read debug interfaces */
 };
@@ -494,19 +496,19 @@ static bool stress_sys_skip(const char *path)
 	 *  "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0A03:00/device:07/" \
 	 *  "VMBUS:01/99221fa0-24ad-11e2-be98-001aa01bbf6e/channels/4/read_avail"
 	 */
-	if (strstr(path, "PNP0A03") && strstr(path, "VMBUS"))
+	if (UNLIKELY(strstr(path, "PNP0A03") && strstr(path, "VMBUS")))
 		return true;
 	/*
 	 *  Has been known to cause issues on s390x
 	 *
-	if (strstr(path, "virtio0/block") && strstr(path, "cache_type"))
+	if (UNLIKELY(strstr(path, "virtio0/block") && strstr(path, "cache_type")))
 		return true;
 	 */
 
 	/*
 	 *  The tpm driver for pre Linux 4.10 is racey so skip
 	 */
-	if ((os_release < 410) && (strstr(path, "/sys/kernel/security/tpm0")))
+	if (UNLIKELY((os_release < 410) && (strstr(path, "/sys/kernel/security/tpm0"))))
 		return true;
 
 	return false;
@@ -527,7 +529,7 @@ static void stress_sys_dir(
 	mode_t flags = S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
 	int i, n;
 
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return;
 
 	/* Don't want to go too deep */
@@ -535,11 +537,11 @@ static void stress_sys_dir(
 		return;
 
 	/* Don't want to reset any GCOV metrics */
-	if (!strcmp(path, "/sys/kernel/debug/gcov"))
+	if (UNLIKELY(!strcmp(path, "/sys/kernel/debug/gcov")))
 		return;
 
 	n = scandir(path, &dlist, NULL, mixup_sort);
-	if (n <= 0) {
+	if (UNLIKELY(n <= 0)) {
 		stress_dirent_list_free(dlist, n);
 		return;
 	}
@@ -548,7 +550,7 @@ static void stress_sys_dir(
 		flags |= S_IRUSR | S_IWUSR;
 
 	/* Non-directories first */
-	for (i = 0; (i < n) && stress_continue(args); i++) {
+	for (i = 0; LIKELY((i < n) && stress_continue(args)); i++) {
 		int ret;
 		struct stat buf;
 		char tmp[PATH_MAX];
@@ -577,7 +579,7 @@ static void stress_sys_dir(
 			goto dt_reg_free;
 
 		ret = shim_pthread_spin_lock(&lock);
-		if (ret)
+		if (UNLIKELY(ret))
 			goto dt_reg_free;
 
 		(void)shim_strscpy(ctxt->sysfs_path, tmp, sizeof(ctxt->sysfs_path));
@@ -594,12 +596,12 @@ static void stress_sys_dir(
 		 *  has been reached
 		 */
 		do {
-			shim_usleep_interruptible(1000);
+			(void)shim_usleep_interruptible(1000);
 			/* Cater for very long delays */
-			if ((counter == 0) && (stress_time_now() > time_out))
+			if (UNLIKELY((counter == 0) && (stress_time_now() > time_out)))
 				break;
 			/* Cater for slower delays */
-			if ((counter > 0) && (stress_time_now() > time_end))
+			if (UNLIKELY((counter > 0) && (stress_time_now() > time_end)))
 				break;
 		} while ((counter < OPS_PER_SYSFS_FILE) && stress_continue(args));
 
@@ -615,13 +617,13 @@ dt_reg_free:
 	}
 
 	/* Now directories.. */
-	for (i = 0; (i < n) && stress_continue(args); i++) {
+	for (i = 0; LIKELY((i < n) && stress_continue(args)); i++) {
 		const struct dirent *d = dlist[i];
 		struct stat buf;
 		int ret;
 		char tmp[PATH_MAX];
 
-		if (!d)
+		if (UNLIKELY(!d))
 			continue;
 		if (shim_dirent_type(path, d) != SHIM_DT_DIR)
 			goto dt_dir_free;
@@ -695,6 +697,7 @@ static int stress_sysfs(stress_args_t *args)
 		pr_inf_skip("%s: cannot mmap shared context region, skipping stressor\n", args->name);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(ctxt, sizeof(*ctxt), "sysfs-pthread-context");
 
 	n = scandir("/sys", &dlist, NULL, alphasort);
 	if (n <= 0)
@@ -722,7 +725,7 @@ static int stress_sysfs(stress_args_t *args)
 #endif
 	sysfs_hash_table = stress_hash_create(1021);
 	if (!sysfs_hash_table) {
-		pr_err("%s: cannot create sysfs hash table: %d (%s))\n",
+		pr_err("%s: cannot create sysfs hash table, errno=%d (%s))\n",
 			args->name, errno, strerror(errno));
 		rc = EXIT_NO_RESOURCE;
 		goto exit_free;
@@ -760,6 +763,8 @@ static int stress_sysfs(stress_args_t *args)
 
 	(void)shim_memset(pthreads_ret, 0, sizeof(pthreads_ret));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	/*
@@ -783,19 +788,20 @@ again:
 		if (pid < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args)) {
+			if (UNLIKELY(!stress_continue(args))) {
 				rc = EXIT_SUCCESS;
 				goto finish;
 			}
 		} else if (pid > 0) {
+			pid_t wret;
 			int status;
 
 			/* Parent, wait for child */
-			ret = waitpid(pid, &status, 0);
-			if (ret < 0) {
+			wret = waitpid(pid, &status, 0);
+			if (wret < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX " failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 				/* Ring ring, time to die */
 				stress_kill_and_wait(args, pid, SIGALRM, true);
 			} else {
@@ -830,10 +836,10 @@ again:
 				for (i = 0; i < n; i++) {
 					char sysfspath[PATH_MAX];
 
-					if (!stress_continue(args))
+					if (UNLIKELY(!stress_continue(args)))
 						break;
 
-					if (stress_is_dot_filename(dlist[j]->d_name))
+					if (UNLIKELY(stress_is_dot_filename(dlist[j]->d_name)))
 						continue;
 
 					stress_mk_filename(sysfspath, sizeof(sysfspath),
@@ -875,7 +881,7 @@ again:
 
 	rate = (duration > 0.0) ? (double)ctxt->sysfs_files_opened / duration : 0.0;
 	stress_metrics_set(args, 0, "sysfs files exercised per sec",
-		rate, STRESS_HARMONIC_MEAN);
+		rate, STRESS_METRIC_HARMONIC_MEAN);
 
 finish:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -897,22 +903,22 @@ exit_free:
 	return rc;
 
 exit_no_sysfs_entries:
-	if (args->instance == 0)
+	if (stress_instance_zero(args))
 		pr_inf_skip("%s: no /sys entries found, skipping stressor\n", args->name);
 	rc = EXIT_NO_RESOURCE;
 	goto exit_free;
 }
 
-stressor_info_t stress_sysfs_info = {
+const stressor_info_t stress_sysfs_info = {
 	.stressor = stress_sysfs,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_sysfs_info = {
+const stressor_info_t stress_sysfs_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "not Linux or built without pthread support"

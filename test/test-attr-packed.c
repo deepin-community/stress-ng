@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,16 +20,16 @@
 
 struct packed_test {
 	int i;
-	long l;
+	long int l;
 	char c;
-	short s;
+	short int s;
 } PACKED;
 
 struct unpacked_test {
 	int i;
-	long l;
+	long int l;
 	char c;
-	short s;
+	short int s;
 };
 
 int main(int argc, char **argv)

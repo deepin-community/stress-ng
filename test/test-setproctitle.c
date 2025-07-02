@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,7 +31,13 @@
 
 int main(int argc, char *argv[], char *envp[])
 {
+#if !(defined(__APPLE__) || \
+      defined(__DragonFly__) || \
+      defined(__FreeBSD__) || \
+      defined(__NetBSD__) || \
+      defined(__OpenBSD__))
 	setproctitle_init(argc, argv, envp);
+#endif
 	setproctitle("-%s", "this is a test");
 	return 0;
 }

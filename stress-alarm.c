@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -48,8 +48,8 @@ static void stress_alarm_stress_bogo_inc(stress_args_t *args)
 {
 	sigset_t set;
 
-	sigemptyset(&set);
-	sigaddset(&set, SIGUSR1);
+	(void)sigemptyset(&set);
+	(void)sigaddset(&set, SIGUSR1);
 	if (sigprocmask(SIG_BLOCK, &set, NULL) == 0) {
 		stress_bogo_inc(args);
 		(void)sigprocmask(SIG_UNBLOCK, &set, NULL);
@@ -63,17 +63,21 @@ static void stress_alarm_stress_bogo_inc(stress_args_t *args)
 static int stress_alarm(stress_args_t *args)
 {
 	pid_t pid;
+	int rc = EXIT_SUCCESS;
 
 	if (stress_sighandler(args->name, SIGALRM, stress_sighandler_nop, NULL) < 0)
 		return EXIT_FAILURE;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 again:
 	pid = fork();
 	if (pid < 0) {
 		if (stress_redo_fork(args, errno))
 			goto again;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return EXIT_SUCCESS;
 		pr_fail("%s: fork failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
@@ -101,7 +105,7 @@ again:
 			if (secs_left == 0)
 				err_mask |= STRESS_SLEEP_INTMAX;
 			stress_alarm_stress_bogo_inc(args);
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* zeros second interrupted sleep */
@@ -114,7 +118,7 @@ again:
 			if (secs_left != 0)
 				err_mask |= STRESS_SLEEP_ZERO;
 			stress_alarm_stress_bogo_inc(args);
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			/* random duration interrupted sleep */
@@ -138,10 +142,10 @@ again:
 			const uint64_t delay_ns = 1000 + stress_mwc32modn(10000);
 
 			(void)shim_kill(pid, SIGALRM);
-			shim_nanosleep_uint64(delay_ns);
-			shim_sched_yield();
+			(void)shim_nanosleep_uint64(delay_ns);
+			(void)shim_sched_yield();
 			(void)shim_kill(pid, SIGALRM);
-			shim_sched_yield();
+			(void)shim_sched_yield();
 		}
 
 		(void)shim_kill(pid, SIGUSR1);
@@ -160,6 +164,7 @@ again:
 					(err_mask & STRESS_SLEEP_ZERO) &&
 						(err_mask & STRESS_SLEEP_RANDOM) ? ", " : "",
 					(err_mask & STRESS_SLEEP_RANDOM) ? "sleep($RANDOM)": "");
+				rc = EXIT_FAILURE;
 			}
 
 			if (err_mask & STRESS_ALARM_MASK) {
@@ -172,17 +177,18 @@ again:
 					(err_mask & STRESS_ALARM_ZERO) &&
 						(err_mask & STRESS_ALARM_RANDOM) ? ", " : "",
 					(err_mask & STRESS_ALARM_RANDOM) ? "alarm($RANDOM)": "");
+				rc = EXIT_FAILURE;
 			}
 		}
 	}
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_alarm_info = {
+const stressor_info_t stress_alarm_info = {
 	.stressor = stress_alarm,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_INTERRUPT | CLASS_OS,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -59,25 +59,26 @@ static stress_nop_instr_t *current_instr = NULL;
 
 #define STRESS_NOP_SPIN_OP(name, op)				\
 static void stress_nop_spin_ ## name(				\
-	stress_args_t *args,				\
+	stress_args_t *args,					\
 	const bool flag,					\
 	double *duration,					\
 	double *count)						\
 {								\
 	do {							\
 		register int j = 64;				\
-		while (j--) {					\
-			register int i = NOP_LOOPS;		\
-			double t = stress_time_now();		\
 								\
-			while (i--)				\
+		while (LIKELY(j--)) {				\
+			register int i = NOP_LOOPS;		\
+			const double t = stress_time_now();	\
+								\
+			while (LIKELY(i--))			\
 				OPx64(op); 			\
 			(*duration) += stress_time_now() - t;	\
 			(*count) += (double)(64 * NOP_LOOPS);	\
 								\
 			stress_bogo_inc(args);			\
 		}						\
-	} while (flag && stress_continue(args));			\
+	} while (flag && stress_continue(args));		\
 }
 
 STRESS_NOP_SPIN_OP(nop, stress_asm_nop)
@@ -88,7 +89,7 @@ STRESS_NOP_SPIN_OP(x86_pause, stress_asm_x86_pause)
 
 #if defined(HAVE_ASM_X86_TPAUSE) &&	\
     !defined(HAVE_COMPILER_PCC)
-static inline void stress_op_x86_tpause(void)
+static inline ALWAYS_INLINE void stress_op_x86_tpause(void)
 {
 	uint64_t tsc;
 
@@ -110,74 +111,79 @@ STRESS_NOP_SPIN_OP(arm_yield, stress_asm_arm_yield);
 #endif
 
 #if defined(STRESS_ARCH_X86)
-static inline void stress_op_x86_nop2(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop2(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x90;\n");
 }
 
-static inline void stress_op_x86_nop3(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop3(void)
 {
 	__asm__ __volatile__(".byte 0x0f, 0x1f, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop4(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop4(void)
 {
 	__asm__ __volatile__(".byte 0x0f, 0x1f, 0x40, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop5(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop5(void)
 {
 	__asm__ __volatile__(".byte 0x0f, 0x1f, 0x44, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop6(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop6(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop7(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop7(void)
 {
 	__asm__ __volatile__(".byte 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop8(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop8(void)
 {
 	__asm__ __volatile__(".byte 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop9(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop9(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop10(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop10(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop11(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop11(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop12(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop12(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop13(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop13(void)
 {
 	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop14(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop14(void)
 {
-	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
+	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
 }
 
-static inline void stress_op_x86_nop15(void)
+static inline ALWAYS_INLINE void stress_op_x86_nop15(void)
 {
-	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
+	__asm__ __volatile__(".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00;\n");
+}
+
+static inline ALWAYS_INLINE void stress_op_x86_fnop(void)
+{
+	__asm__ __volatile__(".byte 0xd9, 0xd0;\n");
 }
 
 STRESS_NOP_SPIN_OP(x86_nop2, stress_op_x86_nop2)
@@ -194,12 +200,19 @@ STRESS_NOP_SPIN_OP(x86_nop12, stress_op_x86_nop12)
 STRESS_NOP_SPIN_OP(x86_nop13, stress_op_x86_nop13)
 STRESS_NOP_SPIN_OP(x86_nop14, stress_op_x86_nop14)
 STRESS_NOP_SPIN_OP(x86_nop15, stress_op_x86_nop15)
+STRESS_NOP_SPIN_OP(x86_fnop, stress_op_x86_fnop)
 #endif
 
 #if defined(STRESS_ARCH_PPC64)
 STRESS_NOP_SPIN_OP(ppc64_yield, stress_asm_ppc64_yield);
 STRESS_NOP_SPIN_OP(ppc64_mdoio, stress_asm_ppc64_mdoio);
 STRESS_NOP_SPIN_OP(ppc64_mdoom, stress_asm_ppc64_mdoom);
+#endif
+
+#if defined(STRESS_ARCH_PPC)
+STRESS_NOP_SPIN_OP(ppc_yield, stress_asm_ppc_yield);
+STRESS_NOP_SPIN_OP(ppc_mdoio, stress_asm_ppc_mdoio);
+STRESS_NOP_SPIN_OP(ppc_mdoom, stress_asm_ppc_mdoom);
 #endif
 
 #if defined(STRESS_ARCH_S390)
@@ -231,6 +244,7 @@ static stress_nop_instr_t nop_instrs[] = {
 	{ "nop13",	stress_nop_spin_x86_nop13,	NULL,	false,	false },
 	{ "nop14",	stress_nop_spin_x86_nop14,	NULL,	false,	false },
 	{ "nop15",	stress_nop_spin_x86_nop15,	NULL,	false,	false },
+	{ "fnop",	stress_nop_spin_x86_fnop,	NULL,	false,	false },
 #endif
 #if defined(STRESS_ARCH_S390)
 	{ "nopr",	stress_nop_spin_s390_nopr,	NULL,	false,	false },
@@ -253,6 +267,11 @@ static stress_nop_instr_t nop_instrs[] = {
 	{ "mdoom",	stress_nop_spin_ppc64_mdoom,	NULL,	false,	false },
 	{ "yield",	stress_nop_spin_ppc64_yield,	NULL,	false,	false },
 #endif
+#if defined(STRESS_ARCH_PPC)
+	{ "mdoio",	stress_nop_spin_ppc_mdoio,	NULL,	false,	false },
+	{ "mdoom",	stress_nop_spin_ppc_mdoom,	NULL,	false,	false },
+	{ "yield",	stress_nop_spin_ppc_yield,	NULL,	false,	false },
+#endif
 	/* Must be last of the array */
 	{ "random",	stress_nop_random,		NULL,	false,	false },
 };
@@ -267,7 +286,7 @@ static inline void stress_nop_callfunc(
 	if (UNLIKELY(instr->supported_check == false)) {
 		instr->supported_check = true;
 		if (instr->supported && !instr->supported()) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf("%s: '%s' instruction is not supported, ignoring, defaulting to nop\n",
 					args->name, instr->name);
 			instr->ignore = true;
@@ -296,31 +315,6 @@ static void stress_nop_random(
 	} while (stress_continue(args));
 }
 
-static int stress_set_nop_instr(const char *opt)
-{
-	size_t i;
-
-	current_instr = &nop_instrs[0];
-
-	for (i = 0; i < SIZEOF_ARRAY(nop_instrs); i++) {
-		stress_nop_instr_t *instr = &nop_instrs[i];
-
-		if (!strcmp(instr->name, opt)) {
-			stress_set_setting("nop-instr", TYPE_ID_SIZE_T, &i);
-			current_instr = instr;
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "nop-instr must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(nop_instrs); i++) {
-		(void)fprintf(stderr, " %s", nop_instrs[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
-}
-
 static void NORETURN stress_sigill_nop_handler(int signum)
 {
 	(void)signum;
@@ -338,7 +332,7 @@ static int stress_nop(stress_args_t *args)
 {
 	size_t nop_instr = 0;
 	NOCLOBBER stress_nop_instr_t *instr;
-	bool do_random;
+	NOCLOBBER bool do_random;
 	double duration = 0.0, count = 0.0, rate;
 
 	(void)stress_get_setting("nop-instr", &nop_instr);
@@ -365,33 +359,48 @@ static int stress_nop(stress_args_t *args)
 		}
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	current_instr = instr;
 	stress_nop_callfunc(instr, args, true, &duration, &count);
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	rate = (count > 0.0) ? (duration / count) : 0.0;
 	stress_metrics_set(args, 0, "picosecs per nop instruction",
-		STRESS_DBL_NANOSECOND * rate, STRESS_HARMONIC_MEAN);
+		STRESS_DBL_NANOSECOND * rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	return EXIT_SUCCESS;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_nop_instr,	stress_set_nop_instr },
-	{ 0,                    NULL }
+static const char *stress_nop_instr(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(nop_instrs)) ? nop_instrs[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_nop_instr, "nop-instr", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_nop_instr },
+	END_OPT,
 };
 
-stressor_info_t stress_nop_info = {
+const stressor_info_t stress_nop_info = {
 	.stressor = stress_nop,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_nop_info = {
+
+static const stress_opt_t opts[] = {
+	{ OPT_nop_instr, "nop-instr", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_unimplemented_method },
+	END_OPT,
+};
+
+const stressor_info_t stress_nop_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "no nop assembler op-code(s) for this architecture"
 };

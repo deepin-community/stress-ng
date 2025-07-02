@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,6 +22,14 @@
 #if defined(HAVE_SYS_UIO_H)
 #include <sys/uio.h>
 #endif
+
+#if defined(HAVE_POLL_H)
+#include <poll.h>
+#endif
+
+#include <dirent.h>
+#include <sched.h>
+#include <sys/resource.h>
 
 /*
  *  BeagleBoneBlack with 4.1.15 kernel does not
@@ -60,13 +68,13 @@ typedef	loff_t		shim_loff_t;
 #elif defined(HAVE_OFF_T)
 typedef	off_t		shim_loff_t;
 #else
-typedef long		shim_loff_t;
+typedef long int	shim_loff_t;
 #endif
 
 #if defined(HAVE_OFF64_T)
 typedef off64_t		shim_off64_t;
 #else
-typedef uint64_t	shim_off64_t;
+typedef int64_t		shim_off64_t;
 #endif
 
 /* Should be defined by POSIX, but add shim */
@@ -118,6 +126,166 @@ typedef uint64_t	shim_off64_t;
 #define SHIM_DT_UNKNOWN	(0)
 #endif
 
+#if defined(MADV_NORMAL)
+#define SHIM_MADV_NORMAL	MADV_NORMAL
+#endif
+
+#if defined(MADV_SEQUENTIAL)
+#define SHIM_MADV_SEQUENTIAL	MADV_SEQUENTIAL
+#endif
+
+#if defined(MADV_RANDOM)
+#define SHIM_MADV_RANDOM	MADV_RANDOM
+#endif
+
+#if defined(MADV_WILLNEED)
+#define SHIM_MADV_WILLNEED	MADV_WILLNEED
+#endif
+
+#if defined(MADV_DONTNEED)
+#define SHIM_MADV_DONTNEED	MADV_DONTNEED
+#endif
+
+#if defined(MADV_REMOVE)
+#define SHIM_MADV_REMOVE	MADV_REMOVE
+#endif
+
+#if defined(MADV_DONTFORK)
+#define SHIM_MADV_DONTFORK	MADV_DONTFORK
+#endif
+
+#if defined(MADV_DOFORK)
+#define SHIM_MADV_DOFORK	MADV_DOFORK
+#endif
+
+#if defined(MADV_MERGEABLE)
+#define SHIM_MADV_MERGEABLE	MADV_MERGEABLE
+#endif
+
+#if defined(MADV_UNMERGEABLE)
+#define SHIM_MADV_UNMERGEABLE	MADV_UNMERGEABLE
+#endif
+
+#if defined(MADV_SOFT_OFFLINE)
+#define SHIM_MADV_SOFT_OFFLINE	MADV_SOFT_OFFLINE
+#endif
+
+#if defined(MADV_HUGEPAGE)
+#define SHIM_MADV_HUGEPAGE	MADV_HUGEPAGE
+#endif
+
+#if defined(MADV_NOHUGEPAGE)
+#define SHIM_MADV_NOHUGEPAGE	MADV_NOHUGEPAGE
+#endif
+
+#if defined(MADV_DONTDUMP)
+#define SHIM_MADV_DONTDUMP	MADV_DONTDUMP
+#endif
+
+#if defined(MADV_DODUMP)
+#define SHIM_MADV_DODUMP	MADV_DODUMP
+#endif
+
+#if defined(MADV_FREE)
+#define SHIM_MADV_FREE		MADV_FREE
+#endif
+
+#if defined(MADV_WIPEONFORK)
+#define SHIM_MADV_WIPEONFORK	MADV_WIPEONFORK
+#endif
+
+#if defined(MADV_KEEPONFORK)
+#define SHIM_MADV_KEEPONFORK	MADV_KEEPONFORK
+#endif
+
+#if defined(MADV_INHERIT_ZERO)
+#define SHIM_MADV_INHERIT_ZERO	MADV_INHERIT_ZERO
+#endif
+
+#if defined(MADV_COLD)
+#define SHIM_MADV_COLD		MADV_COLD
+#endif
+
+#if defined(MADV_PAGEOUT)
+#define SHIM_MADV_PAGEOUT	MADV_PAGEOUT
+#endif
+
+#if defined(MADV_POPULATE_READ)
+#define SHIM_MADV_POPULATE_READ	MADV_POPULATE_READ
+#endif
+
+#if defined(MADV_POPULATE_WRITE)
+#define SHIM_MADV_POPULATE_WRITE MADV_POPULATE_WRITE
+#endif
+
+#if defined(MADV_DONTNEED_LOCKED)
+#define SHIM_MADV_DONTNEED_LOCKED MADV_DONTNEED_LOCKED
+#endif
+
+#if defined(MADV_COLLAPSE)
+#define SHIM_MADV_COLLAPSE	MADV_COLLAPSE
+#endif
+
+#if defined(MADV_AUTOSYNC)
+#define SHIM_MADV_AUTOSYNC	MADV_AUTOSYNC
+#endif
+
+#if defined(MADV_CORE)
+#define SHIM_MADV_CORE		MADV_CORE
+#endif
+
+#if defined(MADV_PROTECT)
+#define SHIM_MADV_PROTECT	MADV_PROTECT
+#endif
+
+#if defined(MADV_POPULATE_READ)
+#define SHIM_MADV_POPULATE_READ	MADV_POPULATE_READ
+#endif
+
+#if defined(MADV_POPULATE_WRITE)
+#define SHIM_MADV_POPULATE_WRITE MADV_POPULATE_WRITE
+#endif
+
+#if defined(MADV_SPACEAVAIL)
+#define SHIM_MADV_SPACEAVAIL	MADV_SPACEAVAIL
+#endif
+
+#if defined(MADV_ZERO_WIRED_PAGES)
+#define SHIM_MADV_ZERO_WIRED_PAGES MADV_ZERO_WIRED_PAGES
+#endif
+
+#if defined(MADV_ACCESS_DEFAULT)
+#define SHIM_MADV_ACCESS_DEFAULT MADV_ACCESS_DEFAULT
+#endif
+
+#if defined(MADV_ACCESS_LWP)
+#define SHIM_MADV_ACCESS_LWP	MADV_ACCESS_LWP
+#endif
+
+#if defined(MADV_ACCESS_MANY)
+#define SHIM_MADV_ACCESS_MANY	MADV_ACCESS_MANY
+#endif
+
+#if defined(POSIX_MADV_NORMAL)
+#define SHIM_POSIX_MADV_NORMAL	POSIX_MADV_NORMAL
+#endif
+
+#if defined(POSIX_MADV_SEQUENTIAL)
+#define SHIM_POSIX_MADV_SEQUENTIAL POSIX_MADV_SEQUENTIAL
+#endif
+
+#if defined(POSIX_MADV_RANDOM)
+#define SHIM_POSIX_MADV_RANDOM	POSIX_MADV_RANDOM
+#endif
+
+#if defined(POSIX_MADV_WILLNEED)
+#define SHIM_POSIX_MADV_WILLNEED POSIX_MADV_WILLNEED
+#endif
+
+#if defined(POSIX_MADV_DONTNEED)
+#define SHIM_POSIX_MADV_DONTNEED POSIX_MADV_DONTNEED
+#endif
+
 /* clone3 clone args */
 struct shim_clone_args {
 	uint64_t flags;		/* Flags bit mask */
@@ -131,7 +299,7 @@ struct shim_clone_args {
 };
 
 struct shim_getcpu_cache {
-        unsigned long blob[128 / sizeof(long)];
+        unsigned long int blob[128 / sizeof(long)];
 };
 
 /* futex2 waitv shim */
@@ -147,9 +315,9 @@ struct shim_futex_waitv {
  *  that have a layer of OS abstraction
  */
 struct shim_linux_dirent {
-	unsigned long	d_ino;		/* Inode number */
-	unsigned long	d_off;		/* Offset to next linux_dirent */
-	unsigned short	d_reclen;	/* Length of this linux_dirent */
+	unsigned long int d_ino;	/* Inode number */
+	unsigned long int d_off;	/* Offset to next linux_dirent */
+	unsigned short int d_reclen;	/* Length of this linux_dirent */
 	char		d_name[];	/* Filename (null-terminated) */
 };
 
@@ -163,7 +331,7 @@ typedef int64_t shim_ino64_t;
 struct shim_linux_dirent64 {
 	shim_ino64_t	d_ino;		/* 64-bit inode number */
 	shim_off64_t	d_off;		/* 64-bit offset to next structure */
-	unsigned short	d_reclen;	/* Size of this dirent */
+	unsigned short int d_reclen;	/* Size of this dirent */
 	unsigned char	d_type;		/* File type */
 	char		d_name[];	/* Filename (null-terminated) */
 };
@@ -257,8 +425,42 @@ struct shim_sched_attr {
 #if defined(HAVE_STATX)
 typedef struct statx shim_statx_t;
 #else
-typedef struct {
-	char reserved[512];
+struct shim_statx_timestamp {
+	int64_t	 tv_sec;
+	uint32_t tv_nsec;
+	int32_t  __reserved;
+};
+
+typedef struct shim_statx {
+	uint32_t   stx_mask;       /* What results were written [uncond] */
+	uint32_t   stx_blksize;    /* Preferred general I/O size [uncond] */
+	uint64_t   stx_attributes; /* Flags conveying information about the file [uncond] */
+	uint32_t   stx_nlink;      /* Number of hard links */
+	uint32_t   stx_uid;        /* User ID of owner */
+	uint32_t   stx_gid;        /* Group ID of owner */
+	uint16_t   stx_mode;       /* File mode */
+	uint16_t   __spare0[1];
+	uint64_t   stx_ino;        /* Inode number */
+	uint64_t   stx_size;       /* File size */
+	uint64_t   stx_blocks;     /* Number of 512-byte blocks allocated */
+	uint64_t   stx_attributes_mask; /* Mask to show what's supported in stx_attributes */
+	struct shim_statx_timestamp  stx_atime;      /* Last access time */
+	struct shim_statx_timestamp  stx_btime;      /* File creation time */
+	struct shim_statx_timestamp  stx_ctime;      /* Last attribute change time */
+	struct shim_statx_timestamp  stx_mtime;      /* Last data modification time */
+	uint32_t   stx_rdev_major; /* Device ID of special file [if bdev/cdev] */
+	uint32_t   stx_rdev_minor;
+	uint32_t   stx_dev_major;  /* ID of device containing file [uncond] */
+	uint32_t   stx_dev_minor;
+	uint64_t   stx_mnt_id;
+	uint32_t   stx_dio_mem_align;      /* Memory buffer alignment for direct I/O */
+	uint32_t   stx_dio_offset_align;   /* File offset alignment for direct I/O */
+	uint64_t   stx_subvol;     /* Subvolume identifier */
+	uint32_t   stx_atomic_write_unit_min; /* Min atomic write unit in bytes */
+	uint32_t   stx_atomic_write_unit_max; /* Max atomic write unit in bytes */
+	uint32_t   stx_atomic_write_segments_max; /* Max atomic write segment count */
+	uint32_t   stx_dio_read_offset_align; /* stx_dio_read_offset_align */
+        uint64_t   __spare3[9];   /* Spare space for future expansion */
 } shim_statx_t;
 #endif
 
@@ -267,7 +469,7 @@ struct shim_ustat {
 #if defined(HAVE_DADDR_T)
 	daddr_t	f_tfree;
 #else
-	long	f_tfree;
+	long int f_tfree;
 #endif
 	ino_t	f_tinode;
 	char	f_fname[6];
@@ -290,6 +492,26 @@ typedef struct shim_timex {
 	uint8_t padding[256 - sizeof(int)];
 } shim_timex_t;
 #endif
+
+#if defined(HAVE_PPOLL)
+typedef nfds_t shim_nfds_t;
+
+typedef struct pollfd shim_pollfd_t;
+#else
+typedef unsigned int shim_nfds_t;
+
+typedef struct shim_pollfd {
+	int fd;
+	short int events;
+	short int revents;
+} shim_pollfd_t;
+#endif
+
+typedef struct shim_xattr_args {
+        uint64_t value ALIGN8;
+        uint32_t size;
+        uint32_t flags;
+} shim_xattr_args;
 
 /*
  *  shim_unconstify_ptr()
@@ -314,27 +536,27 @@ extern ssize_t shim_copy_file_range(int fd_in, shim_off64_t *off_in, int fd_out,
 extern int shim_posix_fallocate(int fd, off_t offset, off_t len);
 extern int shim_fallocate(int fd, int mode, off_t offset, off_t len);
 extern int shim_gettid(void);
-extern long shim_getcpu(unsigned *cpu, unsigned *node, void *tcache);
+extern long int shim_getcpu(unsigned int *cpu, unsigned int *node, void *tcache);
 extern int shim_getdents(unsigned int fd, struct shim_linux_dirent *dirp,
 	unsigned int count);
 extern int shim_getdents64(unsigned int fd, struct shim_linux_dirent64 *dirp,
 	unsigned int count);
 extern int shim_getrandom(void *buff, size_t buflen, unsigned int flags);
 extern void shim_flush_icache(void *begin, void *end);
-extern long shim_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1,
-	unsigned long idx2);
+extern long int shim_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long int idx1,
+	unsigned long int idx2);
 extern int shim_klogctl(int type, char *bufp, int len);
 extern int shim_membarrier(int cmd, int flags, int cpu_id);
 extern int shim_memfd_create(const char *name, unsigned int flags);
-extern int shim_get_mempolicy(int *mode, unsigned long *nodemask,
-	unsigned long maxnode, void *addr, unsigned long flags);
-extern int shim_set_mempolicy(int mode, unsigned long *nodemask,
-	unsigned long maxnode);
-extern long shim_mbind(void *addr, unsigned long len, int mode,
-	const unsigned long *nodemask, unsigned long maxnode, unsigned flags);
-extern long shim_migrate_pages(int pid, unsigned long maxnode,
-	const unsigned long *old_nodes, const unsigned long *new_nodes);
-extern long shim_move_pages(int pid, unsigned long count, void **pages,
+extern int shim_get_mempolicy(int *mode, unsigned long int *nodemask,
+	unsigned long int maxnode, void *addr, unsigned long int flags);
+extern int shim_set_mempolicy(int mode, unsigned long int *nodemask,
+	unsigned long int maxnode);
+extern long int shim_mbind(void *addr, unsigned long int len, int mode,
+	const unsigned long int *nodemask, unsigned long int maxnode, unsigned flags);
+extern long int shim_migrate_pages(int pid, unsigned long int maxnode,
+	const unsigned long int *old_nodes, const unsigned long int *new_nodes);
+extern long int shim_move_pages(int pid, unsigned long int count, void **pages,
 	const int *nodes, int *status, int flags);
 extern int shim_userfaultfd(int flags);
 extern int shim_seccomp(unsigned int operation, unsigned int flags, void *args);
@@ -399,10 +621,16 @@ extern int shim_clone3(struct shim_clone_args *cl_args, size_t size);
 extern int shim_ustat(dev_t dev, struct shim_ustat *ubuf);
 extern ssize_t shim_getxattr(const char *path, const char *name, void *value,
 	size_t size);
+extern ssize_t shim_getxattrat(int dfd, const char *path, unsigned int at_flags,
+	const char *name, struct shim_xattr_args *args, size_t size);
 extern ssize_t shim_listxattr(const char *path, char *list, size_t size);
+extern ssize_t shim_listxattrat(int dfd, const char *path, unsigned int at_flags,
+	char *list, size_t size);
 extern ssize_t shim_flistxattr(int fd, char *list, size_t size);
 extern int shim_setxattr(const char *path, const char *name, const void *value,
 	size_t size, int flags);
+extern int shim_setxattrat(int dfd, const char *path, unsigned int at_flags,
+	const char *name, const struct shim_xattr_args *args, size_t size);
 extern int shim_fsetxattr(int fd, const char *name, const void *value,
 	size_t size, int flags);
 extern int shim_lsetxattr(const char *path, const char *name,
@@ -412,12 +640,14 @@ extern ssize_t shim_lgetxattr(const char *path, const char *name, void *value,
 extern ssize_t shim_fgetxattr(int fd, const char *name, void *value,
 	size_t size);
 extern int shim_removexattr(const char *path, const char *name);
+extern int shim_removexattrat(int dfd, const char *path, unsigned int at_flags,
+	const char *name);
 extern int shim_lremovexattr(const char *path, const char *name);
 extern int shim_fremovexattr(int fd, const char *name);
 extern ssize_t shim_llistxattr(const char *path, char *list, size_t size);
 extern int shim_reboot(int magic, int magic2, int cmd, void *arg);
 extern ssize_t shim_process_madvise(int pidfd, const struct iovec *iovec,
-	unsigned long vlen, int advice, unsigned int flags);
+	unsigned long int vlen, int advice, unsigned int flags);
 extern int shim_clock_getres(clockid_t clk_id, struct timespec *res);
 extern int shim_clock_adjtime(clockid_t clk_id, shim_timex_t *buf);
 extern int shim_clock_gettime(clockid_t clk_id, struct timespec *tp);
@@ -429,18 +659,18 @@ extern int shim_close_range(unsigned int fd, unsigned int max_fd,
 	unsigned int flags);
 extern int shim_lookup_dcookie(uint64_t cookie, char *buffer, size_t len);
 extern ssize_t shim_readlink(const char *pathname, char *buf, size_t bufsiz);
-extern long shim_sgetmask(void);
-extern long shim_ssetmask(long newmask);
+extern long int shim_sgetmask(void);
+extern long int shim_ssetmask(long int newmask);
 extern int shim_stime(const time_t *t);
 extern int shim_vhangup(void);
-extern int shim_arch_prctl(int code, unsigned long addr);
+extern int shim_arch_prctl(int code, unsigned long int addr);
 extern int shim_tgkill(int tgid, int tid, int sig);
 extern int shim_tkill(int tid, int sig);
-extern int shim_memfd_secret(unsigned long flags);
+extern int shim_memfd_secret(unsigned long int flags);
 extern int shim_getrusage(int who, struct rusage *usage);
 extern int shim_quotactl_fd(unsigned int fd, unsigned int cmd, int id,
 	void *addr);
-extern int shim_modify_ldt(int func, void *ptr, unsigned long bytecount);
+extern int shim_modify_ldt(int func, void *ptr, unsigned long int bytecount);
 extern int shim_process_mrelease(int pidfd, unsigned int flags);
 extern int shim_futex_waitv(struct shim_futex_waitv *waiters,
 	unsigned int nr_futexes, unsigned int flags, struct timespec *timeout,
@@ -457,8 +687,8 @@ extern int shim_finit_module(int fd, const char *uargs, int flags);
 extern int shim_delete_module(const char *name, unsigned int flags);
 extern int shim_raise(int sig);
 extern int shim_kill(pid_t pid, int sig);
-extern int shim_set_mempolicy_home_node(unsigned long start, unsigned long len,
-        unsigned long home_node, unsigned long flags);
+extern int shim_set_mempolicy_home_node(unsigned long int start, unsigned long int len,
+        unsigned long int home_node, unsigned long int flags);
 extern int shim_fchmodat(int dfd, const char *filename, mode_t mode,
 	unsigned int flags);
 extern int shim_fchmodat2(int dfd, const char *filename, mode_t mode,
@@ -467,5 +697,8 @@ extern int shim_fstat(int fd, struct stat *statbuf);
 extern int shim_lstat(const char *pathname, struct stat *statbuf);
 extern int shim_stat(const char *pathname, struct stat *statbuf);
 extern unsigned char shim_dirent_type(const char *path, const struct dirent *d);
+extern int shim_mseal(void *addr, size_t len, unsigned long int flags);
+extern int shim_ppoll(shim_pollfd_t *fds, shim_nfds_t nfds,
+	const struct timespec *tmo_p, const sigset_t *sigmask);
 
 #endif

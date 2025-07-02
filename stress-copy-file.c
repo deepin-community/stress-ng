@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,19 +33,9 @@ static const stress_help_t help[] = {
 
 };
 
-static int stress_set_copy_file_bytes(const char *opt)
-{
-	uint64_t copy_file_bytes;
-
-	copy_file_bytes = stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("copy-file-bytes", copy_file_bytes,
-		MIN_COPY_FILE_BYTES, MAX_COPY_FILE_BYTES);
-	return stress_set_setting("copy-file-bytes", TYPE_ID_UINT64, &copy_file_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_copy_file_bytes,	stress_set_copy_file_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_copy_file_bytes, "copy-file-bytes", TYPE_ID_UINT64_BYTES_FS, MIN_COPY_FILE_BYTES, MAX_COPY_FILE_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_COPY_FILE_RANGE)
@@ -66,7 +56,7 @@ static inline shim_off64_t stress_copy_file_seek64(int fd, shim_off64_t off64, i
 
 	if (off64 > max_off64) {
 		errno = EINVAL;
-		return -1;
+		return (shim_off64_t)-1;
 	}
 	return (shim_off64_t)lseek(fd, (off_t)off64, whence);
 #endif
@@ -97,7 +87,7 @@ static int stress_copy_file_fill(
 		if (n < 0)
 			return -1;
 		sz -= n;
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			return 0;
 	}
 	return 0;
@@ -162,22 +152,28 @@ static int stress_copy_file(stress_args_t *args)
 	int fd_in, fd_out, rc = EXIT_FAILURE, ret;
 	const int fd_bad = stress_get_bad_fd();
 	char filename[PATH_MAX - 5], tmp[PATH_MAX];
-	uint64_t copy_file_bytes = DEFAULT_COPY_FILE_BYTES;
+	uint64_t copy_file_bytes, copy_file_bytes_total = DEFAULT_COPY_FILE_BYTES;
 	double duration = 0.0, bytes = 0.0, rate;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
-	if (!stress_get_setting("copy-file-bytes", &copy_file_bytes)) {
+	if (!stress_get_setting("copy-file-bytes", &copy_file_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			copy_file_bytes = MAX_COPY_FILE_BYTES;
+			copy_file_bytes_total = MAX_COPY_FILE_BYTES;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			copy_file_bytes = MIN_COPY_FILE_BYTES;
+			copy_file_bytes_total = MIN_COPY_FILE_BYTES;
 	}
 
-	copy_file_bytes /= args->num_instances;
-	if (copy_file_bytes < DEFAULT_COPY_FILE_SIZE)
+	copy_file_bytes = copy_file_bytes_total / args->instances;
+	if (copy_file_bytes < DEFAULT_COPY_FILE_SIZE) {
 		copy_file_bytes = DEFAULT_COPY_FILE_SIZE * 2;
-	if (copy_file_bytes < MIN_COPY_FILE_BYTES)
+		copy_file_bytes_total = copy_file_bytes * args->instances;
+	}
+	if (copy_file_bytes < MIN_COPY_FILE_BYTES) {
 		copy_file_bytes = MIN_COPY_FILE_BYTES;
+		copy_file_bytes_total = copy_file_bytes * args->instances;
+	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, copy_file_bytes, copy_file_bytes_total);
 
         ret = stress_temp_dir_mk_args(args);
         if (ret < 0)
@@ -208,8 +204,26 @@ static int stress_copy_file(stress_args_t *args)
 			args->name, tmp, errno, strerror(errno));
 		goto tidy_in;
 	}
+
+#if defined(HAVE_PATHCONF)
+	/* Exercise some pathconf options */
+#if defined(_PC_REC_INCR_XFER_SIZE)
+	VOID_RET(long int, pathconf(tmp, _PC_REC_INCR_XFER_SIZE));
+#endif
+#if defined(_PC_REC_MAX_XFER_SIZE)
+	VOID_RET(long int, pathconf(tmp, _PC_REC_MAX_XFER_SIZE));
+#endif
+#if defined(_PC_REC_MIN_XFER_SIZE)
+	VOID_RET(long int, pathconf(tmp, _PC_REC_MIN_XFER_SIZE));
+#endif
+#if defined(_PC_REC_XFER_ALIGN)
+	VOID_RET(long int, pathconf(tmp, _PC_REC_XFER_ALIGN));
+#endif
+#endif
 	(void)shim_unlink(tmp);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -222,10 +236,10 @@ static int stress_copy_file(stress_args_t *args)
 		off64_out_orig = (shim_loff_t)stress_mwc64modn(copy_file_bytes - DEFAULT_COPY_FILE_SIZE);
 		off64_out = off64_out_orig;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		stress_copy_file_fill(args, fd_in, off64_in, DEFAULT_COPY_FILE_SIZE);
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		t = stress_time_now();
 		copy_ret = shim_copy_file_range(fd_in, &off64_in, fd_out,
@@ -265,11 +279,11 @@ static int stress_copy_file(stress_args_t *args)
 			verify_ret = stress_copy_file_range_verify(fd_in, &off64_in,
 					fd_out, &off64_out, copy_ret);
 			if (verify_ret < 0) {
-				pr_fail("%s: copy_file_range verify failed, input offset=%jd, output offset=%jd\n",
+				pr_fail("%s: copy_file_range verify failed, input offset=%" PRIdMAX " output offset=%" PRIdMAX "\n",
 					args->name, (intmax_t)off64_in_orig, (intmax_t)off64_out_orig);
 			}
 		}
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		/*
@@ -287,7 +301,7 @@ static int stress_copy_file(stress_args_t *args)
 		 */
 		VOID_RET(ssize_t, shim_copy_file_range(fd_in, &off64_in, fd_out,
 						&off64_out, DEFAULT_COPY_FILE_SIZE, ~0U));
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		(void)shim_fsync(fd_out);
 		stress_bogo_inc(args);
@@ -296,7 +310,7 @@ static int stress_copy_file(stress_args_t *args)
 
 	rate = (duration > 0.0) ? bytes / duration : 0.0;
 	stress_metrics_set(args, 0, "MB per sec copy rate",
-		rate / (double)MB, STRESS_HARMONIC_MEAN);
+		rate / (double)MB, STRESS_METRIC_HARMONIC_MEAN);
 
 tidy_out:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -311,18 +325,18 @@ tidy_dir:
 	return rc;
 }
 
-stressor_info_t stress_copy_file_info = {
+const stressor_info_t stress_copy_file_info = {
 	.stressor = stress_copy_file,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_copy_file_info = {
+const stressor_info_t stress_copy_file_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without clone() system call"

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,14 +26,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		  NULL }
 };
 
-static int stress_set_mincore_rand(const char *opt)
-{
-	return stress_set_setting_true("mincore-rand", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mincore_rand,     stress_set_mincore_rand },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_mincore_rand, "mincore-rand", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_MINCORE) &&	\
@@ -79,20 +74,24 @@ static void stress_mincore_expect(
 	const int ret_expected,	/* expected return value */
 	const int err,		/* returned errno */
 	const int err_expected,	/* expected errno */
-	char *msg)		/* test message */
+	char *msg,		/* test message */
+	int *rc)		/* return code */
 {
 	if (LIKELY(ret == ret_expected)) {
 		if (LIKELY(ret_expected == 0))
 			return;	/* Success! */
 		pr_fail("%s: unexpected success exercising %s\n",
 			args->name, msg);
+		*rc = EXIT_FAILURE;
 	}
 	/* Silently ignore ENOSYS for now */
 	if (UNLIKELY(err == ENOSYS))
 		return;
-	if (err != err_expected)
+	if (UNLIKELY(err != err_expected)) {
 		pr_fail("%s: expected errno %d, got %d instead while exercising %s\n",
 			args->name, err_expected, err, msg);
+		*rc = EXIT_FAILURE;
+	}
 }
 
 /*
@@ -101,7 +100,7 @@ static void stress_mincore_expect(
  */
 static int stress_mincore(stress_args_t *args)
 {
-	uint8_t *addr = 0, *prev_addr = 0;
+	uint8_t *addr = NULL, *prev_addr = NULL;
 	const size_t page_size = args->page_size;
 	const intptr_t mask = ~((intptr_t)page_size - 1);
 	bool mincore_rand = false;
@@ -114,6 +113,8 @@ static int stress_mincore(stress_args_t *args)
 	/* Don't worry if we can't map a page, it is not critical */
 	mapped = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapped != MAP_FAILED)
+		stress_set_vma_anon_name(mapped, page_size, "rw-page");
 
 	/* Map a file backed page, silently ignore failure */
 	fd = stress_mincore_file(args);
@@ -123,21 +124,25 @@ static int stress_mincore(stress_args_t *args)
 	} else {
 		fdmapped = MAP_FAILED;
 	}
+	if (fdmapped != MAP_FAILED)
+		stress_set_vma_anon_name(fdmapped, page_size, "fd-page");
 
 	/* Map then unmap a page to get an unmapped page address */
 	unmapped = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (unmapped != MAP_FAILED) {
-		if (munmap(unmapped, page_size) < 0)
+		if (munmap((void *)unmapped, page_size) < 0)
 			unmapped = MAP_FAILED;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		int i;
 
-		for (i = 0; (i < 100) && stress_continue_flag(); i++) {
+		for (i = 0; LIKELY((i < 100) && stress_continue_flag()); i++) {
 			int ret, redo = 0;
 			static unsigned char vec[1];
 			double t;
@@ -150,11 +155,11 @@ redo: 			errno = 0;
 					/* Page not mapped */
 					break;
 				case EAGAIN:
-					if (++redo < 100)
+					if (LIKELY(++redo < 100))
 						goto redo;
 					break;
 				case ENOSYS:
-					if (args->instance == 0)
+					if (UNLIKELY(stress_instance_zero(args)))
 						pr_inf_skip("%s: mincore no not implemented, skipping stressor\n",
 							args->name);
 					rc = EXIT_NOT_IMPLEMENTED;
@@ -177,7 +182,7 @@ redo: 			errno = 0;
 					count += 1.0;
 				} else {
 					/* Should not return ENOMEM on a mapped page */
-					if (errno == ENOMEM) {
+					if (UNLIKELY(errno == ENOMEM)) {
 						pr_fail("%s: mincore on address %p failed, errno=$%d (%s)\n",
 							args->name, (void *)mapped, errno,
 							strerror(errno));
@@ -194,7 +199,7 @@ redo: 			errno = 0;
 				ret = shim_mincore((void *)fdmapped, page_size, vec);
 				if (ret < 0) {
 					/* Should not return ENOMEM on a mapped page */
-					if (errno == ENOMEM) {
+					if (UNLIKELY(errno == ENOMEM)) {
 						pr_fail("%s: mincore on address %p failed, errno=$%d (%s)\n",
 							args->name, (void *)fdmapped, errno,
 							strerror(errno));
@@ -205,7 +210,7 @@ redo: 			errno = 0;
 			if (UNLIKELY(unmapped != MAP_FAILED)) {
 				/* mincore on unmapped page should fail */
 				ret = shim_mincore((void *)unmapped, page_size, vec);
-				if (ret == 0) {
+				if (UNLIKELY(ret == 0)) {
 					pr_fail("%s: mincore on unmapped address %p should have failed but did not\n",
 						args->name, (void *)unmapped);
 					rc = EXIT_FAILURE;
@@ -227,7 +232,7 @@ redo: 			errno = 0;
 				 */
 				ret = shim_mincore((void *)mapped, 0, vec);
 				stress_mincore_expect(args, ret, 0, errno, EINVAL,
-					"zero length for vector size");
+					"zero length for vector size", &rc);
 
 #if 0
 				/*
@@ -235,7 +240,7 @@ redo: 			errno = 0;
 				 */
 				ret = shim_mincore((void *)mapped, ~0, vec);
 				stress_mincore_expect(args, ret, 0, errno, ENOMEM,
-					"invalid length for vector size");
+					"invalid length for vector size", &rc);
 #endif
 
 				/*
@@ -243,21 +248,21 @@ redo: 			errno = 0;
 				 */
 				ret = shim_mincore((void *)(mapped + 1), 0, vec);
 				stress_mincore_expect(args, ret, 0, errno, EINVAL,
-					"misaligned address");
+					"misaligned address", &rc);
 
 				/*
 				 *  Exercise with NULL vec, ignore return
 				 */
 				ret = shim_mincore((void *)mapped, page_size, NULL);
 				stress_mincore_expect(args, ret, 0, errno, EFAULT,
-					"NULL vector address");
+					"NULL vector address", &rc);
 
 				/*
 				 *  Exercise with invalid page
 				 */
 				ret = shim_mincore(mapped, page_size, args->mapped->page_none);
 				stress_mincore_expect(args, ret, 0, errno, EFAULT,
-					"invalid vector address");
+					"invalid vector address", &rc);
 			}
 
 			/*
@@ -265,21 +270,23 @@ redo: 			errno = 0;
 			 */
 			ret = shim_mincore(NULL, page_size, vec);
 			stress_mincore_expect(args, ret, 0, errno, ENOMEM,
-				"NULL memory address");
+				"NULL memory address", &rc);
 
 			/*
 			 *  Exercise with NULL/zero arguments
 			 */
 			ret = shim_mincore(NULL, 0, NULL);
-			stress_mincore_expect(args, ret, 0, errno, EINVAL,
-				"NULL and zero arguments");
+			/*  some systems return ENOMEM.. */
+			if (UNLIKELY(errno != ENOMEM))
+				stress_mincore_expect(args, ret, 0, errno, EINVAL,
+					"NULL and zero arguments", &rc);
 		}
 		stress_bogo_inc(args);
 	} while (stress_continue(args));
 
 	rate = (count > 0.0) ? duration / count : 0.0;
 	stress_metrics_set(args, 0, "nanosecs per mincore call",
-		rate * STRESS_DBL_NANOSECOND, STRESS_HARMONIC_MEAN);
+		rate * STRESS_DBL_NANOSECOND, STRESS_METRIC_HARMONIC_MEAN);
 
 err:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
@@ -296,18 +303,18 @@ err:
 	return rc;
 }
 
-stressor_info_t stress_mincore_info = {
+const stressor_info_t stress_mincore_info = {
 	.stressor = stress_mincore,
-	.class = CLASS_OS | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_mincore_info = {
+const stressor_info_t stress_mincore_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_OS | CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without mincore() system call support"

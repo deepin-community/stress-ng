@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,9 @@
  *
  */
 #include "stress-ng.h"
+
+#include <time.h>
+#include <sys/ioctl.h>
 
 #if defined(HAVE_LINUX_WATCHDOG_H)
 #include <linux/watchdog.h>
@@ -114,12 +117,12 @@ static int stress_watchdog(stress_args_t *args)
 	 */
 	if (access(dev_watchdog, R_OK | W_OK) < 0) {
 		if (errno == ENOENT) {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: %s does not exist, skipping test\n",
 					args->name, dev_watchdog);
 			return EXIT_SUCCESS;
 		} else {
-			if (args->instance == 0)
+			if (stress_instance_zero(args))
 				pr_inf_skip("%s: cannot access %s, errno=%d (%s), skipping test\n",
 					args->name, dev_watchdog, errno, strerror(errno));
 			return EXIT_SUCCESS;
@@ -137,6 +140,8 @@ static int stress_watchdog(stress_args_t *args)
 		return EXIT_SUCCESS;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	while (stress_continue(args)) {
@@ -155,7 +160,7 @@ static int stress_watchdog(stress_args_t *args)
 		stress_watchdog_magic_close();
 
 #if defined(WDIOC_KEEPALIVE)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			VOID_RET(int, ioctl(fd, WDIOC_KEEPALIVE, 0));
 		}
 #else
@@ -163,7 +168,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETTIMEOUT)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int timeout = 0;
 
 			if ((ioctl(fd, WDIOC_GETTIMEOUT, &timeout) == 0) &&
@@ -178,7 +183,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETPRETIMEOUT)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int timeout = 0;
 
 			if ((ioctl(fd, WDIOC_GETPRETIMEOUT, &timeout) == 0) &&
@@ -193,7 +198,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETTIMELEFT)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int timeout = 0;
 
 			if ((ioctl(fd, WDIOC_GETTIMELEFT, &timeout) == 0) &&
@@ -208,7 +213,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETSUPPORT)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			struct watchdog_info ident;
 
 			VOID_RET(int, ioctl(fd, WDIOC_GETSUPPORT, &ident));
@@ -218,7 +223,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETSTATUS)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int flags;
 
 			VOID_RET(int, ioctl(fd, WDIOC_GETSTATUS, &flags));
@@ -228,7 +233,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETBOOTSTATUS)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int flags;
 
 			VOID_RET(int, ioctl(fd, WDIOC_GETBOOTSTATUS, &flags));
@@ -238,7 +243,7 @@ static int stress_watchdog(stress_args_t *args)
 #endif
 
 #if defined(WDIOC_GETTEMP)
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			int temperature = 0;
 
 			if ((ioctl(fd, WDIOC_GETTEMP, &temperature) == 0) &&
@@ -270,16 +275,16 @@ static int stress_watchdog(stress_args_t *args)
 	return rc;
 }
 
-stressor_info_t stress_watchdog_info = {
+const stressor_info_t stress_watchdog_info = {
 	.stressor = stress_watchdog,
-	.class = CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_watchdog_info = {
+const stressor_info_t stress_watchdog_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS | CLASS_PATHOLOGICAL,
+	.classifier = CLASS_OS | CLASS_PATHOLOGICAL,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without linux/watchdog.h"

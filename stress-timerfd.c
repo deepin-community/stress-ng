@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  */
 #include "stress-ng.h"
 #include "core-capabilities.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_SYS_TIMERFD_H)
 #include <sys/timerfd.h>
@@ -44,7 +46,7 @@ UNEXPECTED
 
 static const stress_help_t help[] = {
 	{ NULL,	"timerfd N",	  "start N workers producing timerfd events" },
-	{ NULL, "timerfd-fds N", "number of timerfd file descriptors to open" },
+	{ NULL, "timerfd-fds N",  "number of timerfd file descriptors to open" },
 	{ NULL,	"timerfd-freq F", "run timer(s) at F Hz, range 1 to 1000000000" },
 	{ NULL,	"timerfd-ops N",  "stop after N timerfd bogo events" },
 	{ NULL,	"timerfd-rand",	  "enable random timerfd frequency" },
@@ -52,7 +54,8 @@ static const stress_help_t help[] = {
 };
 
 #define COUNT_MAX		(256)
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 #define TIMER_FDS_MAX		(INT_MAX)
 #define USE_POLL		(1)
 #elif defined(HAVE_SELECT)
@@ -63,43 +66,11 @@ static const stress_help_t help[] = {
 #endif
 #define TIMER_FDS_DEFAULT	STRESS_MINIMUM(1024, TIMER_FDS_MAX)
 
-/*
- *  stress_set_timerfd_fds()
- *	set maximum number of timerfd file descriptors to use
- */
-static int stress_set_timerfd_fds(const char *opt)
-{
-	int timerfd_fds;
-
-	timerfd_fds = (int)stress_get_uint32(opt);
-	stress_check_range("timerfd-fds", (uint64_t)timerfd_fds, 1, TIMER_FDS_MAX);
-	return stress_set_setting("timerfd-fds", TYPE_ID_INT, &timerfd_fds);
-}
-
-/*
- *  stress_set_timerfd_freq()
- *	set timer frequency from given option
- */
-static int stress_set_timerfd_freq(const char *opt)
-{
-	uint64_t timerfd_freq;
-
-	timerfd_freq = stress_get_uint64(opt);
-	stress_check_range("timerfd-freq", timerfd_freq,
-		MIN_TIMERFD_FREQ, MAX_TIMERFD_FREQ);
-	return stress_set_setting("timerfd-freq", TYPE_ID_UINT64, &timerfd_freq);
-}
-
-static int stress_set_timerfd_rand(const char *opt)
-{
-	return stress_set_setting_true("timerfd-rand", opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_timerfd_fds,	stress_set_timerfd_fds },
-	{ OPT_timerfd_freq,	stress_set_timerfd_freq },
-	{ OPT_timerfd_rand,	stress_set_timerfd_rand },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_timerfd_fds,  "timerfd-fds",  TYPE_ID_INT, 1, TIMER_FDS_MAX, NULL },
+	{ OPT_timerfd_freq, "timerfd-freq", TYPE_ID_UINT64, MIN_TIMERFD_FREQ, MAX_TIMERFD_FREQ, NULL },
+	{ OPT_timerfd_rand, "timerfd-rand", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_TIMERFD_H) &&	\
@@ -175,22 +146,40 @@ static int stress_timerfd(stress_args_t *args)
 	rate_ns = timerfd_freq ? (double)STRESS_NANOSECOND / (double)timerfd_freq :
 				 (double)STRESS_NANOSECOND;
 
-	timerfds = calloc((size_t)timerfd_fds, sizeof(*timerfds));
+	/* Create a non valid timerfd file descriptor */
+	ret = stress_temp_dir_mk_args(args);
+	if (ret < 0) {
+		rc = stress_exit_status(-ret);
+		goto dir_rm;
+	}
+	(void)stress_temp_filename_args(args, file_fd_name, sizeof(file_fd_name), stress_mwc32());
+	file_fd = open(file_fd_name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+	if (file_fd < 0) {
+		pr_err("%s: cannot create %s\n", args->name, file_fd_name);
+		rc = stress_exit_status(errno);
+		goto close_file_fd;
+	}
+	(void)shim_unlink(file_fd_name);
+
+	timerfds = (int *)calloc((size_t)timerfd_fds, sizeof(*timerfds));
 	if (!timerfds) {
-		pr_inf_skip("%s: cannot allocate %" PRIu32 " timerfd file descriptors, "
-			"skipping stressor\n", args->name, timerfd_fds);
-		return EXIT_NO_RESOURCE;
+		pr_inf_skip("%s: failed to allocate %" PRIu32 " timerfd file descriptors%s, "
+			"skipping stressor\n", args->name,
+			timerfd_fds, stress_get_memfree_str());
+		rc = EXIT_NO_RESOURCE;
+		goto close_file_fd;
 	}
 	for (i = 0; i < timerfd_fds; i++)
 		timerfds[i] = -1;
 
 #if defined(USE_POLL)
-	pollfds = calloc((size_t)timerfd_fds, sizeof(*pollfds));
+	pollfds = (struct pollfd *)calloc((size_t)timerfd_fds, sizeof(*pollfds));
 	if (!pollfds) {
-		pr_inf_skip("%s: cannot allocate %" PRIu32 " timerfd file descriptors, "
-			"skipping stressor\n", args->name, timerfd_fds);
+		pr_inf_skip("%s: failed to allocate %" PRIu32 " pollfd file descriptors%s, "
+			"skipping stressor\n", args->name,
+			timerfd_fds, stress_get_memfree_str());
 		rc = EXIT_NO_RESOURCE;
-		goto free_fds;
+		goto free_timerfds;
 	}
 #endif
 
@@ -217,21 +206,6 @@ static int stress_timerfd(stress_args_t *args)
 		}
 	}
 
-	/* Create a non valid timerfd file descriptor */
-	ret = stress_temp_dir_mk_args(args);
-	if (ret < 0) {
-		rc = stress_exit_status(-ret);
-		goto dir_rm;
-	}
-	(void)stress_temp_filename_args(args, file_fd_name, sizeof(file_fd_name), stress_mwc32());
-	file_fd = open(file_fd_name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
-	if (file_fd < 0) {
-		pr_err("%s: cannot create %s\n", args->name, file_fd_name);
-		rc = stress_exit_status(errno);
-		goto close_file_fd;
-	}
-	(void)shim_unlink(file_fd_name);
-
 #if defined(CLOCK_REALTIME_ALARM)
 	/* Check timerfd_create cannot succeed without capability */
 	if (!cap_wake_alarm) {
@@ -246,6 +220,10 @@ static int stress_timerfd(stress_args_t *args)
 	}
 #endif
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 #if defined(CLOCK_REALTIME)
 	/* Exercise timerfd_create with invalid flags */
 	ret = timerfd_create(CLOCK_REALTIME, ~0);
@@ -256,7 +234,7 @@ static int stress_timerfd(stress_args_t *args)
 	if (count == 0) {
 		pr_fail("%s: timerfd_create failed, no timers created\n", args->name);
 		rc = EXIT_FAILURE;
-		goto close_file_fd;
+		goto free_pollfds;
 	}
 	count = 0;
 
@@ -268,11 +246,9 @@ static int stress_timerfd(stress_args_t *args)
 			pr_fail("%s: timerfd_settime failed on fd %d, errno=%d (%s)\n",
 				args->name, timerfds[i], errno, strerror(errno));
 			rc = EXIT_FAILURE;
-			goto close_file_fd;
+			goto free_pollfds;
 		}
 	}
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
 		uint64_t expval;
@@ -288,7 +264,7 @@ static int stress_timerfd(stress_args_t *args)
 #if defined(USE_SELECT)
 		FD_ZERO(&rdfs);
 		for (i = 0; i < timerfd_fds; i++) {
-			if (timerfds[i] >= 0)
+			if (LIKELY(timerfds[i] >= 0))
 				FD_SET(timerfds[i], &rdfs);
 		}
 		timeout.tv_sec = 0;
@@ -296,7 +272,7 @@ static int stress_timerfd(stress_args_t *args)
 #endif
 #if defined(USE_POLL)
 		for (i = 0, j = 0; i < timerfd_fds; i++) {
-			if (timerfds[i] >= 0) {
+			if (LIKELY(timerfds[i] >= 0)) {
 				pollfds[j].fd = timerfds[i];
 				pollfds[j].events = POLLIN;
 				pollfds[j].revents = 0;
@@ -305,7 +281,7 @@ static int stress_timerfd(stress_args_t *args)
 		}
 #endif
 
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 #if defined(USE_SELECT)
 		ret = select(max_timerfd + 1, &rdfs, NULL, NULL, &timeout);
@@ -384,7 +360,7 @@ static int stress_timerfd(stress_args_t *args)
     defined(TFD_IOC_SET_TICKS)
 		/* Exercise timer tick setting ioctl */
 		{
-			unsigned long arg = 1ULL;
+			unsigned long int arg = 1ULL;
 
 			VOID_RET(int, ioctl(timerfds[0], TFD_IOC_SET_TICKS, &arg));
 		}
@@ -403,11 +379,6 @@ static int stress_timerfd(stress_args_t *args)
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
-close_file_fd:
-	if (file_fd >= 0)
-		(void)close(file_fd);
-dir_rm:
-	(void)stress_temp_dir_rm_args(args);
 
 close_timer_fds:
 	for (i = 0; i < timerfd_fds; i++) {
@@ -415,27 +386,34 @@ close_timer_fds:
 			(void)close(timerfds[i]);
 	}
 
+free_pollfds:
 #if defined(USE_POLL)
-free_fds:
 	free(pollfds);
+free_timerfds:
 #endif
 	free(timerfds);
+
+close_file_fd:
+	if (file_fd >= 0)
+		(void)close(file_fd);
+dir_rm:
+	(void)stress_temp_dir_rm_args(args);
 
 	return rc;
 }
 
-stressor_info_t stress_timerfd_info = {
+const stressor_info_t stress_timerfd_info = {
 	.stressor = stress_timerfd,
-	.class = CLASS_INTERRUPT | CLASS_OS,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_timerfd_info = {
+const stressor_info_t stress_timerfd_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_INTERRUPT | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_INTERRUPT | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/timerfd.h, timerfd_create(), timerfd_settime(), timerfd_setime, select() or poll()"

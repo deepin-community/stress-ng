@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -61,43 +61,6 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-/*
- *  stress_set_forkheavy_mlock
- *     enable mlocking on allocated pages
- */
-static int stress_set_forkheavy_mlock(const char *opt)
-{
-	return stress_set_setting_true("forkheavy-mlock", opt);
-}
-
-/*
- *  stress_set_forkeheavy_allocs()
- *	set maximum number of resources allocated
- */
-static int stress_set_forkheavy_allocs(const char *opt)
-{
-	uint32_t forkheavy_allocs;
-
-	forkheavy_allocs = stress_get_uint32(opt);
-	stress_check_range("forkheavy-allocs", (uint64_t)forkheavy_allocs,
-		MIN_FORKHEAVY_ALLOCS, MAX_FORKHEAVY_ALLOCS);
-	return stress_set_setting("forkheavy-allocs", TYPE_ID_UINT32, &forkheavy_allocs);
-}
-
-/*
- *  stress_set_forkeheavy_procs()
- *	set maximum number of processes allowed
- */
-static int stress_set_forkheavy_procs(const char *opt)
-{
-	uint32_t forkheavy_procs;
-
-	forkheavy_procs = stress_get_uint32(opt);
-	stress_check_range("forkheavy-procs", (uint64_t)forkheavy_procs,
-		MIN_FORKHEAVY_PROCS, MAX_FORKHEAVY_PROCS);
-	return stress_set_setting("forkheavy-procs", TYPE_ID_UINT32, &forkheavy_procs);
-}
-
 static stress_forkheavy_list_t forkheavy_list;
 
 /*
@@ -114,7 +77,7 @@ static stress_forkheavy_t *stress_forkheavy_new(void)
 		forkheavy_list.free = new->next;
 		new->next = NULL;
 	} else {
-		new = malloc(sizeof(*new));
+		new = (stress_forkheavy_t *)malloc(sizeof(*new));
 		if (!new)
 			return NULL;
 	}
@@ -194,8 +157,18 @@ static int stress_forkheavy_child(stress_args_t *args, void *context)
 	if (min_mem_free < MIN_MEM_FREE)
 		min_mem_free = MIN_MEM_FREE;
 
-	(void)stress_get_setting("forkheavy-allocs", &forkheavy_allocs);
-	(void)stress_get_setting("forkheavy-procs", &forkheavy_procs);
+	if (!stress_get_setting("forkheavy-allocs", &forkheavy_allocs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			forkheavy_allocs = MAX_FORKHEAVY_ALLOCS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			forkheavy_allocs = MAX_FORKHEAVY_ALLOCS;
+	}
+	if (!stress_get_setting("forkheavy-procs", &forkheavy_procs)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			forkheavy_procs = MAX_FORKHEAVY_PROCS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			forkheavy_procs = MIN_FORKHEAVY_PROCS;
+	}
 	(void)stress_get_setting("forkheavy-mlock", &forkheavy_mlock);
 
 #if defined(MCL_FUTURE)
@@ -209,7 +182,10 @@ static int stress_forkheavy_child(stress_args_t *args, void *context)
 				forkheavy_args->num_resources,
 				forkheavy_args->pipe_size, min_mem_free, false);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
 	do {
 		const bool low_mem_reap = stress_low_memory(MIN_MEM_FREE);
 
@@ -280,9 +256,9 @@ static int stress_forkheavy(stress_args_t *args)
 	(void)shim_memset(&forkheavy_args, 0, sizeof(forkheavy_args));
 	forkheavy_args.pipe_size = stress_probe_max_pipe_size();
 	forkheavy_args.num_resources = DEFAULT_FORKHEAVY_ALLOCS;
-	forkheavy_args.resources = malloc(forkheavy_args.num_resources * sizeof(*forkheavy_args.resources));
+	forkheavy_args.resources = (stress_resources_t *)malloc(forkheavy_args.num_resources * sizeof(*forkheavy_args.resources));
 	if (!forkheavy_args.resources) {
-		pr_inf_skip("%s: cannot allocate %zd resource structures, skipping stressor\n",
+		pr_inf_skip("%s: cannot allocate %zu resource structures, skipping stressor\n",
 			args->name, forkheavy_args.num_resources);
 		return EXIT_NO_RESOURCE;
 	}
@@ -292,15 +268,14 @@ static int stress_forkheavy(stress_args_t *args)
 			PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (metrics == MAP_FAILED) {
-		pr_inf_skip("%s: failed to memory map %zd bytes, skipping stressor\n",
-			args->name, sizeof(*metrics));
+		pr_inf_skip("%s: failed to memory map %zu bytes%s, skipping stressor\n",
+			args->name, sizeof(*metrics), stress_get_memfree_str());
 		free(forkheavy_args.resources);
 		return EXIT_NO_RESOURCE;
 	}
-	metrics->lock = stress_lock_create();
-	metrics->duration = 0.0;
-	metrics->count = 0.0;
-	metrics->t_start = 0.0;
+	stress_set_vma_anon_name(metrics, sizeof(*metrics), "metrics");
+	stress_zero_metrics(metrics, 1);
+	metrics->lock = stress_lock_create("metrics");
 
 	forkheavy_args.metrics = metrics;
 
@@ -312,7 +287,7 @@ static int stress_forkheavy(stress_args_t *args)
 
 	average = (metrics->count > 0.0) ? metrics->duration / metrics->count : 0.0;
 	stress_metrics_set(args, 0, "microsecs per fork" ,
-		average * 1000000, STRESS_HARMONIC_MEAN);
+		average * 1000000, STRESS_METRIC_HARMONIC_MEAN);
 
 	(void)munmap((void *)metrics, sizeof(*metrics));
 	free(forkheavy_args.resources);
@@ -320,16 +295,16 @@ static int stress_forkheavy(stress_args_t *args)
 	return rc;
 }
 
-static const stress_opt_set_func_t forkheavy_opt_set_funcs[] = {
-	{ OPT_forkheavy_allocs,	stress_set_forkheavy_allocs },
-	{ OPT_forkheavy_mlock,	stress_set_forkheavy_mlock },
-	{ OPT_forkheavy_procs,	stress_set_forkheavy_procs },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_forkheavy_allocs,	"forkheavy-allocs", TYPE_ID_UINT32, MIN_FORKHEAVY_ALLOCS, MAX_FORKHEAVY_ALLOCS, NULL },
+	{ OPT_forkheavy_mlock,	"forkheavy-mlock",  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_forkheavy_procs,	"forkheavy-procs",  TYPE_ID_UINT32, MIN_FORKHEAVY_PROCS, MAX_FORKHEAVY_PROCS, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_forkheavy_info = {
+const stressor_info_t stress_forkheavy_info = {
 	.stressor = stress_forkheavy,
-	.class = CLASS_SCHEDULER | CLASS_OS,
-	.opt_set_funcs = forkheavy_opt_set_funcs,
+	.classifier = CLASS_SCHEDULER | CLASS_OS,
+	.opts = opts,
 	.help = help
 };

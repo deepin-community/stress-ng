@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,12 +28,20 @@
 #include "core-put.h"
 #include "core-try-open.h"
 
+#include <ctype.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+
 #if defined(HAVE_TERMIOS_H)
 #include <termios.h>
 #endif
 
 #if defined(HAVE_LIBGEN_H)
 #include <libgen.h>
+#endif
+
+#if defined(HAVE_LINUX_AUTO_DEV_IOCTL_H)
+#include <linux/auto_dev-ioctl.h>
 #endif
 
 #if defined(HAVE_LINUX_BLKZONED_H)
@@ -48,6 +56,10 @@
 #include <linux/dm-ioctl.h>
 #endif
 
+#if defined(HAVE_LINUX_FB_H)
+#include <linux/fb.h>
+#endif
+
 #if defined(HAVE_LINUX_FD_H)
 #include <linux/fd.h>
 #endif
@@ -58,6 +70,10 @@
 
 #if defined(HAVE_LINUX_HDREG_H)
 #include <linux/hdreg.h>
+#endif
+
+#if defined(HAVE_LINUX_HIDDEV)
+#include <linux/hiddev.h>
 #endif
 
 #if defined(HAVE_LINUX_HIDRAW_H)
@@ -217,17 +233,13 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		NULL }
 };
 
-static int stress_set_dev_file(const char *opt)
-{
-	return stress_set_setting("dev-file", TYPE_ID_STR, opt);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_dev_file,         stress_set_dev_file },
-        { 0,                    NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_dev_file, "dev-file", TYPE_ID_STR, 0, 0, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_POLL_H) &&		\
+    defined(HAVE_POLL) &&		\
     defined(HAVE_LIB_PTHREAD) && 	\
     !defined(__sun__) && 		\
     !defined(__HAIKU__)
@@ -240,6 +252,11 @@ typedef struct stress_dev_func {
 	const size_t devpath_len;
 	void (*func)(stress_args_t *args, const int fd, const char *devpath);
 } stress_dev_func_t;
+
+typedef struct stress_sys_dev_info {
+	struct stress_sys_dev_info	*next;
+	char *sysdevpath;
+} sys_dev_info_t;
 
 static sigset_t set;
 static shim_pthread_spinlock_t lock;
@@ -451,19 +468,99 @@ static void stress_dev_dm_linux(
 #if defined(DM_VERSION) &&	\
     defined(HAVE_DM_IOCTL)
 	{
-		struct dm_ioctl dm;
+		uint8_t buf[sizeof(struct dm_ioctl) + 4096];
+		struct dm_ioctl *dm = (struct dm_ioctl *)buf;
 
-		VOID_RET(int, ioctl(fd, DM_VERSION, &dm));
+		shim_memset(buf, 0, sizeof(buf));
+		dm->version[0] = DM_VERSION_MAJOR;
+		dm->version[1] = DM_VERSION_MINOR;
+		dm->version[2] = 0;
+		VOID_RET(int, ioctl(fd, DM_VERSION, dm));
+
+		/* and try illegal version info */
+		shim_memset(buf, 0, sizeof(buf));
+		dm->version[0] = ~DM_VERSION_MAJOR;
+		dm->version[1] = ~DM_VERSION_MINOR;
+		dm->version[2] = ~0;
+		VOID_RET(int, ioctl(fd, DM_VERSION, dm));
 	}
 #endif
-#if defined(DM_DEV_STATUS) &&	\
+#if defined(DM_LIST_DEVICES) &&	\
     defined(HAVE_DM_IOCTL)
 	{
-		struct dm_ioctl dm;
+		uint8_t buf[sizeof(struct dm_ioctl) + 4096];
+		struct dm_ioctl *dm = (struct dm_ioctl *)buf;
 
-		VOID_RET(int, ioctl(fd, DM_DEV_STATUS, &dm));
+		shim_memset(buf, 0, sizeof(buf));
+		dm->version[0] = DM_VERSION_MAJOR;
+		dm->version[1] = DM_VERSION_MINOR;
+		dm->version[2] = 0;
+		dm->data_size = 4096;
+		dm->data_start = sizeof(struct dm_ioctl);
+
+		if (ioctl(fd, DM_LIST_DEVICES, dm) == 0) {
+			struct dm_name_list *nl = (struct dm_name_list *)(buf + dm->data_start);
+			uint32_t i;
+
+			for (i = 0; i < dm->data_size; i++) {
+#if defined(DM_DEV_STATUS)
+				if (strlen(nl->name) < 4096) {
+
+					uint8_t buf2[sizeof(struct dm_ioctl) + 4096];
+					struct dm_ioctl *dm2 = (struct dm_ioctl *)buf2;
+
+					shim_memset(buf2, 0, sizeof(buf2));
+					dm2->version[0] = DM_VERSION_MAJOR;
+					dm2->version[1] = DM_VERSION_MINOR;
+					dm2->version[2] = 0;
+					dm2->data_size = 4096;
+					dm2->data_start = sizeof(struct dm_ioctl);
+					(void)shim_strscpy(dm2->name, nl->name, sizeof(dm2->name));
+					VOID_RET(int, ioctl(fd, DM_DEV_STATUS, dm2));
+
+					/* and exercise invalid dev name */
+					shim_memset(buf2, 0, sizeof(buf2));
+					dm2->version[0] = DM_VERSION_MAJOR;
+					dm2->version[1] = DM_VERSION_MINOR;
+					dm2->version[2] = 0;
+					dm2->data_size = 4096;
+					dm2->data_start = sizeof(struct dm_ioctl);
+					stress_rndstr(dm2->name, 32);
+					VOID_RET(int, ioctl(fd, DM_DEV_STATUS, dm2));
+				}
+#endif
+				if (nl->next == 0)
+					break;
+				nl = (struct dm_name_list *)((uintptr_t)nl + nl->next);
+			}
+		}
 	}
 #endif
+
+#if defined(DM_LIST_VERSIONS) &&	\
+    defined(HAVE_DM_IOCTL)
+	{
+		uint8_t buf[sizeof(struct dm_ioctl) + 4096];
+		struct dm_ioctl *dm = (struct dm_ioctl *)buf;
+
+		shim_memset(buf, 0, sizeof(buf));
+		dm->version[0] = DM_VERSION_MAJOR;
+		dm->version[1] = DM_VERSION_MINOR;
+		dm->version[2] = 0;
+		dm->data_size = 4096;
+		dm->data_start = sizeof(buf);
+		VOID_RET(int, ioctl(fd, DM_LIST_VERSIONS, dm));
+
+		shim_memset(buf, 0, sizeof(buf));
+		dm->version[0] = DM_VERSION_MAJOR;
+		dm->version[1] = DM_VERSION_MINOR;
+		dm->version[2] = 0;
+		dm->data_size = ~0;
+		dm->data_start = sizeof(buf);
+		VOID_RET(int, ioctl(fd, DM_LIST_VERSIONS, dm));
+	}
+#endif
+
 #if defined(RWF_NOWAIT) &&	\
     defined(O_DIRECT) &&	\
     defined(HAVE_PREADV2)
@@ -777,6 +874,7 @@ static void stress_dev_tty(
 	}
 #endif
 
+#if STRESS_DEV_EXERCISE_TCXONC
 #if defined(TCXONC) &&	\
     defined(TCOOFF) && 	\
     defined(TCOON)
@@ -796,6 +894,13 @@ static void stress_dev_tty(
 		if (ret == 0)
 			ret = ioctl(fd, TCXONC, TCION);
 		(void)ret;
+	}
+#endif
+#endif
+
+#if defined(TIOCCONS)
+	{
+		VOID_RET(int, ioctl(fd, TIOCCONS, 0));
 	}
 #endif
 
@@ -840,7 +945,7 @@ static void stress_dev_tty(
 
 #if defined(KDGKBMODE)
 	{
-		long mode;
+		long int mode;
 
 		VOID_RET(int, ioctl(fd, KDGKBMODE, &mode));
 	}
@@ -848,7 +953,7 @@ static void stress_dev_tty(
 
 #if defined(KDGKBMETA)
 	{
-		long mode;
+		long int mode;
 
 		VOID_RET(int, ioctl(fd, KDGKBMETA, &mode));
 	}
@@ -947,7 +1052,7 @@ static void stress_dev_blk(
 #if defined(BLKRAGET)
 	/* readahead */
 	{
-		unsigned long ra;
+		unsigned long int ra;
 		int ret;
 
 		ret = ioctl(fd, BLKRAGET, &ra);
@@ -962,7 +1067,7 @@ static void stress_dev_blk(
 #if defined(BLKFRAGET)
 	/* readahead */
 	{
-		unsigned long fra;
+		unsigned long int fra;
 		int ret;
 
 		ret = ioctl(fd, BLKFRAGET, &fra);
@@ -1037,7 +1142,7 @@ static void stress_dev_blk(
 
 #if defined(BLKROTATIONAL)
 	{
-		unsigned short rotational;
+		unsigned short int rotational;
 
 		VOID_RET(int, ioctl(fd, BLKROTATIONAL, &rotational));
 	}
@@ -1045,7 +1150,7 @@ static void stress_dev_blk(
 
 #if defined(BLKSECTGET)
 	{
-		unsigned short max_sectors;
+		unsigned short int max_sectors;
 
 		VOID_RET(int, ioctl(fd, BLKSECTGET, &max_sectors));
 	}
@@ -1053,7 +1158,7 @@ static void stress_dev_blk(
 
 #if defined(BLKGETSIZE)
 	{
-		unsigned long sz;
+		unsigned long int sz;
 
 		VOID_RET(int, ioctl(fd, BLKGETSIZE, &sz));
 	}
@@ -1186,12 +1291,9 @@ static inline bool is_scsi_dev(dev_info_t *dev_info)
 static void stress_dev_scsi_blk(
 	stress_args_t *args,
 	const int fd,
-	dev_info_t *dev_info)
+	const char *devpath)
 {
-	VOID_ARGS(args, fd, dev_info);
-
-	if (!is_scsi_dev(dev_info))
-		return;
+	VOID_ARGS(args, fd, devpath);
 
 #if defined(SG_GET_VERSION_NUM)
 	{
@@ -1350,6 +1452,13 @@ static void stress_dev_scsi_generic_linux(
 		VOID_RET(int, ioctl(fd, BLKSECTGET, &n));
 	}
 #endif
+/*
+#if defined(SCSI_IOCTL_SYNC)
+	{
+		VOID_RET(int, ioctl(fd, SCSI_IOCTL_SYNC, 0));
+	}
+#endif
+*/
 }
 #endif
 
@@ -1368,7 +1477,7 @@ static void stress_dev_random_linux(
 
 #if defined(RNDGETENTCNT)
 	{
-		long entropy;
+		long int entropy;
 
 		VOID_RET(int, ioctl(fd, RNDGETENTCNT, &entropy));
 	}
@@ -1512,12 +1621,12 @@ static void stress_dev_rtc_linux(
 
 #if !defined(RTC_IRQP_READ32) &&	\
     defined(_IOR)
-#define RTC_IRQP_READ32               _IOR('p', 0x0b, __u32)
+#define RTC_IRQP_READ32               _IOR('p', 0x0b, uint32_t)
 #endif
 
 #if defined(RTC_IRQP_READ)
 	{
-		unsigned long irqp;
+		unsigned long int irqp;
 
 		VOID_RET(int, ioctl(fd, RTC_IRQP_READ, &irqp));
 	}
@@ -1531,7 +1640,7 @@ static void stress_dev_rtc_linux(
 #endif
 #if defined(RTC_EPOCH_READ)
 	{
-		unsigned long epoch;
+		unsigned long int epoch;
 
 		VOID_RET(int, ioctl(fd, RTC_EPOCH_READ, &epoch));
 	}
@@ -1709,7 +1818,7 @@ static void stress_dev_cdrom_linux(
 {
 	size_t i;
 
-	static const char *proc_files[] = {
+	static const char * const proc_files[] = {
 		"autoclose",
 		"autoeject",
 		"check_media",
@@ -1861,14 +1970,14 @@ static void stress_dev_cdrom_linux(
 #endif
 #if defined(CDROM_NEXT_WRITABLE)
 	IOCTL_TIMEOUT(0.10, {
-		long next;
+		long int next;
 
 		VOID_RET(int, ioctl(fd, CDROM_NEXT_WRITABLE, &next));
 	}, return);
 #endif
 #if defined(CDROM_LAST_WRITTEN)
 	IOCTL_TIMEOUT(0.10, {
-		long last;
+		long int last;
 
 		VOID_RET(int, ioctl(fd, CDROM_LAST_WRITTEN, &last));
 	}, return);
@@ -2162,9 +2271,9 @@ static void stress_dev_console_linux(
 		ret = ioctl(fd, KDGKBLED, &argp);
 #if defined(KDSKBLED)
 		if (ret == 0) {
-			unsigned long bad_val = ~0UL, val;
+			unsigned long int bad_val = ~0UL, val;
 
-			val = (unsigned long)argp;
+			val = (unsigned long int)argp;
 			VOID_RET(int, ioctl(fd, KDSKBLED, val));
 
 			/* Exercise Invalid KDSKBLED ioctl call with invalid flags */
@@ -2183,12 +2292,12 @@ static void stress_dev_console_linux(
     defined(KDGETMODE)
 	{
 		int ret;
-		unsigned long argp = 0;
+		unsigned long int argp = 0;
 
 		ret = ioctl(fd, KDGETMODE, &argp);
 #if defined(KDSETMODE)
 		if (ret == 0) {
-			unsigned long bad_val = ~0UL;
+			unsigned long int bad_val = ~0UL;
 
 			VOID_RET(int, ioctl(fd, KDSETMODE, argp));
 
@@ -2315,7 +2424,7 @@ static void stress_dev_console_linux(
     defined(GIO_UNISCRNMAP) && \
     defined(E_TABSZ)
 	{
-		unsigned short argp[E_TABSZ];
+		unsigned short int argp[E_TABSZ];
 		int ret;
 
 		ret = ioctl(fd, GIO_UNISCRNMAP, argp);
@@ -2331,12 +2440,12 @@ static void stress_dev_console_linux(
     defined(KDGKBMODE)
 	{
 		int ret;
-		unsigned long argp = 0;
+		unsigned long int argp = 0;
 
 		ret = ioctl(fd, KDGKBMODE, &argp);
 #if defined(KDSKBMODE)
 		if (ret == 0) {
-			unsigned long bad_val = ~0UL;
+			unsigned long int bad_val = ~0UL;
 
 			VOID_RET(int, ioctl(fd, KDSKBMODE, argp));
 
@@ -2356,12 +2465,12 @@ static void stress_dev_console_linux(
     defined(KDGKBMETA)
 	{
 		int ret;
-		unsigned long argp = 0;
+		unsigned long int argp = 0;
 
 		ret = ioctl(fd, KDGKBMETA, &argp);
 #if defined(KDSKBMETA)
 		if (ret == 0) {
-			unsigned long bad_val = ~0UL;
+			unsigned long int bad_val = ~0UL;
 
 			VOID_RET(int, ioctl(fd, KDSKBMETA, argp));
 
@@ -2500,28 +2609,28 @@ static void stress_dev_console_linux(
 #endif
 
 #if defined(__linux__)
-#define ACPI_THERMAL_GET_TRT_LEN	_IOR('s', 1, unsigned long)
-#define ACPI_THERMAL_GET_ART_LEN	_IOR('s', 2, unsigned long)
-#define ACPI_THERMAL_GET_TRT_COUNT	_IOR('s', 3, unsigned long)
-#define ACPI_THERMAL_GET_ART_COUNT	_IOR('s', 4, unsigned long)
+#define ACPI_THERMAL_GET_TRT_LEN	_IOR('s', 1, unsigned long int)
+#define ACPI_THERMAL_GET_ART_LEN	_IOR('s', 2, unsigned long int)
+#define ACPI_THERMAL_GET_TRT_COUNT	_IOR('s', 3, unsigned long int)
+#define ACPI_THERMAL_GET_ART_COUNT	_IOR('s', 4, unsigned long int)
 
-#define ACPI_THERMAL_GET_TRT		_IOR('s', 5, unsigned long)
-#define ACPI_THERMAL_GET_ART		_IOR('s', 6, unsigned long)
+#define ACPI_THERMAL_GET_TRT		_IOR('s', 5, unsigned long int)
+#define ACPI_THERMAL_GET_ART		_IOR('s', 6, unsigned long int)
 
-#define ACPI_THERMAL_GET_PSVT_LEN	_IOR('s', 7, unsigned long)
-#define ACPI_THERMAL_GET_PSVT_COUNT	_IOR('s', 8, unsigned long)
-#define ACPI_THERMAL_GET_PSVT		_IOR('s', 9, unsigned long)
+#define ACPI_THERMAL_GET_PSVT_LEN	_IOR('s', 7, unsigned long int)
+#define ACPI_THERMAL_GET_PSVT_COUNT	_IOR('s', 8, unsigned long int)
+#define ACPI_THERMAL_GET_PSVT		_IOR('s', 9, unsigned long int)
 
 static void stress_dev_acpi_thermal_rel_get(
 	const int fd,
-	unsigned long cmd,
-	unsigned long length)
+	unsigned long int cmd,
+	unsigned long int length)
 {
 	char *buf;
 
 	if ((length < 1) || (length > 64 * KB))
 		return;
-	buf = malloc((size_t)length);
+	buf = (char *)malloc((size_t)length);
 	if (!buf)
 		return;
 	VOID_RET(int, ioctl(fd, cmd, buf));
@@ -2534,7 +2643,7 @@ static void stress_dev_acpi_thermal_rel_linux(
 	const char *devpath)
 {
 	int count;
-	unsigned long length;
+	unsigned long int length;
 
 	VOID_ARGS(args, fd, devpath);
 
@@ -2553,7 +2662,8 @@ static void stress_dev_acpi_thermal_rel_linux(
 #endif
 
 #if defined(__linux__) &&	\
-    defined(HAVE_LINUX_HIDRAW_H)
+    (defined(HAVE_LINUX_HIDRAW_H) || \
+     defined(HAVE_LINUX_HIDDEV_H))
 static void stress_dev_hid_linux(
 	stress_args_t *args,
 	const int fd,
@@ -2563,6 +2673,27 @@ static void stress_dev_hid_linux(
 
 	VOID_ARGS(args, fd, devpath);
 
+#if defined(HIDIOCGVERSION)
+	{
+		int version;
+
+		IOCTL_TIMEOUT(0.05, { VOID_RET(int, ioctl(fd, HIDIOCGVERSION, &version)); }, return);
+	}
+#endif
+#if defined(HIDIOCGFLAG)
+	{
+		int flag;
+
+		IOCTL_TIMEOUT(0.05, { VOID_RET(int, ioctl(fd, HIDIOCGFLAG, &flag)); }, return);
+	}
+#endif
+#if defined(HIDIOCGDEVINFO)
+	{
+		struct hiddev_devinfo devinfo;
+
+		IOCTL_TIMEOUT(0.05, { VOID_RET(int, ioctl(fd, HIDIOCGDEVINFO, &devinfo)); }, return);
+	}
+#endif
 #if defined(HIDIOCGRDESCSIZE)
 	{
 		if (ioctl(fd, HIDIOCGRDESCSIZE, &size) < 0)
@@ -2670,7 +2801,7 @@ static void stress_dev_hpet_linux(
 #endif
 #if defined(HPET_IRQFREQ)
 	{
-		unsigned long freq;
+		unsigned long int freq;
 
 		VOID_RET(int, ioctl(fd, HPET_IRQFREQ, &freq));
 	}
@@ -2796,9 +2927,9 @@ static void stress_dev_lirc_linux(
 #endif
 
 #if defined(HAVE_LINUX_HDREG_H)
-static void stress_dev_hd_linux_ioctl_long(int fd, unsigned long cmd)
+static void stress_dev_hd_linux_ioctl_long(int fd, unsigned long int cmd)
 {
-	long val;
+	long int val;
 
 	VOID_RET(int, ioctl(fd, cmd, &val));
 }
@@ -3078,6 +3209,39 @@ STRESS_PRAGMA_POP
 		(void)ret;
 	}
 #endif
+
+#if defined(SNDRV_CTL_IOCTL_ELEM_LIST)
+	{
+		struct snd_ctl_elem_list list;
+
+
+		(void)shim_memset(&list, 0, sizeof(list));
+
+		if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0) {
+			struct snd_ctl_elem_id *eids;
+
+			eids = (struct snd_ctl_elem_id *)calloc(list.count, sizeof(struct snd_ctl_elem_id));
+			if (eids) {
+				list.space = list.count;
+				list.pids = eids;
+
+				if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0) {
+#if defined(SNDRV_CTL_IOCTL_ELEM_INFO)
+					unsigned int i;
+
+					for (i = 0; i < list.count; i++) {
+						struct snd_ctl_elem_info info;
+
+						info.id.numid = eids[i].numid;
+						VOID_RET(int, ioctl(fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info));
+					}
+#endif
+				}
+				free(eids);
+			}
+		}
+	}
+#endif
 }
 
 #if defined(__linux__)
@@ -3137,7 +3301,7 @@ static void stress_dev_parport_linux(
 	 */
 #if defined(PPCLAIM) &&	\
     defined(PPRELEASE)
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		int ret;
 
 		ret = shim_pthread_spin_lock(&parport_lock);
@@ -3242,7 +3406,7 @@ static void stress_dev_parport_linux(
 
 #if defined(PPCLAIM) &&	\
     defined(PPRELEASE)
-	if ((args->instance == 0) && claimed) {
+	if (stress_instance_zero(args) && claimed) {
 		VOID_RET(int, ioctl(fd, PPRELEASE));
 		VOID_RET(int, shim_pthread_spin_unlock(&parport_lock));
 	}
@@ -3437,6 +3601,145 @@ static void stress_dev_kvm_linux(
 }
 #endif
 
+#if defined(__linux__) &&	\
+    defined(HAVE_LINUX_FB_H)
+/*
+ *   stress_dev_fb_linux()
+ *   	Exercise Linux frame buffer device
+ */
+static void stress_dev_fb_linux(
+	stress_args_t *args,
+	const int fd,
+	const char *devpath)
+{
+	VOID_ARGS(args, fd, devpath);
+
+#if defined(FBIOGET_FSCREENINFO)
+	{
+		struct fb_fix_screeninfo screeninfo;
+
+		VOID_RET(int, ioctl(fd, FBIOGET_FSCREENINFO, &screeninfo));
+	}
+#endif
+#if defined(FBIOGET_VSCREENINFO)
+	{
+		struct fb_var_screeninfo screeninfo;
+		int ret;
+
+		ret = ioctl(fd, FBIOGET_VSCREENINFO, &screeninfo);
+#if defined(FBIOPUT_VSCREENINFO)
+		if (ret == 0)
+			ret = ioctl(fd, FBIOPUT_VSCREENINFO, &screeninfo);
+#endif
+		(void)ret;
+	}
+#endif
+}
+#endif
+
+#if defined(__linux__)
+/* exercise arch/x86/kernel/cpuid.c driver */
+static void stress_dev_cpu_cpuid(
+	stress_args_t *args,
+	const int fd,
+	const char *devpath)
+{
+	uint8_t data[64];
+
+	(void)args;
+	(void)devpath;
+
+	if (lseek(fd, 0, SEEK_SET) != (off_t)0)
+		return;
+
+	/* multiple of 16 bytes read */
+	VOID_RET(ssize_t, read(fd, data, sizeof(data)));
+	/* invalid non-multiple of 16 bytes read */
+	VOID_RET(ssize_t, read(fd, data, sizeof(data) - 1));
+}
+#endif
+
+#if defined(__linux__) &&	\
+    defined(STRESS_ARCH_X86)
+/* exercise arch/x86/kernel/msr.c driver */
+
+#define X86_IOC_RDMSR_REGS	_IOWR('c', 0xA0, uint32_t[8])
+
+static void stress_dev_cpu_msr(
+	stress_args_t *args,
+	const int fd,
+	const char *devpath)
+{
+	uint64_t tsc;
+	uint32_t regs[8];
+
+	(void)args;
+	(void)devpath;
+
+	/* RDMSR_REGS ioctl(), see arch/x86/lib/msr-reg.S */
+	regs[0] = 0x00000000;	/* EAX */
+	regs[1] = 0x00000010;	/* ECX = TSC MSR */
+	regs[2] = 0x00000000;	/* EDX */
+	regs[3] = 0x00000000;	/* EBX */
+	regs[4] = 0x00000000;	/* unused */
+	regs[5] = 0x00000000;	/* R12D */
+	regs[6] = 0x00000000;	/* ESI */
+	regs[7] = 0x00000000;	/* EDI */
+	VOID_RET(int, ioctl(fd, X86_IOC_RDMSR_REGS, regs));
+
+	/* seek to TSC MSR */
+	if (lseek(fd, (off_t)0x00000010, SEEK_SET) < 0)
+		return;
+	/* read 64 bit TSC */
+	VOID_RET(ssize_t, read(fd, &tsc, sizeof(tsc)));
+}
+#endif
+
+#if defined(__linux__) &&	\
+    defined(HAVE_LINUX_AUTO_DEV_IOCTL_H) &&	\
+    defined(AUTOFS_TYPE_ANY) &&			\
+    defined(AUTOFS_DEV_IOCTL_ISMOUNTPOINT)
+static void stress_dev_autofs_linux(
+	stress_args_t *args,
+	const int fd,
+	const char *devpath)
+{
+	const char *tmp = ".....";
+	const size_t tmp_len = strlen(tmp) + 1;
+	size_t size;
+	struct autofs_dev_ioctl *info;
+	static bool try_invalid_path = false;
+
+	(void)args;
+	(void)devpath;
+
+	size = sizeof(*info) + tmp_len;
+	info = (struct autofs_dev_ioctl *)calloc(1, size);
+	if (!info)
+		return;
+
+	init_autofs_dev_ioctl(info);
+	errno = 0;
+	if (ioctl(fd, AUTOFS_DEV_IOCTL_VERSION, info) < 0) {
+		free(info);
+		return;
+	}
+
+	/* and exercise an invalid pathname, will spam dmesg, so do once */
+	if (!try_invalid_path) {
+		try_invalid_path = true;
+
+		init_autofs_dev_ioctl(info);
+		info->ioctlfd = -1;
+		(void)shim_strscpy(info->path, tmp, tmp_len);
+		info->ismountpoint.in.type = AUTOFS_TYPE_ANY;
+		info->size = size;
+		VOID_RET(int, ioctl(fd, AUTOFS_DEV_IOCTL_ISMOUNTPOINT, info));
+	}
+	free(info);
+}
+#endif
+
 #define DEV_FUNC(dev, func) \
 	{ dev, sizeof(dev) - 1, func }
 
@@ -3453,7 +3756,7 @@ static const stress_dev_func_t dev_funcs[] = {
 #endif
 #if defined(__linux__) &&	\
     defined(HAVE_LINUX_DM_IOCTL_H)
-	DEV_FUNC("/dev/dm",	stress_dev_dm_linux),
+	DEV_FUNC("/dev/mapper/control",	stress_dev_dm_linux),
 #endif
 #if defined(__linux__) &&	\
     defined(HAVE_LINUX_VIDEODEV2_H)
@@ -3479,8 +3782,10 @@ static const stress_dev_func_t dev_funcs[] = {
 	DEV_FUNC("/dev/acpi_thermal_rel", stress_dev_acpi_thermal_rel_linux),
 #endif
 #if defined(__linux__) &&	\
-    defined(HAVE_LINUX_HIDRAW_H)
+    (defined(HAVE_LINUX_HIDRAW_H) || \
+     defined(HAVE_LINUX_HIDDEV_H))
 	DEV_FUNC("/dev/hid",	stress_dev_hid_linux),
+	DEV_FUNC("/dev/usb/hiddev", stress_dev_hid_linux),
 #endif
 #if defined(__linux__) &&       \
     defined(HAVE_SCSI_SG_H)
@@ -3534,6 +3839,27 @@ static const stress_dev_func_t dev_funcs[] = {
 #if defined(__linux__) &&	\
     defined(HAVE_LINUX_USB_CDC_WDM_H)
 	DEV_FUNC("/dev/cdc-wdm",stress_dev_cdc_wdm_linux),
+#endif
+#if defined(__linux__) &&	\
+    defined(HAVE_LINUX_FB_H)
+	DEV_FUNC("/dev/fb", 	stress_dev_fb_linux),
+#endif
+#if defined(__linux__)
+	DEV_FUNC("/dev/cpu/0/cpuid", stress_dev_cpu_cpuid),
+#endif
+#if defined(__linux__) &&	\
+    defined(STRESS_ARCH_X86)
+	DEV_FUNC("/dev/cpu/0/msr", stress_dev_cpu_msr),
+#endif
+#if defined(__linux__) &&			\
+    defined(HAVE_LINUX_AUTO_DEV_IOCTL_H) &&	\
+    defined(AUTOFS_TYPE_ANY) &&			\
+    defined(AUTOFS_DEV_IOCTL_ISMOUNTPOINT)
+	DEV_FUNC("/dev/autofs", stress_dev_autofs_linux),
+#endif
+#if defined(__linux__)
+	DEV_FUNC("/dev/bsg", stress_dev_scsi_blk),
+	DEV_FUNC("/dev/sg", stress_dev_scsi_blk),
 #endif
 };
 
@@ -3618,7 +3944,7 @@ static int stress_dev_open_lock(
 	fd = stress_open_timeout(args->name, dev_info->path, mode, 250000000);
 	if (fd < 0) {
 		if (errno == EBUSY)
-			shim_usleep(10000);
+			(void)shim_usleep(10000);
 		return -1;
 	}
 	if (stress_dev_lock(dev_info->path, fd) < 0) {
@@ -3673,11 +3999,12 @@ static const int open_flags[] = {
  */
 static inline void stress_dev_rw(
 	stress_args_t *args,
+	sys_dev_info_t **sys_dev_info,
 	int32_t loops)
 {
 	int fd, ret;
 	off_t offset;
-	struct stat buf;
+	struct stat statbuf;
 	struct pollfd fds[1];
 	fd_set rfds;
 	const double threshold = 0.25;
@@ -3696,6 +4023,13 @@ static inline void stress_dev_rw(
 		dev_info_t *dev_info;
 		char *path;
 
+		if (*sys_dev_info) {
+			char buf[4096];
+
+			VOID_RET(ssize_t, stress_system_read((*sys_dev_info)->sysdevpath, buf, sizeof(buf)));
+			*sys_dev_info = (*sys_dev_info)->next;
+		}
+
 		ret = shim_pthread_spin_lock(&lock);
 		if (ret)
 			return;
@@ -3706,7 +4040,7 @@ static inline void stress_dev_rw(
 
 		/* state info no yet associated */
 		if (UNLIKELY(!dev_info->state)) {
-			shim_sched_yield();
+			(void)shim_sched_yield();
 			continue;
 		}
 
@@ -3727,19 +4061,21 @@ static inline void stress_dev_rw(
 
 		(void)stress_read_fdinfo(pid, fd);
 
-		if (shim_fstat(fd, &buf) < 0) {
+		if (shim_fstat(fd, &statbuf) < 0) {
 			pr_fail("%s: stat failed on %s, errno=%d (%s)\n",
 				args->name, path, errno, strerror(errno));
 		} else {
-			if ((S_ISBLK(buf.st_mode) | (S_ISCHR(buf.st_mode))) == 0) {
+			if ((S_ISBLK(statbuf.st_mode) | (S_ISCHR(statbuf.st_mode))) == 0) {
 				stress_dev_close_unlock(path, fd);
 				goto next;
 			}
 		}
 
-		if (S_ISBLK(buf.st_mode)) {
+		if (S_ISBLK(statbuf.st_mode)) {
 			stress_dev_blk(args, fd, path);
-			stress_dev_scsi_blk(args, fd, dev_info);
+
+			if (is_scsi_dev(dev_info))
+				stress_dev_scsi_blk(args, fd, path);
 #if defined(HAVE_LINUX_HDREG_H)
 			stress_dev_hd_linux(args, fd, path);
 #endif
@@ -3747,7 +4083,7 @@ static inline void stress_dev_rw(
 #if defined(HAVE_TERMIOS_H) &&	\
     defined(HAVE_TERMIOS) &&	\
     defined(TCGETS)
-		if (S_ISCHR(buf.st_mode) &&
+		if (S_ISCHR(statbuf.st_mode) &&
 		    strncmp("/dev/vsock", path, 10) &&
 		    strncmp("/dev/dri", path, 8) &&
 		    strncmp("/dev/nmem", path, 9) &&
@@ -3900,9 +4236,9 @@ next:
  */
 static void *stress_dev_thread(void *arg)
 {
-	static void *nowt = NULL;
 	const stress_pthread_args_t *pa = (stress_pthread_args_t *)arg;
 	stress_args_t *args = pa->args;
+	sys_dev_info_t *sys_dev_info = (sys_dev_info_t *)pa->data;
 
 	/*
 	 *  Block all signals, let controlling thread
@@ -3910,26 +4246,31 @@ static void *stress_dev_thread(void *arg)
 	 */
 	(void)sigprocmask(SIG_BLOCK, &set, NULL);
 
-	while (stress_continue_flag())
-		stress_dev_rw(args, -1);
+	stress_random_small_sleep();
 
-	return &nowt;
+	while (stress_continue_flag())
+		stress_dev_rw(args, &sys_dev_info, -1);
+
+	return &g_nowt;
 }
 
 /*
  *  stress_dev_files()
  *	stress all device files
  */
-static void stress_dev_files(stress_args_t *args, dev_info_t *dev_info_list)
+static void stress_dev_files(
+	stress_args_t *args,
+	dev_info_t *dev_info_list,
+	sys_dev_info_t **sys_dev_info)
 {
 	int32_t loops = args->instance < 8 ? (int32_t)args->instance + 1 : 8;
 	static int try_failed = 0;
 	dev_info_t *di;
 
-	if (!stress_continue_flag())
+	if (UNLIKELY(!stress_continue_flag()))
 		return;
 
-	for (di = dev_info_list; di && stress_continue(args); di = di->next) {
+	for (di = dev_info_list; LIKELY(di && stress_continue(args)); di = di->next) {
 		int ret;
 
 		/* Should never happen */
@@ -3962,7 +4303,7 @@ static void stress_dev_files(stress_args_t *args, dev_info_t *dev_info_list)
 		if (!ret) {
 			pthread_dev_info = di;
 			(void)shim_pthread_spin_unlock(&lock);
-			stress_dev_rw(args, loops);
+			stress_dev_rw(args, sys_dev_info, loops);
 			stress_bogo_inc(args);
 		}
 		di->state->open_succeeded = true;
@@ -4012,11 +4353,11 @@ static void stress_dev_info_add(const char *path, dev_info_t **list, size_t *lis
 {
 	dev_info_t *new_dev;
 
-	new_dev = calloc(1, sizeof(*new_dev));
+	new_dev = (dev_info_t *)calloc(1, sizeof(*new_dev));
 	if (!new_dev)
 		return;
 
-	new_dev->path = strdup(path);
+	new_dev->path = shim_strdup(path);
 	if (!new_dev->path) {
 		free(new_dev);
 		return;
@@ -4046,21 +4387,22 @@ static void stress_dev_infos_get(
 	int i, n;
 	const mode_t flags = S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return;
 
+	dlist = NULL;
 	n = scandir(path, &dlist, NULL, alphasort);
 	if (n <= 0)
 		return;
 
-	for (i = 0; stress_continue(args) && (i < n); i++) {
+	for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
 		int ret;
-		struct stat buf;
+		struct stat statbuf;
 		char tmp[PATH_MAX];
 		struct dirent *d = dlist[i];
 		size_t len;
 
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 		if (stress_is_dot_filename(d->d_name))
 			continue;
@@ -4083,7 +4425,7 @@ static void stress_dev_infos_get(
 			int dev_n;
 			char *ptr = d->d_name + len - 1;
 
-			while ((ptr > d->d_name) && isdigit((int)*ptr))
+			while ((ptr > d->d_name) && isdigit((unsigned char)*ptr))
 				ptr--;
 			ptr++;
 			dev_n = atoi(ptr);
@@ -4099,10 +4441,10 @@ static void stress_dev_infos_get(
 
 		switch (shim_dirent_type(path, d)) {
 		case SHIM_DT_DIR:
-			ret = shim_stat(tmp, &buf);
+			ret = shim_stat(tmp, &statbuf);
 			if (ret < 0)
 				continue;
-			if ((buf.st_mode & flags) == 0)
+			if ((statbuf.st_mode & flags) == 0)
 				continue;
 			stress_dev_infos_get(args, tmp, tty_name, list, list_len);
 			break;
@@ -4173,7 +4515,7 @@ static void stress_dev_infos_mixup(dev_info_t **dev_info_list, const size_t dev_
 	dev_info_t **dev_info_sorted, *dev;
 	size_t i;
 
-	dev_info_sorted = calloc(dev_info_list_len, sizeof(*dev_info_sorted));
+	dev_info_sorted = (dev_info_t **)calloc(dev_info_list_len, sizeof(*dev_info_sorted));
 	if (!dev_info_sorted)
 		return;
 
@@ -4193,6 +4535,136 @@ static void stress_dev_infos_mixup(dev_info_t **dev_info_list, const size_t dev_
 	free(dev_info_sorted);
 }
 
+#if defined(__linux__)
+/*
+ *  stress_sys_dev_get()
+ *	traverse /sys/dev device directories adding paths to list
+ */
+static void stress_sys_dev_infos_get(
+	stress_args_t *args,
+	const char *path,
+	sys_dev_info_t **list,
+	sys_dev_info_t **list_end,
+	const int depth)
+{
+	struct dirent **dlist;
+	int i, n;
+	const mode_t flags = S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+
+	if (UNLIKELY(!stress_continue(args)))
+		return;
+
+	dlist = NULL;
+	n = scandir(path, &dlist, NULL, alphasort);
+	if (n <= 0)
+		return;
+
+	for (i = 0; LIKELY(stress_continue(args) && (i < n)); i++) {
+		int ret;
+		struct stat statbuf;
+		char tmp[PATH_MAX];
+		struct dirent *d = dlist[i];
+		sys_dev_info_t *sys_dev_info;
+
+		if (UNLIKELY(!stress_continue(args)))
+			break;
+		if (stress_is_dot_filename(d->d_name))
+			continue;
+
+		(void)stress_mk_filename(tmp, sizeof(tmp), path, d->d_name);
+
+		switch (shim_dirent_type(path, d)) {
+		case SHIM_DT_LNK:
+			if (depth > 2)
+				continue;
+			ret = shim_stat(tmp, &statbuf);
+			if (ret < 0)
+				continue;
+			if ((statbuf.st_mode & flags) == 0)
+				continue;
+			stress_sys_dev_infos_get(args, tmp, list, list_end, depth + 1);
+			break;
+		case SHIM_DT_DIR:
+			ret = shim_stat(tmp, &statbuf);
+			if (ret < 0)
+				continue;
+			if ((statbuf.st_mode & flags) == 0)
+				continue;
+			stress_sys_dev_infos_get(args, tmp, list, list_end, depth + 1);
+			break;
+		case SHIM_DT_REG:
+			sys_dev_info = (sys_dev_info_t *)malloc(sizeof(*sys_dev_info));
+			if (!sys_dev_info)
+				break;
+			sys_dev_info->next = *list;
+			sys_dev_info->sysdevpath = shim_strdup(tmp);
+			if (!sys_dev_info->sysdevpath) {
+				free(sys_dev_info);
+				break;
+			}
+			if (*list_end == NULL) {
+				*list_end = sys_dev_info;
+				*list = sys_dev_info;
+			} else {
+				(*list_end)->next = sys_dev_info;
+				*list_end = sys_dev_info;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	stress_dirent_list_free(dlist, n);
+}
+
+/*
+ *  stress_sys_dev_infos_free()
+ *	free circular sys_dev_info_t list
+ */
+static void stress_sys_dev_infos_free(sys_dev_info_t **list)
+{
+	sys_dev_info_t *sys_dev_info;
+
+	if (*list == NULL)
+		return;
+
+	sys_dev_info = *list;
+
+	while (sys_dev_info) {
+		sys_dev_info_t *next = sys_dev_info->next;
+
+		free(sys_dev_info->sysdevpath);
+		free(sys_dev_info);
+		sys_dev_info = next;
+
+		if (sys_dev_info == *list)
+			break;
+	}
+	*list = NULL;
+}
+
+#else
+
+static inline void stress_sys_dev_infos_get(
+	stress_args_t *args,
+	const char *path,
+	sys_dev_info_t **list,
+	sys_dev_info_t **list_end,
+	const int depth)
+{
+	(void)args;
+	(void)path;
+	(void)list;
+	(void)list_end;
+	(void)depth;
+}
+
+static inline void stress_sys_dev_infos_free(sys_dev_info_t **list)
+{
+	(void)list;
+}
+#endif
+
 /*
  *  stress_dev
  *	stress reading all of /dev
@@ -4209,14 +4681,16 @@ static int stress_dev(stress_args_t *args)
 	dev_info_t dev_null = { "/dev/null", "null", 0, &dev_state_null, NULL };
 	size_t mmap_dev_states_size;
 	const size_t page_size = args->page_size;
+
 	dev_info_t *dev_info_list = NULL;
 	size_t dev_info_list_len = 0;
+
+	sys_dev_info_t *sys_dev_info_list = NULL, *sys_dev_info_list_end = NULL;
 
 	stress_dev_state_init(&dev_state_null);
 
 	pthread_dev_info = &dev_null;
 	pa.args = args;
-	pa.data = NULL;
 
 	(void)shim_memset(ret, 0, sizeof(ret));
 
@@ -4240,14 +4714,18 @@ static int stress_dev(stress_args_t *args)
 		stress_dev_info_add(dev_file, &dev_info_list, &dev_info_list_len);
 	} else {
 		stress_dev_infos_get(args, "/dev", tty_name, &dev_info_list, &dev_info_list_len);
+		stress_sys_dev_infos_get(args, "/sys/dev", &sys_dev_info_list, &sys_dev_info_list_end, 0);
 	}
 
 	/* This should be rare */
 	if (dev_info_list_len == 0) {
 		pr_inf_skip("%s: cannot allocate device information or find any "
 			"testable devices, skipping stressor\n", args->name);
+		stress_dev_infos_free(&dev_info_list);
+		stress_sys_dev_infos_free(&sys_dev_info_list);
 		return EXIT_NO_RESOURCE;
 	}
+	pa.data = (void *)sys_dev_info_list;
 
 	stress_dev_infos_mixup(&dev_info_list, dev_info_list_len);
 
@@ -4262,9 +4740,12 @@ static int stress_dev(stress_args_t *args)
 		rc = EXIT_NO_RESOURCE;
 		goto deinit;
 	}
-
+	stress_set_vma_anon_name(mmap_dev_states, mmap_dev_states_size, "dev-states");
+	
 	stress_dev_info_list_state_init(dev_info_list, mmap_dev_states);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -4276,14 +4757,15 @@ again:
 			if (stress_redo_fork(args, errno))
 				goto again;
 		} else if (pid > 0) {
-			int status, wret;
+			int status;
+			pid_t wret;
 
 			/* Parent, wait for child */
 			wret = waitpid(pid, &status, 0);
 			if (wret < 0) {
 				if (errno != EINTR)
-					pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-						args->name, errno, strerror(errno));
+					pr_dbg("%s: waitpid() on PID %" PRIdMAX" failed, errno=%d (%s)\n",
+						args->name, (intmax_t)pid, errno, strerror(errno));
 				/* Ring ring, time to die */
 				(void)stress_kill_and_wait(args, pid, SIGALRM, false);
 			} else {
@@ -4296,6 +4778,7 @@ again:
 		} else {
 			size_t i;
 			int r;
+			sys_dev_info_t *sys_dev_info = sys_dev_info_list;
 
 			stress_parent_died_alarm();
 			(void)sched_settings_apply(true);
@@ -4321,7 +4804,7 @@ again:
 			}
 
 			do {
-				stress_dev_files(args, dev_info_list);
+				stress_dev_files(args, dev_info_list, &sys_dev_info);
 			} while (stress_continue(args));
 
 			r = shim_pthread_spin_lock(&lock);
@@ -4340,7 +4823,7 @@ again:
 		}
 	} while (stress_continue(args));
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		const size_t opened = stress_dev_infos_opened(dev_info_list);
 		const bool is_root = stress_check_capability(SHIM_CAP_IS_ROOT);
 
@@ -4362,21 +4845,22 @@ deinit:
 	(void)ioctl_set_timeout;
 	(void)ioctl_clr_timeout;
 
+	stress_sys_dev_infos_free(&sys_dev_info_list);
 	stress_dev_infos_free(&dev_info_list);
 
 	return rc;
 }
-stressor_info_t stress_dev_info = {
+const stressor_info_t stress_dev_info = {
 	.stressor = stress_dev,
-	.class = CLASS_DEV | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_DEV | CLASS_OS,
+	.opts = opts,
 	.help = help
 };
 #else
-stressor_info_t stress_dev_info = {
+const stressor_info_t stress_dev_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_DEV | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_DEV | CLASS_OS,
+	.opts = opts,
 	.help = help,
 	.unimplemented_reason = "built without pthread support or poll.h"
 };

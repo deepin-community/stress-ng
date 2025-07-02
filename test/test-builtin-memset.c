@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,7 +19,7 @@
 
 int main(int argc, char **argv)
 {
-	unsigned long dst;
+	unsigned long int dst;
 
 	__builtin_memset(&dst, 0, sizeof(dst));
 

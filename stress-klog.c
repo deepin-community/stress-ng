@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -74,13 +74,13 @@ static int stress_klog(stress_args_t *args)
 	if (len < 0) {
 		if (!args->instance) {
 			if (errno == EPERM) {
-				if (args->instance == 0) /* cppcheck-suppress knownConditionTrueFalse */
+				if (stress_instance_zero(args)) /* cppcheck-suppress knownConditionTrueFalse */
 					pr_inf_skip("%s: cannot access syslog buffer, "
 						"not permitted, skipping stressor\n",
 						args->name);
 			} else {
 				pr_fail("%s: cannot determine syslog buffer "
-					"size: errno=%d (%s)\n",
+					"size, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
 			}
 		}
@@ -96,16 +96,20 @@ static int stress_klog(stress_args_t *args)
 			pr_inf("%s: truncating syslog buffer to 4MB\n", args->name);
 		len = 4 * MB;
 	}
-	buffer = malloc((size_t)len);
+	buffer = (char *)malloc((size_t)len);
 	if (!buffer) {
-		pr_err("%s: cannot allocate syslog buffer\n", args->name);
+		pr_err("%s: cannot allocate %zu byte syslog buffer%s\n",
+			args->name, (size_t)len, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		int ret, buflen = (int)stress_mwc32modn((uint32_t)len) + 1;
+		int ret;
+		const int buflen = (int)stress_mwc32modn((uint32_t)len) + 1;
 
 		/* Exercise illegal read size */
 		(void)shim_klogctl(SYSLOG_ACTION_READ, buffer, -1);
@@ -176,17 +180,17 @@ static int stress_klog(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_klog_info = {
+const stressor_info_t stress_klog_info = {
 	.stressor = stress_klog,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help,
 	.verify = VERIFY_ALWAYS,
 	.supported = stress_klog_supported
 };
 #else
-stressor_info_t stress_klog_info = {
+const stressor_info_t stress_klog_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without syslog() system call or klogctl()"

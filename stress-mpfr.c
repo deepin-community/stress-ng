@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023-2024 Colin Ian King
+ * Copyright (C) 2023-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +25,10 @@
 #include <mpfr.h>
 #endif
 
+#define MIN_MPFR_PRECISION	(32)
+#define MAX_MPFR_PRECISION	(1000000)
+#define DEFAULT_MPFR_PRECISION	(1000)
+
 static const stress_help_t help[] = {
 	{ NULL,	"mpfr N",		"start N workers performing multi-precision floating point operations" },
 	{ NULL,	"mpfr-ops N",		"stop after N multi-precision floating point operations" },
@@ -32,18 +36,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,		 	NULL }
 };
 
-static int stress_set_mpfr_precision(const char *opt)
-{
-	uint32_t mpfr_precision;
-
-	mpfr_precision = (uint32_t)stress_get_int32(opt);
-	stress_check_range("mpfr-precision", (uint64_t)mpfr_precision, 32, 1000000);
-        return stress_set_setting("mpfr-precision", TYPE_ID_UINT32, &mpfr_precision);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_mpfr_precision,	stress_set_mpfr_precision },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_mpfr_precision, "mpfr-precision", TYPE_ID_UINT32, MIN_MPFR_PRECISION, MAX_MPFR_PRECISION, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_GMP_H) &&	\
@@ -145,8 +140,8 @@ static void stress_mpfr_phi(const mpfr_prec_t precision, mpfr_t *result)
 	mpfr_init2(b, precision);
 	mpfr_init2(c, precision);
 
-	mpfr_set_ui(a, (unsigned long)stress_mwc64(), MPFR_RNDD);
-	mpfr_set_ui(b, (unsigned long)stress_mwc64(), MPFR_RNDD);
+	mpfr_set_ui(a, (unsigned long int)stress_mwc64(), MPFR_RNDD);
+	mpfr_set_ui(b, (unsigned long int)stress_mwc64(), MPFR_RNDD);
 
 	for (i = 0; i <= 1000; i++) {
 		mpfr_add(c, a, b, MPFR_RNDD);
@@ -224,7 +219,7 @@ static void stress_mpfr_apery(const mpfr_prec_t precision, mpfr_t *result)
 	for (i = 1; i <= 1000; i++) {
 		mpfr_set(apery_prev, apery, MPFR_RNDD);
 
-		mpfr_set_ui(tmp, (unsigned long)i, MPFR_RNDD);
+		mpfr_set_ui(tmp, (unsigned long int)i, MPFR_RNDD);
 		mpfr_mul(n3, tmp, tmp, MPFR_RNDD);
 		mpfr_mul(n3, n3, tmp, MPFR_RNDD);
 		mpfr_ui_div(tmp, 1UL, n3, MPFR_RNDD);
@@ -315,7 +310,7 @@ static void stress_mpfr_exp(const mpfr_prec_t precision, mpfr_t *result)
 	mpfr_set_d(r, 0.0, MPFR_RNDD);
 
 	for (i = 1; i <= 100; i++) {
-		mpfr_set_ui(tmp, (unsigned long)i, MPFR_RNDD);
+		mpfr_set_ui(tmp, (unsigned long int)i, MPFR_RNDD);
 		mpfr_exp(tmp, tmp, MPFR_RNDD);
 		mpfr_add(r, r, tmp, MPFR_RNDD);
 	}
@@ -341,7 +336,7 @@ static void stress_mpfr_log(const mpfr_prec_t precision, mpfr_t *result)
 	mpfr_set_d(r, 0.0, MPFR_RNDD);
 
 	for (i = 1; i <= 100; i++) {
-		mpfr_set_ui(tmp, (unsigned long)i, MPFR_RNDD);
+		mpfr_set_ui(tmp, (unsigned long int)i, MPFR_RNDD);
 		mpfr_log(tmp, tmp, MPFR_RNDD);
 		mpfr_add(r, r, tmp, MPFR_RNDD);
 	}
@@ -367,22 +362,27 @@ static const stress_mpfr_method_t stress_mpfr_methods[] = {
 static int stress_mpfr(stress_args_t *args)
 {
 	mpfr_prec_t precision;
-	uint32_t mpfr_precision = 1000;
+	uint32_t mpfr_precision = DEFAULT_MPFR_PRECISION;
 	register size_t i;
 	mpfr_t r0, r1;
 	static stress_metrics_t metrics[SIZEOF_ARRAY(stress_mpfr_methods)];
+	int rc = EXIT_SUCCESS;
 
-	for (i = 0; i < SIZEOF_ARRAY(metrics); i++) {
-		metrics[i].count = 0.0;
-		metrics[i].duration = 0.0;
+	stress_zero_metrics(metrics, SIZEOF_ARRAY(metrics));
+
+	if (!stress_get_setting("mpfr-precision", &mpfr_precision)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			mpfr_precision = MAX_MPFR_PRECISION;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			mpfr_precision = MIN_MPFR_PRECISION;
 	}
-
-	(void)stress_get_setting("mpfr-precision", &mpfr_precision);
 	precision = (mpfr_prec_t)mpfr_precision;
 
 	mpfr_init2(r0, precision);
 	mpfr_init2(r1, precision);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -390,7 +390,7 @@ static int stress_mpfr(stress_args_t *args)
 
 		stress_mwc_get_seed(&w, &z);
 
-		for (i = 0; stress_continue(args) && (i < SIZEOF_ARRAY(stress_mpfr_methods)); i++) {
+		for (i = 0; LIKELY(stress_continue(args) && (i < SIZEOF_ARRAY(stress_mpfr_methods))); i++) {
 			double t1;
 
 			stress_mwc_set_seed(w, z);
@@ -407,12 +407,14 @@ static int stress_mpfr(stress_args_t *args)
 			metrics[i].count += 1.0;
 			stress_bogo_inc(args);
 
-			if (mpfr_cmp(r0, r1) != 0) {
+			if (UNLIKELY(mpfr_cmp(r0, r1) != 0)) {
 				pr_fail("%s: %s computation with %d precision inconsistent\n",
 					args->name, stress_mpfr_methods[i].name, (int)precision);
+				rc = EXIT_FAILURE;
+				break;
 			}
 		}
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -428,26 +430,26 @@ static int stress_mpfr(stress_args_t *args)
 		(void)snprintf(msg, sizeof(msg), "%s %" PRIu32 " bit computations per sec",
 				stress_mpfr_methods[i].name, mpfr_precision);
 		stress_metrics_set(args, i, msg,
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_mpfr_info = {
+const stressor_info_t stress_mpfr_info = {
 	.stressor = stress_mpfr,
-	.class = CLASS_CPU,
+	.classifier = CLASS_CPU | CLASS_FP | CLASS_COMPUTE,
 	.verify = VERIFY_ALWAYS,
-	.opt_set_funcs = opt_set_funcs,
+	.opts = opts,
 	.help = help
 };
 
 #else
 
-stressor_info_t stress_mpfr_info = {
+const stressor_info_t stress_mpfr_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_FP | CLASS_COMPUTE,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without gmp.h, mpfr.h or libmpfr"

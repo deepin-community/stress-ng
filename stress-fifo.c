@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
 #include "stress-ng.h"
 #include "core-builtin.h"
 #include "core-killpid.h"
+
+#include <sys/ioctl.h>
 
 #if defined(HAVE_SYS_SELECT_H)
 #include <sys/select.h>
@@ -48,34 +50,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_fifo_readers(const char *opt)
-{
-	uint64_t fifo_readers;
-
-	fifo_readers = stress_get_uint64(opt);
-	stress_check_range("fifo-readers", fifo_readers,
-		MIN_FIFO_READERS, MAX_FIFO_READERS);
-	return stress_set_setting("fifo-readers", TYPE_ID_UINT64, &fifo_readers);
-}
-
-/*
- *  stress_set_fifo_data_size()
- *	set fifo data read/write size in bytes
- */
-static int stress_set_fifo_data_size(const char *opt)
-{
-	size_t fifo_data_size;
-
-	fifo_data_size = (size_t)stress_get_uint64_byte(opt);
-	stress_check_range_bytes("fifo-data-size", fifo_data_size,
-		MIN_FIFO_DATA_SIZE, MAX_FIFO_DATA_SIZE);
-	return stress_set_setting("fifo-data-size", TYPE_ID_SIZE_T, &fifo_data_size);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fifo_data_size,	stress_set_fifo_data_size },
-	{ OPT_fifo_readers,	stress_set_fifo_readers },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_fifo_data_size, "fifo-data-size", TYPE_ID_SIZE_T_BYTES_FS, MIN_FIFO_DATA_SIZE, MAX_FIFO_DATA_SIZE, NULL },
+	{ OPT_fifo_readers,   "fifo-readers",   TYPE_ID_UINT64, MIN_FIFO_READERS, MAX_FIFO_READERS, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_SYS_SELECT_H)
@@ -89,23 +67,27 @@ static pid_t fifo_spawn(
 		     const char *fifoname, const size_t fifo_data_size),
 	const char *name,
 	const char *fifoname,
-	const size_t fifo_data_size)
+	const size_t fifo_data_size,
+	stress_pid_t **s_pids_head,
+	stress_pid_t *s_pid)
 {
-	pid_t pid;
-
-	pid = fork();
-	if (pid < 0) {
+	s_pid->pid = fork();
+	if (s_pid->pid < 0) {
 		return -1;
-	}
-	if (pid == 0) {
+	} else if (s_pid->pid == 0) {
+		s_pid->pid = getpid();
+		stress_sync_start_wait_s_pid(s_pid);
+
 		stress_parent_died_alarm();
 		(void)sched_settings_apply(true);
 		stress_set_proc_state(args->name, STRESS_STATE_RUN);
 		func(args, name, fifoname, fifo_data_size);
 		stress_set_proc_state(args->name, STRESS_STATE_WAIT);
 		_exit(EXIT_SUCCESS);
+	} else {
+		stress_sync_start_s_pid_list_add(s_pids_head, s_pid);
 	}
-	return pid;
+	return s_pid->pid;
 }
 
 /*
@@ -124,13 +106,14 @@ static void stress_fifo_reader(
 
 	fd = open(fifoname, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) {
-		pr_fail("%s: fifo read open failed: errno=%d (%s)\n",
+		pr_fail("%s: fifo read open failed, errno=%d (%s)\n",
 			name, errno, strerror(errno));
 		return;
 	}
 	while (stress_continue_flag()) {
 		ssize_t sz;
-#if defined(HAVE_POLL_H) && 0
+#if defined(HAVE_POLL_H) && 	\
+    defined(HAVE_POLL)
 		int ret;
 		struct pollfd fds;
 
@@ -138,10 +121,10 @@ static void stress_fifo_reader(
 		fds.events = POLLIN;
 redo_poll:
 		ret = poll(&fds, 1, 1000);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if ((errno == EAGAIN) || (errno == EINTR))
 				continue;
-			pr_err("%s: poll failed: errno=%d (%s)\n",
+			pr_err("%s: poll failed, errno=%d (%s)\n",
 				name, errno, strerror(errno));
 			break;
 		} else if (ret == 0) {
@@ -150,7 +133,7 @@ redo_poll:
 			 * as this can happen on a highly
 			 * overloaded stressed system
 			 */
-			if (stress_continue(args))
+			if (LIKELY(stress_continue(args)))
 				goto redo_poll;
 			break;
 		}
@@ -166,10 +149,10 @@ redo_select:
 		timeout.tv_usec = 0;
 
 		ret = select(fd + 1, &rdfds, NULL, NULL, &timeout);
-		if (ret < 0) {
+		if (UNLIKELY(ret < 0)) {
 			if ((errno == EAGAIN) || (errno == EINTR))
 				continue;
-			pr_err("%s: select failed: errno=%d (%s)\n",
+			pr_err("%s: select failed, errno=%d (%s)\n",
 				name, errno, strerror(errno));
 			break;
 		} else if (ret == 0) {
@@ -178,7 +161,7 @@ redo_select:
 			 * as this can happen on a highly
 			 * overloaded stressed system
 			 */
-			if (stress_continue(args))
+			if (LIKELY(stress_continue(args)))
 				goto redo_select;
 			break;
 		}
@@ -193,29 +176,29 @@ redo_select:
 		UNEXPECTED
 #endif
 		sz = read(fd, buf, fifo_data_size);
-		if (sz < 0) {
+		if (UNLIKELY(sz < 0)) {
 			if ((errno == EAGAIN) || (errno == EINTR))
 				continue;
-			pr_fail("%s: fifo read failed: errno=%d (%s)\n",
+			pr_fail("%s: fifo read failed, errno=%d (%s)\n",
 				name, errno, strerror(errno));
 			break;
 		}
-		if (sz == 0)
+		if (UNLIKELY(sz == 0))
 			break;
-		if (sz != (ssize_t)fifo_data_size) {
+		if (UNLIKELY(sz != (ssize_t)fifo_data_size)) {
 			pr_fail("%s: fifo read did not get buffer of size %zu\n",
 				name, fifo_data_size);
 			break;
 		}
-		if ((buf[0] < lastval) &&
-		    ((~buf[0] & wrap_mask) && (lastval & wrap_mask))) {
+		if (UNLIKELY(((buf[0] < lastval) &&
+			     ((~buf[0] & wrap_mask) && (lastval & wrap_mask))))) {
 			pr_fail("%s: fifo read did not get "
 				"expected value\n", name);
 			break;
 		}
 		lastval = buf[0];
 
-		if ((count & 0x1ff) == 0) {
+		if (UNLIKELY((count & 0x1ff) == 0)) {
 			void *ptr;
 
 			/* Exercise lseek -> ESPIPE */
@@ -232,14 +215,13 @@ redo_select:
 	(void)close(fd);
 }
 
-
 /*
  *  stress_fifo
  *	stress by heavy fifo I/O
  */
 static int stress_fifo(stress_args_t *args)
 {
-	pid_t pids[MAX_FIFO_READERS];
+	stress_pid_t *s_pids, *s_pids_head = NULL;
 	int fd;
 	char fifoname[PATH_MAX];
 	uint64_t i;
@@ -257,34 +239,61 @@ static int stress_fifo(stress_args_t *args)
 			fifo_readers = MIN_FIFO_READERS;
 	}
 
-	(void)stress_get_setting("fifo-data-size", &fifo_data_size);
+	if (!stress_get_setting("fifo-data-size", &fifo_data_size)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			fifo_data_size = MAX_FIFO_DATA_SIZE;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			fifo_data_size = MIN_FIFO_DATA_SIZE;
+	}
+
+	s_pids = stress_sync_s_pids_mmap(MAX_FIFO_READERS);
+	if (s_pids == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %d PIDs%s, skipping stressor\n",
+			args->name, MAX_FIFO_READERS, stress_get_memfree_str());
+		return EXIT_NO_RESOURCE;
+	}
 
 	rc = stress_temp_dir_mk_args(args);
-	if (rc < 0)
-		return stress_exit_status(-rc);
+	if (rc < 0) {
+		rc = stress_exit_status(-rc);
+		goto tidy_pids;
+	}
 
 	(void)stress_temp_filename_args(args,
 		fifoname, sizeof(fifoname), stress_mwc32());
 
 	if (mkfifo(fifoname, S_IRUSR | S_IWUSR) < 0) {
 		rc = stress_exit_status(errno);
-		pr_fail("%s: mkfifo failed: errno=%d (%s)\n",
+		pr_fail("%s: mkfifo failed, errno=%d (%s)\n",
 			args->name, errno, strerror(errno));
 		goto tidy;
 	}
 
-	(void)shim_memset(pids, 0, sizeof(pids));
+#if defined(HAVE_PATHCONF) &&	\
+    defined(_PC_PIPE_BUF)
+	VOID_RET(long int, pathconf(fifoname, _PC_PIPE_BUF));
+#endif
+
 	for (i = 0; i < fifo_readers; i++) {
-		pids[i] = fifo_spawn(args, stress_fifo_reader, args->name, fifoname, fifo_data_size);
-		if (pids[i] < 0) {
+		stress_sync_start_init(&s_pids[i]);
+
+		if (UNLIKELY(fifo_spawn(args, stress_fifo_reader, args->name, fifoname, fifo_data_size, &s_pids_head, &s_pids[i]) < 0)) {
 			rc = EXIT_NO_RESOURCE;
 			goto reap;
 		}
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			rc = EXIT_SUCCESS;
 			goto reap;
 		}
 	}
+
+	(void)shim_memset(buf, 0xaa, sizeof(buf));
+	buf[0] = 0ULL;
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
+	stress_sync_start_cont_list(s_pids_head);
+	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	fd = open(fifoname, O_WRONLY);
 	if (fd < 0) {
@@ -292,17 +301,12 @@ static int stress_fifo(stress_args_t *args)
 			rc = 0;
 		} else {
 			rc = stress_exit_status(fd);
-			pr_fail("%s: fifo write open failed: "
+			pr_fail("%s: fifo write open failed, "
 				"errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 		}
 		goto reap;
 	}
-
-	(void)shim_memset(buf, 0xaa, sizeof(buf));
-	buf[0] = 0ULL;
-
-	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	t = stress_time_now();
 	do {
@@ -331,33 +335,36 @@ static int stress_fifo(stress_args_t *args)
 	rate = (fifo_duration > 0.0) ? (fifo_count / fifo_duration) : 0.0;
 	(void)snprintf(msg, sizeof(msg), "fifo %zu byte writes per sec",
 		fifo_data_size);
-	stress_metrics_set(args, 0, msg, rate, STRESS_HARMONIC_MEAN);
+	stress_metrics_set(args, 0, msg, rate, STRESS_METRIC_HARMONIC_MEAN);
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)close(fd);
 reap:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
-	stress_kill_and_wait_many(args, pids, fifo_readers, SIGALRM, false);
+	stress_kill_and_wait_many(args, s_pids, fifo_readers, SIGALRM, false);
+
 tidy:
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)shim_unlink(fifoname);
 	(void)stress_temp_dir_rm_args(args);
+tidy_pids:
+	(void)stress_sync_s_pids_munmap(s_pids, MAX_FIFO_READERS);
 
 	return rc;
 }
 
-stressor_info_t stress_fifo_info = {
+const stressor_info_t stress_fifo_info = {
 	.stressor = stress_fifo,
-	.class = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };
 #else
-stressor_info_t stress_fifo_info = {
+const stressor_info_t stress_fifo_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_PIPE_IO | CLASS_OS | CLASS_SCHEDULER | CLASS_IPC,
+	.opts = opts,
 	.verify = VERIFY_ALWAYS,
 	.help = help,
 	.unimplemented_reason = "built without sys/select.h"

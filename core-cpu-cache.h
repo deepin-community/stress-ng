@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Colin Ian King
+ * Copyright (C) 2022-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,6 +18,8 @@
  */
 #ifndef CORE_CPU_CACHE_H
 #define CORE_CPU_CACHE_H
+
+#include <stdarg.h>
 
 #include "core-asm-ppc64.h"
 #include "core-asm-riscv.h"
@@ -67,7 +69,7 @@ extern void stress_free_cpu_caches(stress_cpu_cache_cpus_t *cpus);
 extern void stress_cpu_cache_get_llc_size(size_t *llc_size, size_t *cache_line_size);
 extern void stress_cpu_cache_get_level_size(const uint16_t cache_level,
 	size_t *cache_size, size_t *cache_line_size);
-
+extern void stress_cpu_data_cache_flush(void *addr, const size_t len);
 
 /*
  *  cacheflush(2) cache options
@@ -90,7 +92,7 @@ extern void stress_cpu_cache_get_level_size(const uint16_t cache_level,
 typedef void (*shim_clflush_func_t)(volatile void *ptr);
 
 static inline void ALWAYS_INLINE shim_clflush_select(volatile void *ptr);
-static shim_clflush_func_t shim_clflush_func =  shim_clflush_select;
+static shim_clflush_func_t shim_clflush_func = shim_clflush_select;
 
 static inline void ALWAYS_INLINE shim_clflush_op(volatile void *ptr)
 {

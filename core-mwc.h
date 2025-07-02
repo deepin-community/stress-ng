@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,17 @@
 #define CORE_MWC_H
 
 #include <stdint.h>
+#include "core-attribute.h"
+
+/*
+ *  Use modulo reduction, this uses multiplication and shift
+ *  which is normally faster than mask and compare looping.
+ *  32 bit systems generally don't have 128 unsigned integer
+ *  multiplication support required for 64 bit modulo reduction
+ *  so fast modulo reduction only works for 8, 16, 32 bits for
+ *  these smaller systems.
+ */
+#define HAVE_FAST_MODULO_REDUCTION
 
 extern void stress_mwc_reseed(void);
 extern void stress_mwc_set_seed(const uint32_t w, const uint32_t z);
@@ -32,12 +43,62 @@ extern uint16_t stress_mwc16(void);
 extern uint32_t stress_mwc32(void);
 extern uint64_t stress_mwc64(void);
 
+
+extern void stress_rndbuf(void *buf, const size_t len);
+extern void stress_rndstr(char *str, const size_t len);
+
+#if defined(HAVE_FAST_MODULO_REDUCTION)
+/*
+ *  stress_mwc8modn()
+ *	see https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction
+ *	return 8 bit non-modulo biased value 1..max (inclusive)
+ *	where max is most probably not a power of 2
+ */
+static inline uint8_t stress_mwc8modn(const uint8_t max)
+{
+	return (uint8_t)(((uint16_t)stress_mwc8() * (uint16_t)max) >> 8);
+}
+
+/*
+ *  stress_mwc16modn()
+ *	see https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction
+ *	return 16 bit non-modulo biased value 1..max (inclusive)
+ */
+static inline uint16_t stress_mwc16modn(const uint16_t max)
+{
+	return (uint16_t)(((uint32_t)stress_mwc16() * (uint32_t)max) >> 16);
+}
+
+/*
+ *  stress_mwc32modn()
+ *	see https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction
+ *	return 32 bit non-modulo biased value 1..max (inclusive)
+ */
+static inline uint32_t stress_mwc32modn(const uint32_t max)
+{
+	return (uint32_t)(((uint64_t)stress_mwc32() * (uint64_t)max) >> 32);
+}
+#else
+
 extern uint8_t stress_mwc8modn(const uint8_t max);
 extern uint16_t stress_mwc16modn(const uint16_t max);
 extern uint32_t stress_mwc32modn(const uint32_t max);
-extern uint64_t stress_mwc64modn(const uint64_t max);
 
-extern void stress_rndbuf(void *buf, const size_t len);
-extern void stress_rndstr(char *str, size_t len);
+#endif
+
+#if defined(HAVE_FAST_MODULO_REDUCTION) &&	\
+    defined(HAVE_INT128_T)
+/*
+ *  stress_mwc64modn()
+ *	see https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction
+ *	return 64 bit non-modulo biased value 1..max (inclusive)
+ */
+static inline uint64_t stress_mwc64modn(const uint64_t max)
+{
+	return (uint64_t)(((__uint128_t)stress_mwc64() * (__uint128_t)max) >> 64);
+}
+#else
+extern uint64_t stress_mwc64modn(const uint64_t max);
+#endif
 
 #endif

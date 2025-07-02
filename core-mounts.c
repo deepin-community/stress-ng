@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -48,8 +48,8 @@ static void stress_mount_add(
 
 	if (*n >= max)
 		return;
-	mnt = strdup(name);
-	if (!mnt)
+	mnt = shim_strdup(name);
+	if (UNLIKELY(!mnt))
 		return;
 	mnts[*n] = mnt;
 	(*n)++;
@@ -99,7 +99,7 @@ int stress_mount_get(char *mnts[], const int max)
 int stress_mount_get(char *mnts[], const int max)
 {
 	FILE *mounts;
-	struct mntent* mnt;
+	const struct mntent* mnt;
 	int n = 0;
 
 	(void)shim_memset(mnts, 0, (size_t)max * sizeof(*mnts));

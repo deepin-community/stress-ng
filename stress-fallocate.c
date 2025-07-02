@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,19 +30,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_fallocate_bytes(const char *opt)
-{
-	off_t fallocate_bytes;
-
-	fallocate_bytes = (off_t)stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("fallocate-bytes", (uint64_t)fallocate_bytes,
-		MIN_FALLOCATE_BYTES, MAX_FALLOCATE_BYTES);
-	return stress_set_setting("fallocate-bytes", TYPE_ID_OFF_T, &fallocate_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_fallocate_bytes,	stress_set_fallocate_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_fallocate_bytes, "fallocate-bytes", TYPE_ID_OFF_T, MIN_FALLOCATE_BYTES, MAX_FALLOCATE_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(HAVE_FALLOCATE)
@@ -106,26 +96,30 @@ static int stress_fallocate(stress_args_t *args)
 	const int bad_fd = stress_get_bad_fd();
 	char filename[PATH_MAX];
 	uint64_t ftrunc_errs = 0;
-	off_t fallocate_bytes = DEFAULT_FALLOCATE_BYTES;
+	off_t fallocate_bytes, fallocate_bytes_total = DEFAULT_FALLOCATE_BYTES;
 	int *mode_perms = NULL, all_modes;
 	size_t i, mode_count;
 	const char *fs_type;
-	int count = 0;
+	int count = 0, rc = EXIT_SUCCESS;
 
 	for (all_modes = 0, i = 0; i < SIZEOF_ARRAY(modes); i++)
 		all_modes |= modes[i];
 	mode_count = stress_flag_permutation(all_modes, &mode_perms);
 
-	if (!stress_get_setting("fallocate-bytes", &fallocate_bytes)) {
+	if (!stress_get_setting("fallocate-bytes", &fallocate_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			fallocate_bytes = MAXIMIZED_FILE_SIZE;
+			fallocate_bytes_total = MAXIMIZED_FILE_SIZE;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			fallocate_bytes = MIN_FALLOCATE_BYTES;
+			fallocate_bytes_total = MIN_FALLOCATE_BYTES;
 	}
 
-	fallocate_bytes /= args->num_instances;
-	if (fallocate_bytes < (off_t)MIN_FALLOCATE_BYTES)
+	fallocate_bytes = fallocate_bytes_total / args->instances;
+	if (fallocate_bytes < (off_t)MIN_FALLOCATE_BYTES) {
 		fallocate_bytes = (off_t)MIN_FALLOCATE_BYTES;
+		fallocate_bytes_total = fallocate_bytes * args->instances;
+	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, fallocate_bytes, fallocate_bytes_total);
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0) {
 		free(mode_perms);
@@ -147,10 +141,20 @@ static int stress_fallocate(stress_args_t *args)
 	fd_sync = open(filename, O_RDWR | O_SYNC);
 #endif
 	fs_type = stress_get_fs_type(filename);
+#if defined(HAVE_PATHCONF)
+#if defined(_PC_ALLOC_SIZE_MIN)
+	VOID_RET(long int, pathconf(filename, _PC_ALLOC_SIZE_MIN));
+#endif
+#if defined(_PC_FILESIZEBITS)
+	VOID_RET(long int, pathconf(filename, _PC_FILESIZEBITS));
+#endif
+#endif
 	(void)shim_unlink(filename);
 
 	pipe_ret = pipe(pipe_fds);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -166,53 +170,61 @@ static int stress_fallocate(stress_args_t *args)
 #else
 		ret = shim_fallocate(fd_async, 0, (off_t)0, fallocate_bytes);
 #endif
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		(void)shim_fsync(fd);
 		if ((ret == 0) && (g_opt_flags & OPT_FLAGS_VERIFY)) {
 			struct stat buf;
 
-			if (shim_fstat(fd, &buf) < 0)
+			if (shim_fstat(fd, &buf) < 0) {
 				pr_fail("%s: fstat failed, errno=%d (%s)%s\n",
 					args->name, errno, strerror(errno), fs_type);
-			else if (buf.st_size != fallocate_bytes)
-				pr_fail("%s: file size %jd does not match size the expected file size of %jd\n",
+				rc = EXIT_FAILURE;
+			}
+			else if (buf.st_size != fallocate_bytes) {
+				pr_fail("%s: file size %" PRIdMAX " does not match "
+					"the expected file size of %" PRIdMAX "\n",
 					args->name, (intmax_t)buf.st_size,
 					(intmax_t)fallocate_bytes);
+				rc = EXIT_FAILURE;
+			}
 		}
 
 		if (ftruncate(fd, 0) < 0)
 			ftrunc_errs++;
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		(void)shim_fsync(fd);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		if (g_opt_flags & OPT_FLAGS_VERIFY) {
 			struct stat buf;
 
-			if (shim_fstat(fd, &buf) < 0)
+			if (shim_fstat(fd, &buf) < 0) {
 				pr_fail("%s: fstat failed, errno=%d (%s)\n",
 					args->name, errno, strerror(errno));
-			else if (buf.st_size != (off_t)0)
-				pr_fail("%s: file size %jd does not "
-					"match size the expected file size "
-					"of 0\n",
+				rc = EXIT_FAILURE;
+			}
+			else if (buf.st_size != (off_t)0) {
+				pr_fail("%s: file size %" PRIdMAX " does not match "
+					"the expected file size " "of 0\n",
 					args->name, (intmax_t)buf.st_size);
+				rc = EXIT_FAILURE;
+			}
 		}
 
 		if (ftruncate(fd, fallocate_bytes) < 0)
 			ftrunc_errs++;
 		(void)shim_fsync(fd);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		if (ftruncate(fd, 0) < 0)
 			ftrunc_errs++;
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		(void)shim_fsync(fd);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		if (SIZEOF_ARRAY(modes) > 1) {
@@ -220,10 +232,10 @@ static int stress_fallocate(stress_args_t *args)
 			 *  non-portable Linux fallocate()
 			 */
 			(void)shim_fallocate(fd, 0, (off_t)0, fallocate_bytes);
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			(void)shim_fsync(fd);
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 
 			for (i = 0; i < 64; i++) {
@@ -232,7 +244,7 @@ static int stress_fallocate(stress_args_t *args)
 
 				if (shim_fallocate(fd, modes[j], offset, 64 * KB) == 0)
 					(void)shim_fsync(fd);
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					break;
 			}
 			/* Exercise all the mode permutations, most will fail */
@@ -241,15 +253,15 @@ static int stress_fallocate(stress_args_t *args)
 
 				if (shim_fallocate(fd, mode_perms[i], offset, 4 * KB) == 0)
 					(void)shim_fsync(fd);
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					break;
 			}
 			if (ftruncate(fd, 0) < 0)
 				ftrunc_errs++;
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 			(void)shim_fsync(fd);
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				break;
 		}
 
@@ -262,7 +274,7 @@ static int stress_fallocate(stress_args_t *args)
 #else
 		VOID_RET(int, shim_fallocate(bad_fd, 0, (off_t)0, fallocate_bytes));
 #endif
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 
 		/*
@@ -271,7 +283,7 @@ static int stress_fallocate(stress_args_t *args)
 		if (SIZEOF_ARRAY(illegal_modes) > 1) {
 			for (i = 0; i < SIZEOF_ARRAY(illegal_modes); i++) {
 				VOID_RET(int, shim_fallocate(fd, illegal_modes[i], (off_t)0, fallocate_bytes));
-				if (!stress_continue_flag())
+				if (UNLIKELY(!stress_continue_flag()))
 					break;
 			}
 		}
@@ -287,15 +299,15 @@ static int stress_fallocate(stress_args_t *args)
 		 *  exercise illegal negative offset and lengths
 		 */
 		VOID_RET(int, shim_posix_fallocate(fd, (off_t)-1, (off_t)0));
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		VOID_RET(int, shim_posix_fallocate(fd, (off_t)0, (off_t)-1));
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 		VOID_RET(int, shim_posix_fallocate(fd, (off_t)-1, (off_t)-1));
 
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	if (ftrunc_errs)
 		pr_dbg("%s: %" PRIu64
@@ -316,21 +328,21 @@ static int stress_fallocate(stress_args_t *args)
 	(void)stress_temp_dir_rm_args(args);
 	free(mode_perms);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_fallocate_info = {
+const stressor_info_t stress_fallocate_info = {
 	.stressor = stress_fallocate,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_fallocate_info = {
+const stressor_info_t stress_fallocate_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_FILESYSTEM | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_FILESYSTEM | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without fallocate() system call"

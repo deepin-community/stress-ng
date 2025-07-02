@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,12 +18,17 @@
  *
  */
 #include "stress-ng.h"
+#include "core-builtin.h"
 #include "core-cpu-cache.h"
 #include "core-killpid.h"
 #include "core-madvise.h"
 #include "core-out-of-memory.h"
+
+#include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/times.h>
 #include <sched.h>
+#include <time.h>
 
 #if defined(HAVE_TERMIOS_H)
 #include <termios.h>
@@ -301,7 +306,7 @@ static void bad_bind(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_cacheflush(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
-	VOID_RET(int, shim_cacheflush(ba->addr, 4096, SHIM_DCACHE));
+	stress_cpu_data_cache_flush(ba->addr, 4096);
 }
 #endif
 
@@ -571,9 +576,10 @@ static void bad_execve3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unreadable) {
 		char name[PATH_MAX];
-		static char *newargv[] = { NULL, NULL };
 
 		if (stress_get_proc_self_exe(name, sizeof(name)) == 0) {
+			static char *newargv[] = { NULL, NULL };
+
 			(*counter)++;
 			VOID_RET(int, execve(name, newargv, ba->addr));
 		}
@@ -735,7 +741,7 @@ static void bad_getpeername2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	if (ba->unwriteable) {
 		struct sockaddr saddr;
 
-		(void)memset(&saddr, 0, sizeof(saddr));
+		(void)shim_memset(&saddr, 0, sizeof(saddr));
 		(*counter)++;
 		VOID_RET(int, getpeername(0, &saddr, (socklen_t *)ba->addr));
 	}
@@ -754,8 +760,8 @@ static void bad_getpeername3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_get_mempolicy1(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
-	VOID_RET(long, shim_get_mempolicy((int *)ba->addr,
-			(unsigned long *)inc_addr(ba->addr, 1), 1,
+	VOID_RET(long int, shim_get_mempolicy((int *)ba->addr,
+			(unsigned long int *)inc_addr(ba->addr, 1), 1,
 			inc_addr(ba->addr, 2), 0UL));
 }
 
@@ -764,15 +770,15 @@ static void bad_get_mempolicy2(stress_bad_addr_t *ba, volatile uint64_t *counter
 	int mode = 0;
 
 	(*counter)++;
-	VOID_RET(long, shim_get_mempolicy(&mode, (unsigned long *)ba->addr, 1, ba->addr, 0UL));
+	VOID_RET(long int, shim_get_mempolicy(&mode, (unsigned long int *)ba->addr, 1, ba->addr, 0UL));
 }
 
 static void bad_get_mempolicy3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
-	unsigned long nodemask = 1;
+	unsigned long int nodemask = 1;
 
 	(*counter)++;
-	VOID_RET(long, shim_get_mempolicy((int *)ba->addr, &nodemask, 1, ba->addr, 0UL));
+	VOID_RET(long int, shim_get_mempolicy((int *)ba->addr, &nodemask, 1, ba->addr, 0UL));
 }
 
 
@@ -898,7 +904,7 @@ static void bad_getsockname2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	if (ba->unwriteable) {
 		struct sockaddr saddr;
 
-		(void)memset(&ba->addr, 0, sizeof(saddr));
+		(void)shim_memset(&ba->addr, 0, sizeof(saddr));
 		(*counter)++;
 		VOID_RET(int, getsockname(0, &saddr, (socklen_t *)ba->addr));
 	}
@@ -1223,7 +1229,7 @@ static void bad_lstat3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_madvise(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
-	VOID_RET(int, madvise((void *)ba->addr, 8192, MADV_NORMAL));
+	VOID_RET(int, shim_madvise((void *)ba->addr, 8192, SHIM_MADV_NORMAL));
 }
 #else
 UNEXPECTED
@@ -1247,28 +1253,28 @@ static void bad_migrate_pages1(stress_bad_addr_t *ba, volatile uint64_t *counter
 {
 	if (ba->unreadable) {
 		(*counter)++;
-		VOID_RET(long, shim_migrate_pages(getpid(), 1, (unsigned long *)ba->addr,
-						(unsigned long *)inc_addr(ba->addr, 1)));
+		VOID_RET(long int, shim_migrate_pages(getpid(), 1, (unsigned long int *)ba->addr,
+						(unsigned long int *)inc_addr(ba->addr, 1)));
 	}
 }
 
 static void bad_migrate_pages2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unreadable) {
-		unsigned long nodes = 0;
+		unsigned long int nodes = 0;
 
 		(*counter)++;
-		VOID_RET(long, shim_migrate_pages(getpid(), 1, &nodes, (unsigned long *)ba->addr));
+		VOID_RET(long int, shim_migrate_pages(getpid(), 1, &nodes, (unsigned long int *)ba->addr));
 	}
 }
 
 static void bad_migrate_pages3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unreadable) {
-		unsigned long nodes = 0;
+		unsigned long int nodes = 0;
 
 		(*counter)++;
-		VOID_RET(long, shim_migrate_pages(getpid(), 1, (unsigned long *)ba->addr, &nodes));
+		VOID_RET(long int, shim_migrate_pages(getpid(), 1, (unsigned long int *)ba->addr, &nodes));
 	}
 }
 
@@ -1302,17 +1308,17 @@ static void bad_mlock2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_move_pages1(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
-	VOID_RET(long, shim_move_pages(getpid(), (unsigned long)1, (void **)ba->addr,
+	VOID_RET(long int, shim_move_pages(getpid(), (unsigned long int)1, (void **)ba->addr,
 					(const int *)inc_addr(ba->addr, 1), (int *)inc_addr(ba->addr, 2), 0));
 }
 
 static void bad_move_pages2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unreadable) {
-		int nodes, status;
+		int nodes = 0, status;
 
 		(*counter)++;
-		VOID_RET(long, shim_move_pages(getpid(), (unsigned long)1, (void **)ba->addr, &nodes, &status, 0));
+		VOID_RET(long int, shim_move_pages(getpid(), (unsigned long int)1, (void **)ba->addr, &nodes, &status, 0));
 	}
 }
 
@@ -1324,7 +1330,7 @@ static void bad_move_pages3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 
 		pages[0] = ba->addr;
 		(*counter)++;
-		VOID_RET(long, shim_move_pages(getpid(), (unsigned long)1, pages, (int *)ba->addr, &status, 0));
+		VOID_RET(long int, shim_move_pages(getpid(), (unsigned long int)1, pages, (int *)ba->addr, &status, 0));
 	}
 }
 
@@ -1336,8 +1342,16 @@ static void bad_move_pages4(stress_bad_addr_t *ba, volatile uint64_t *counter)
 
 		pages[0] = ba->addr;
 		(*counter)++;
-		VOID_RET(long, shim_move_pages(getpid(), (unsigned long)1, pages, &nodes, (int *)ba->addr, 0));
+		VOID_RET(long int, shim_move_pages(getpid(), (unsigned long int)1, pages, &nodes, (int *)ba->addr, 0));
 	}
+}
+#endif
+
+#if defined(__NR_seal)
+static void bad_mseal(stress_bad_addr_t *ba, volatile uint64_t *counter)
+{
+	(*counter)++;
+	VOID_RET(long int, shim_mseal((void **)ba->addr, 4096, 0));
 }
 #endif
 
@@ -1414,8 +1428,14 @@ static void bad_open(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_pipe(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unwriteable) {
+		int *fds = (int *)ba->addr;
+
 		(*counter)++;
-		VOID_RET(int, pipe((int *)ba->addr));
+		if (pipe(fds) == 0) {
+			/* Should not get here */
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+		}
 	}
 }
 
@@ -1444,7 +1464,7 @@ static void bad_preadv(stress_bad_addr_t *ba, volatile uint64_t *counter)
 		fd = open("/dev/zero", O_RDONLY);
 		if (fd > -1) {
 			(*counter)++;
-			VOID_RET(ssize_t, readv(fd, (struct iovec *)ba->addr, 1));
+			VOID_RET(ssize_t, preadv(fd, (struct iovec *)ba->addr, 1, 0));
 			VOID_RET(int, close(fd));
 		}
 	}
@@ -1472,11 +1492,12 @@ static void bad_preadv2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 static void bad_ptrace(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
-	VOID_RET(long, ptrace(PTRACE_GETREGS, getpid(), (void *)ba->addr, (void *)inc_addr(ba->addr, 1)));
+	VOID_RET(long int, ptrace(PTRACE_GETREGS, getpid(), (void *)ba->addr, (void *)inc_addr(ba->addr, 1)));
 }
 #endif
 
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 static void bad_poll(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	(*counter)++;
@@ -1491,11 +1512,11 @@ UNEXPECTED
 static void bad_ppoll1(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	void *addr = (char *)ba->addr;
-	struct timespec *ts = (struct timespec *)inc_addr(addr, sizeof(struct pollfd));
-	sigset_t *ss = (sigset_t *)(inc_addr(addr, sizeof(struct pollfd) + sizeof(struct timespec)));
+	const struct timespec *ts = (struct timespec *)inc_addr(addr, sizeof(struct pollfd));
+	const sigset_t *ss = (sigset_t *)(inc_addr(addr, sizeof(struct pollfd) + sizeof(struct timespec)));
 
 	(*counter)++;
-	VOID_RET(int, ppoll((struct pollfd *)addr, (nfds_t)1, ts, ss));
+	VOID_RET(int, shim_ppoll((struct pollfd *)addr, (nfds_t)1, ts, ss));
 }
 
 static void bad_ppoll2(stress_bad_addr_t *ba, volatile uint64_t *counter)
@@ -1508,7 +1529,7 @@ static void bad_ppoll2(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	ts.tv_nsec = 0;
 
 	(*counter)++;
-	VOID_RET(int, ppoll((struct pollfd *)ba->addr, (nfds_t)16, &ts, &sigmask));
+	VOID_RET(int, shim_ppoll((struct pollfd *)ba->addr, (nfds_t)16, &ts, &sigmask));
 }
 
 static void bad_ppoll3(stress_bad_addr_t *ba, volatile uint64_t *counter)
@@ -1523,7 +1544,7 @@ static void bad_ppoll3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 		(void)sigemptyset(&sigmask);
 
 		(*counter)++;
-		VOID_RET(int, ppoll(&pfd, (nfds_t)1, (struct timespec *)ba->addr, &sigmask));
+		VOID_RET(int, shim_ppoll(&pfd, (nfds_t)1, (struct timespec *)ba->addr, &sigmask));
 	}
 }
 
@@ -1540,7 +1561,7 @@ static void bad_ppoll4(stress_bad_addr_t *ba, volatile uint64_t *counter)
 		ts.tv_nsec = 0;
 
 		(*counter)++;
-		VOID_RET(int, ppoll(&pfd, (nfds_t)1, &ts, (sigset_t *)ba->addr));
+		VOID_RET(int, shim_ppoll(&pfd, (nfds_t)1, &ts, (sigset_t *)ba->addr));
 	}
 }
 #endif
@@ -1631,7 +1652,7 @@ static void bad_readlink3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	}
 }
 
-#if defined(HAVE_SYS_UIO_H)
+#if defined(HAVE_READV)
 static void bad_readv(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unwriteable) {
@@ -1827,7 +1848,7 @@ static void bad_setitimer3(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	if (ba->unwriteable) {
 		struct itimerval newval;
 
-		(void)memset(&newval, 0, sizeof(newval));
+		(void)shim_memset(&newval, 0, sizeof(newval));
 		(*counter)++;
 		VOID_RET(int, setitimer(ITIMER_PROF, &newval, (struct itimerval *)ba->addr));
 	}
@@ -2033,7 +2054,7 @@ static void bad_write(stress_bad_addr_t *ba, volatile uint64_t *counter)
 	}
 }
 
-#if defined(HAVE_SYS_UIO_H)
+#if defined(HAVE_WRITEV)
 static void bad_writev(stress_bad_addr_t *ba, volatile uint64_t *counter)
 {
 	if (ba->unreadable) {
@@ -2051,7 +2072,7 @@ static void bad_writev(stress_bad_addr_t *ba, volatile uint64_t *counter)
 UNEXPECTED
 #endif
 
-static stress_bad_syscall_t bad_syscalls[] = {
+static const stress_bad_syscall_t bad_syscalls[] = {
 	bad_access,
 /*
 	bad_acct,
@@ -2236,6 +2257,9 @@ static stress_bad_syscall_t bad_syscalls[] = {
 	bad_move_pages3,
 	bad_move_pages4,
 #endif
+#if defined(__NR_seal)
+	bad_mseal,
+#endif
 #if defined(HAVE_MSYNC)
 	bad_msync,
 #endif
@@ -2249,7 +2273,8 @@ static stress_bad_syscall_t bad_syscalls[] = {
 #endif
 	bad_open,
 	bad_pipe,
-#if defined(HAVE_POLL_H)
+#if defined(HAVE_POLL_H) &&	\
+    defined(HAVE_POLL)
 	bad_poll,
 #endif
 #if defined(HAVE_POLL_H) &&	\
@@ -2285,7 +2310,7 @@ static stress_bad_syscall_t bad_syscalls[] = {
 	bad_readlink1,
 	bad_readlink2,
 	bad_readlink3,
-#if defined(HAVE_SYS_UIO_H)
+#if defined(HAVE_READV)
 	bad_readv,
 #endif
 #if defined(HAVE_REMOVEXATTR) &&	\
@@ -2346,7 +2371,7 @@ static stress_bad_syscall_t bad_syscalls[] = {
 	bad_waitid,
 #endif
 	bad_write,
-#if defined(HAVE_SYS_UIO_H)
+#if defined(HAVE_WRITEV)
 	bad_writev,
 #endif
 };
@@ -2364,7 +2389,7 @@ static inline int stress_do_syscall(stress_args_t *args)
 	/* force update of 1 bit mwc random val */
 	(void)stress_mwc1();
 
-	if (!stress_continue(args))
+	if (UNLIKELY(!stress_continue(args)))
 		return 0;
 	pid = fork();
 	if (pid < 0) {
@@ -2375,6 +2400,11 @@ static inline int stress_do_syscall(stress_args_t *args)
 #endif
 		size_t k;
 
+		for (k = 0; k < SIZEOF_ARRAY(sigs); k++) {
+			if (stress_sighandler(args->name, sigs[k], stress_sig_handler_exit, NULL) < 0)
+				_exit(EXIT_FAILURE);
+		}
+
 		/* Try to limit child from spawning */
 		limit_procs(2);
 
@@ -2384,10 +2414,6 @@ static inline int stress_do_syscall(stress_args_t *args)
 		/* Drop all capabilities */
 		if (stress_drop_capabilities(args->name) < 0) {
 			_exit(EXIT_NO_RESOURCE);
-		}
-		for (k = 0; k < SIZEOF_ARRAY(sigs); k++) {
-			if (stress_sighandler(args->name, sigs[k], stress_sig_handler_exit, NULL) < 0)
-				_exit(EXIT_FAILURE);
 		}
 
 		stress_parent_died_alarm();
@@ -2424,13 +2450,14 @@ static inline int stress_do_syscall(stress_args_t *args)
 		}
 		_exit(EXIT_SUCCESS);
 	} else {
-		int ret, status;
+		pid_t ret;
+		int status;
 
 		ret = shim_waitpid(pid, &status, 0);
 		if (ret < 0) {
 			if (errno != EINTR)
-				pr_dbg("%s: waitpid(): errno=%d (%s)\n",
-					args->name, errno, strerror(errno));
+				pr_dbg("%s: waitpid() on PID %" PRIdMAX" failed, errno=%d (%s)\n",
+					args->name, (intmax_t)pid, errno, strerror(errno));
 			(void)stress_kill_pid_wait(pid, &status);
 		}
 		rc = WEXITSTATUS(status);
@@ -2452,7 +2479,7 @@ static int stress_sysbadaddr_child(stress_args_t *args, void *context)
 
 			state->addr_index = 0;
 			while (state->addr_index < SIZEOF_ARRAY(bad_addrs)) {
-				void *addr = bad_addrs[state->addr_index].addr;
+				const void *addr = bad_addrs[state->addr_index].addr;
 
 				if (addr)
 					stress_do_syscall(args);
@@ -2490,67 +2517,79 @@ static int stress_sysbadaddr(stress_args_t *args)
 		sizeof(*state), PROT_READ | PROT_WRITE,
 		MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (state == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous state structure: "
+		pr_inf_skip("%s: failed to mmap %zu byte anonymous state structure%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, sizeof(*state),
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(state, sizeof(*state), "state");
 
 	ro_page = stress_mmap_populate(NULL, page_size,
 		PROT_READ, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (ro_page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous read-only page: "
+		pr_inf_skip("%s: failed to mmap %zu byte anonymous read-only page%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(ro_page, page_size, "ro-page");
 	(void)stress_madvise_mergeable(ro_page, page_size);
 
 	rw_page = stress_mmap_populate(NULL, page_size << 1,
 		PROT_READ | PROT_WRITE,
 		MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (rw_page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous read-write page: "
+		pr_inf_skip("%s: failed to mmap %zu byte anonymous read-write page%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size << 1,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(rw_page, page_size << 1, "rw-page");
 	(void)stress_madvise_mergeable(rw_page, page_size << 1);
 
 	rx_page = stress_mmap_populate(NULL, page_size,
 		PROT_EXEC | PROT_READ,
 		MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (rx_page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous execute-only page: "
+		pr_inf_skip("%s: failed to mmap %zu byte anonymous execute-only page%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(rx_page, page_size, "rx-page");
 	(void)stress_madvise_mergeable(rx_page, page_size);
 
 	no_page = stress_mmap_populate(NULL, page_size,
 		PROT_NONE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (no_page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous prot-none page: "
+		pr_inf_skip("%s: failed to mmap %zu anonymous prot-none page%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(no_page, page_size, "no-page");
 
 	wo_page = stress_mmap_populate(NULL, page_size,
 		PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	if (wo_page == MAP_FAILED) {
-		pr_inf_skip("%s: cannot mmap anonymous write-only page: "
+		pr_inf_skip("%s: failed to mmap %zu byte anonymous write-only page%s, "
 		       "errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		ret = EXIT_NO_RESOURCE;
 		goto cleanup;
 	}
+	stress_set_vma_anon_name(wo_page, page_size, "wo-page");
 	(void)stress_madvise_mergeable(wo_page, page_size);
 
 	/*
@@ -2560,6 +2599,8 @@ static int stress_sysbadaddr(stress_args_t *args)
 	 */
 	wx_page = stress_mmap_populate(NULL, page_size,
 		PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	if (wx_page != MAP_FAILED)
+		stress_set_vma_anon_name(wo_page, page_size, "wo-page");
 	/*
 	 * Unmap last page, so we know we have an unmapped
 	 * page following the r/w page
@@ -2573,6 +2614,8 @@ static int stress_sysbadaddr(stress_args_t *args)
 		bad_addrs[i].addr = bad_addrs[i].func(args);
 	}
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = stress_oomable_child(args, NULL, stress_sysbadaddr_child, STRESS_OOMABLE_DROP_CAP);
@@ -2589,8 +2632,8 @@ cleanup:
 	return ret;
 }
 
-stressor_info_t stress_sysbadaddr_info = {
+const stressor_info_t stress_sysbadaddr_info = {
 	.stressor = stress_sysbadaddr,
-	.class = CLASS_OS,
+	.classifier = CLASS_OS,
 	.help = help
 };

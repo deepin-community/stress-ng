@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,9 +25,19 @@
 #include "core-put.h"
 #include "core-target-clones.h"
 
+#include <math.h>
+
 #define STRESS_SYNCLOAD_MS_DEFAULT	(125)	/* 125 milliseconds */
 #define STRESS_SYNCLOAD_MS_MIN		(1)	/* 1 millisecond */
 #define STRESS_SYNCLOAD_MS_MAX		(10000)	/* 1 second */
+
+#if defined(__APPLE__)
+#define REGISTER_PREFIX "r"
+#else
+#define REGISTER_PREFIX ""
+#endif
+
+#define REGISTER(r) REGISTER_PREFIX #r
 
 typedef void(* stress_syncload_op_t)(void);
 
@@ -45,29 +55,10 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_syncload_ms(const char *opt, const char *setting)
-{
-	uint64_t ms;
-
-	ms = stress_get_uint64(opt);
-	stress_check_range(setting, ms, STRESS_SYNCLOAD_MS_MIN, STRESS_SYNCLOAD_MS_MAX);
-	return stress_set_setting(setting, TYPE_ID_UINT64, &ms);
-}
-
-static int stress_set_syncload_msbusy(const char *opt)
-{
-	return stress_set_syncload_ms(opt, "syncload-msbusy");
-}
-
-static int stress_set_syncload_mssleep(const char *opt)
-{
-	return stress_set_syncload_ms(opt, "syncload-mssleep");
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_syncload_msbusy,	stress_set_syncload_msbusy },
-	{ OPT_syncload_mssleep,	stress_set_syncload_mssleep },
-	{ 0,			NULL },
+static const stress_opt_t opts[] = {
+	{ OPT_syncload_msbusy,	"syncload-msbusy",  TYPE_ID_UINT64, STRESS_SYNCLOAD_MS_MIN, STRESS_SYNCLOAD_MS_MAX, NULL },
+	{ OPT_syncload_mssleep,	"syncload-mssleep", TYPE_ID_UINT64, STRESS_SYNCLOAD_MS_MIN, STRESS_SYNCLOAD_MS_MAX, NULL },
+	END_OPT,
 };
 
 static void stress_syncload_none(void)
@@ -123,13 +114,14 @@ static void stress_syncload_yield(void)
 }
 #endif
 
-#if defined(STRESS_ARCH_PPC64)
+#if defined(STRESS_ARCH_PPC64) ||	\
+    defined(STRESS_ARCH_PPC)
 static void stress_syncload_yield(void)
 {
-        __asm__ __volatile__("or 27,27,27;\n");
-        __asm__ __volatile__("or 27,27,27;\n");
-        __asm__ __volatile__("or 27,27,27;\n");
-        __asm__ __volatile__("or 27,27,27;\n");
+        __asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
+        __asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
+        __asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
+        __asm__ __volatile__("or " REGISTER(27) "," REGISTER(27) "," REGISTER(27) ";\n");
 }
 #endif
 
@@ -151,10 +143,10 @@ static void stress_syncload_rdrand(void)
 
 static void stress_syncload_sched_yield(void)
 {
-	shim_sched_yield();
-	shim_sched_yield();
-	shim_sched_yield();
-	shim_sched_yield();
+	(void)shim_sched_yield();
+	(void)shim_sched_yield();
+	(void)shim_sched_yield();
+	(void)shim_sched_yield();
 }
 
 static void stress_syncload_mfence(void)
@@ -192,10 +184,7 @@ static void stress_syncload_atomic(void)
 
 static void stress_syncload_nice(void)
 {
-	int niceness;
-
-	niceness = nice(0);
-	(void)niceness;
+	VOID_RET(int, nice(0));
 }
 
 static void stress_syncload_spinwrite(void)
@@ -258,7 +247,8 @@ static const stress_syncload_op_t stress_syncload_ops[] = {
 #if defined(HAVE_ASM_ARM_YIELD)
 	stress_syncload_yield,
 #endif
-#if defined(STRESS_ARCH_PPC64)
+#if defined(STRESS_ARCH_PPC64) ||	\
+    defined(STRESS_ARCH_PPC)
 	stress_syncload_yield,
 #endif
 	stress_syncload_sched_yield,
@@ -288,8 +278,10 @@ static inline double stress_syncload_gettime(void)
 	return g_shared->syncload.start_time;
 }
 
-static void stress_syncload_init(void)
+static void stress_syncload_init(const uint32_t instances)
 {
+	(void)instances;
+
 	g_shared->syncload.start_time = stress_time_now();
 }
 
@@ -320,6 +312,8 @@ static int stress_syncload(stress_args_t *args)
 	for (i = 0; i < SIZEOF_ARRAY(fma_a); i++)
 		fma_a[i] = 0.0;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -327,7 +321,7 @@ static int stress_syncload(stress_args_t *args)
 		const stress_syncload_op_t op = stress_syncload_ops[delay_type];
 
 		delay_type++;
-		if (delay_type >= SIZEOF_ARRAY(stress_syncload_ops))
+		if (UNLIKELY(delay_type >= SIZEOF_ARRAY(stress_syncload_ops)))
 			delay_type = 0;
 
 		timeout += sec_busy;
@@ -339,7 +333,7 @@ static int stress_syncload(stress_args_t *args)
 		if (now < timeout) {
 			const uint64_t duration_us = (uint64_t)((timeout - now) * 1000000);
 
-			shim_nanosleep_uint64(duration_us * 1000);
+			(void)shim_nanosleep_uint64(duration_us * 1000);
 		}
 
 		stress_bogo_inc(args);
@@ -349,10 +343,10 @@ static int stress_syncload(stress_args_t *args)
 	return EXIT_SUCCESS;
 }
 
-stressor_info_t stress_syncload_info = {
+const stressor_info_t stress_syncload_info = {
 	.stressor = stress_syncload,
-	.class = CLASS_CPU,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU,
+	.opts = opts,
 	.init = stress_syncload_init,
 	.help = help
 };

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -58,7 +58,7 @@ static inline void strchk(
 	const int ok,
 	const char *msg)
 {
-	if ((g_opt_flags & OPT_FLAGS_VERIFY) && (!ok)) {
+	if (UNLIKELY((g_opt_flags & OPT_FLAGS_VERIFY) && (!ok))) {
 		pr_fail("%s: %s did not return expected result\n",
 			info->name, msg);
 		info->failed = true;
@@ -84,7 +84,7 @@ static size_t stress_strcasecmp(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		STRCHK(info, 0 == test_strcasecmp(str1, str1));
 		STRCHK(info, 0 == test_strcasecmp(str2, str2));
 
@@ -119,7 +119,7 @@ static size_t stress_strncasecmp(stress_args_t *args, stress_str_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		STRCHK(info, 0 == test_strncasecmp(str1, str1, len1));
 		STRCHK(info, 0 == test_strncasecmp(str2, str2, len2));
 
@@ -154,7 +154,7 @@ static size_t stress_index(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, NULL == test_index(str1, '+'));
 		STRCHK(info, NULL != test_index(str1, str1[0]));
 
@@ -182,7 +182,7 @@ static size_t stress_rindex(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, NULL == test_rindex(str1, '+'));
 		STRCHK(info, NULL != test_rindex(str1, str1[0]));
 
@@ -214,7 +214,7 @@ static size_t stress_strlcpy(stress_args_t *args, stress_str_args_t *info)
 	const size_t strdstlen = info->strdstlen;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, str_len1 == test_strlcpy(strdst, str1, strdstlen));
 		STRCHK(info, str_len2 == test_strlcpy(strdst, str2, strdstlen));
 	}
@@ -237,7 +237,7 @@ static size_t stress_strcpy(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, strdst == test_strcpy(strdst, str1));
 		STRCHK(info, strdst == test_strcpy(strdst, str2));
 	}
@@ -268,7 +268,7 @@ static size_t stress_strlcat(stress_args_t *args, stress_str_args_t *info)
 	const size_t strdstlen = info->strdstlen;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		STRCHK(info, str_len1 == test_strlcat(strdst, str1, strdstlen));
 		*strdst = '\0';
@@ -299,7 +299,7 @@ static size_t stress_strcat(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		STRCHK(info, strdst == test_strcat(strdst, str1));
 		*strdst = '\0';
@@ -332,7 +332,7 @@ static size_t stress_strncat(stress_args_t *args, stress_str_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		STRCHK(info, strdst == test_strncat(strdst, str1, len1));
 		*strdst = '\0';
@@ -362,7 +362,7 @@ static size_t stress_strchr(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, NULL == test_strchr(str1, '+'));
 		STRCHK(info, NULL != test_strchr(str1, str1[0]));
 
@@ -387,7 +387,7 @@ static size_t stress_strrchr(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, NULL == test_strrchr(str1, '+'));
 		STRCHK(info, NULL != test_strrchr(str1, str1[0]));
 
@@ -412,7 +412,7 @@ static size_t stress_strcmp(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		STRCHK(info, 0 == test_strcmp(str1, str1));
 		STRCHK(info, 0 == test_strcmp(str2, str2));
 
@@ -445,7 +445,7 @@ static size_t stress_strncmp(stress_args_t *args, stress_str_args_t *info)
 	const size_t len2 = info->len2;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		STRCHK(info, 0 == test_strncmp(str1, str1, len1));
 		STRCHK(info, 0 == test_strncmp(str2, str2, len2));
 
@@ -476,7 +476,7 @@ static size_t stress_strcoll(stress_args_t *args, stress_str_args_t *info)
 	const size_t len1 = info->len1;
 	register size_t i;
 
-	for (i = 1; stress_continue_flag() && (i < len1); i++) {
+	for (i = 1; LIKELY(stress_continue_flag() && (i < len1)); i++) {
 		STRCHK(info, 0 == test_strcoll(str1, str1));
 		STRCHK(info, 0 == test_strcoll(str2, str2));
 
@@ -510,13 +510,13 @@ static size_t stress_strlen(stress_args_t *args, stress_str_args_t *info)
 	register size_t i;
 	size_t n;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		STRCHK(info, len1 - 1 == test_strlen(str1));
 		STRCHK(info, len1 - 1 - i == test_strlen(str1 + i));
 	}
 	n = i * 2;
 
-	for (i = 0; stress_continue_flag() && (i < len2 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len2 - 1)); i++) {
 		STRCHK(info, len2 - 1 == test_strlen(str2));
 		STRCHK(info, len2 - 1 - i == test_strlen(str2 + i));
 	}
@@ -541,7 +541,7 @@ static size_t stress_strxfrm(stress_args_t *args, stress_str_args_t *info)
 	const size_t strdstlen = info->strdstlen;
 	register size_t i;
 
-	for (i = 0; stress_continue_flag() && (i < len1 - 1); i++) {
+	for (i = 0; LIKELY(stress_continue_flag() && (i < len1 - 1)); i++) {
 		*strdst = '\0';
 		STRCHK(info, 0 != test_strxfrm(strdst, str1, strdstlen));
 		*strdst = '\0';
@@ -619,34 +619,10 @@ static size_t stress_str_all(stress_args_t *args, stress_str_args_t *info)
 	metrics[i].count += (double)str_methods[i].func(args, &info_all);
 	metrics[i].duration += (stress_time_now() - t);
 	i++;
-	if (i >= SIZEOF_ARRAY(str_methods))
+	if (UNLIKELY(i >= SIZEOF_ARRAY(str_methods)))
 		i = 1;
 	info->failed = info_all.failed;
 	return 0;
-}
-
-/*
- *  stress_set_str_method()
- *	set the default string stress method
- */
-static int stress_set_str_method(const char *name)
-{
-	size_t i;
-
-	for (i = 0; i < SIZEOF_ARRAY(str_methods); i++) {
-		if (!strcmp(str_methods[i].name, name)) {
-			stress_set_setting("str-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "str-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(str_methods); i++) {
-		(void)fprintf(stderr, " %s", str_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
 }
 
 /*
@@ -676,11 +652,10 @@ static int stress_str(stress_args_t *args)
 
 	stress_rndstr(info.str1, info.len1);
 
-	for (i = 0; i < SIZEOF_ARRAY(metrics); i++) {
-		metrics[i].duration = 0.0;
-		metrics[i].count = 0.0;
-	}
+	stress_zero_metrics(metrics, SIZEOF_ARRAY(metrics));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -712,8 +687,8 @@ static int stress_str(stress_args_t *args)
 			const double rate = metrics[i].count / metrics[i].duration;
 
 			(void)snprintf(msg, sizeof(msg), "%s calls per sec", str_methods[i].name);
-			stress_metrics_set(args, j, msg,	
-				rate, STRESS_HARMONIC_MEAN);
+			stress_metrics_set(args, j, msg,
+				rate, STRESS_METRIC_HARMONIC_MEAN);
 			j++;
 		}
 	}
@@ -721,21 +696,20 @@ static int stress_str(stress_args_t *args)
 	return info.failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-static void stress_str_set_default(void)
+static const char *stress_str_method(const size_t i)
 {
-	stress_set_str_method("all");
+	return (i < SIZEOF_ARRAY(str_methods)) ? str_methods[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_str_method,	stress_set_str_method },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_str_method, "str-method", TYPE_ID_SIZE_T_METHOD, 0, 0, stress_str_method },
+	END_OPT,
 };
 
-stressor_info_t stress_str_info = {
+const stressor_info_t stress_str_info = {
 	.stressor = stress_str,
-	.set_default = stress_str_set_default,
-	.class = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_CPU | CLASS_CPU_CACHE | CLASS_MEMORY,
 	.verify = VERIFY_OPTIONAL,
+	.opts = opts,
 	.help = help
 };

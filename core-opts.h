@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King
+ * Copyright (C) 2024-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -82,6 +82,13 @@
 #define OPT_FLAGS_PERMUTE	 STRESS_BIT_ULL(51)	/* --permute N */
 #define OPT_FLAGS_INTERRUPTS	 STRESS_BIT_ULL(52)	/* --interrupts */
 #define OPT_FLAGS_PROGRESS	 STRESS_BIT_ULL(53)	/* --progress */
+#define OPT_FLAGS_SYNC_START	 STRESS_BIT_ULL(54)	/* --sync-start */
+#define OPT_FLAGS_RAPL		 STRESS_BIT_ULL(55)	/* --rapl */
+#define OPT_FLAGS_RAPL_REQUIRED  STRESS_BIT_ULL(56)	/* set if RAPL is required */
+#define OPT_FLAGS_C_STATES	 STRESS_BIT_ULL(57)	/* --c-states */
+#define OPT_FLAGS_STRESSOR_TIME	 STRESS_BIT_ULL(58)	/* --stressor-time */
+#define OPT_FLAGS_TASKSET_RANDOM STRESS_BIT_ULL(59)	/* --taskset-random */
+#define OPT_FLAGS_BUILDINFO	 STRESS_BIT_ULL(60)	/* --buildinfo */
 
 #define OPT_FLAGS_MINMAX_MASK		\
 	(OPT_FLAGS_MINIMIZE | OPT_FLAGS_MAXIMIZE)
@@ -109,20 +116,21 @@ typedef enum {
 	OPT_dentry = 'D',
 	OPT_fork = 'f',
 	OPT_fallocate = 'F',
+	OPT_help = 'h',
 	OPT_io = 'i',
 	OPT_job = 'j',
-	OPT_help = 'h',
 	OPT_keep_name = 'k',
+	OPT_klog_check = 'K',
 	OPT_cpu_load = 'l',
 	OPT_vm = 'm',
 	OPT_metrics = 'M',
 	OPT_dry_run = 'n',
-	OPT_rename = 'R',
 	OPT_open = 'o',
 	OPT_pipe = 'p',
 	OPT_poll = 'P',
 	OPT_quiet = 'q',
 	OPT_random = 'r',
+	OPT_rename = 'R',
 	OPT_switch = 's',
 	OPT_sock = 'S',
 	OPT_timeout = 't',
@@ -130,9 +138,10 @@ typedef enum {
 	OPT_urandom = 'u',
 	OPT_verbose = 'v',
 	OPT_version = 'V',
+	OPT_with = 'w',
+	OPT_exclude = 'x',
 	OPT_yield = 'y',
 	OPT_yaml = 'Y',
-	OPT_exclude = 'x',
 
 	/* Long options only */
 
@@ -184,6 +193,10 @@ typedef enum {
 	OPT_bad_ioctl_method,
 	OPT_bad_ioctl_ops,
 
+	OPT_besselmath,
+	OPT_besselmath_method,
+	OPT_besselmath_ops,
+
 	OPT_bigheap_bytes,
 	OPT_bigheap_growth,
 	OPT_bigheap_mlock,
@@ -199,6 +212,10 @@ typedef enum {
 	OPT_bitonicsort_ops,
 	OPT_bitonicsort_size,
 
+	OPT_bitops,
+	OPT_bitops_method,
+	OPT_bitops_ops,
+
 	OPT_branch,
 	OPT_branch_ops,
 
@@ -213,6 +230,15 @@ typedef enum {
 	OPT_bsearch_ops,
 	OPT_bsearch_size,
 
+	OPT_bubblesort,
+	OPT_bubblesort_method,
+	OPT_bubblesort_ops,
+	OPT_bubblesort_size,
+
+	OPT_buildinfo,
+
+	OPT_c_states,
+
 	OPT_class,
 
 	OPT_cache_ops,
@@ -226,8 +252,14 @@ typedef enum {
 	OPT_cache_level,
 	OPT_cache_sfence,
 	OPT_cache_no_affinity,
+	OPT_cache_permute,
 	OPT_cache_prefetch,
+	OPT_cache_prefetchw,
 	OPT_cache_ways,
+
+	OPT_cachehammer,
+	OPT_cachehammer_numa,
+	OPT_cachehammer_ops,
 
 	OPT_cacheline,
 	OPT_cacheline_ops,
@@ -287,6 +319,9 @@ typedef enum {
 	OPT_cpu_online_all,
 	OPT_cpu_online_ops,
 
+	OPT_cpu_sched,
+	OPT_cpu_sched_ops,
+
 	OPT_crypt,
 	OPT_crypt_method,
 	OPT_crypt_ops,
@@ -326,6 +361,10 @@ typedef enum {
 	OPT_dev_shm,
 	OPT_dev_shm_ops,
 
+	OPT_dfp,
+	OPT_dfp_method,
+	OPT_dfp_ops,
+
 	OPT_dir,
 	OPT_dir_ops,
 	OPT_dir_dirs,
@@ -349,6 +388,9 @@ typedef enum {
 
 	OPT_dynlib,
 	OPT_dynlib_ops,
+
+	OPT_easy_opcode,
+	OPT_easy_opcode_ops,
 
 	OPT_eigen,
 	OPT_eigen_ops,
@@ -384,6 +426,10 @@ typedef enum {
 	OPT_exit_group,
 	OPT_exit_group_ops,
 
+	OPT_expmath,
+	OPT_expmath_method,
+	OPT_expmath_ops,
+
 	OPT_factor,
 	OPT_factor_digits,
 	OPT_factor_ops,
@@ -395,6 +441,7 @@ typedef enum {
 	OPT_fanotify_ops,
 
 	OPT_far_branch,
+	OPT_far_branch_flush,
 	OPT_far_branch_ops,
 	OPT_far_branch_pages,
 
@@ -404,10 +451,22 @@ typedef enum {
 	OPT_fcntl,
 	OPT_fcntl_ops,
 
+	OPT_fd_abuse,
+	OPT_fd_abuse_ops,
+
 	OPT_fd_fork,
 	OPT_fd_fork_fds,
 	OPT_fd_fork_file,
 	OPT_fd_fork_ops,
+
+	OPT_fd_race,
+	OPT_fd_race_dev,
+	OPT_fd_race_ops,
+	OPT_fd_race_proc,
+
+	OPT_fibsearch,
+	OPT_fibsearch_ops,
+	OPT_fibsearch_size,
 
 	OPT_fiemap,
 	OPT_fiemap_ops,
@@ -425,6 +484,15 @@ typedef enum {
 	OPT_filename_ops,
 	OPT_filename_opts,
 
+	OPT_filerace,
+	OPT_filerace_ops,
+
+	OPT_flipflop,
+	OPT_flipflop_bits,
+	OPT_flipflop_ops,
+	OPT_flipflop_taskset1,
+	OPT_flipflop_taskset2,
+
 	OPT_flock,
 	OPT_flock_ops,
 
@@ -433,9 +501,11 @@ typedef enum {
 
 	OPT_fma,
 	OPT_fma_ops,
+	OPT_fma_libc,
 
-	OPT_fork_ops,
 	OPT_fork_max,
+	OPT_fork_ops,
+	OPT_fork_pageout,
 	OPT_fork_unmap,
 	OPT_fork_vm,
 
@@ -455,6 +525,13 @@ typedef enum {
 	OPT_fpunch,
 	OPT_fpunch_bytes,
 	OPT_fpunch_ops,
+
+	OPT_fractal,
+	OPT_fractal_iterations,
+	OPT_fractal_method,
+	OPT_fractal_ops,
+	OPT_fractal_xsize,
+	OPT_fractal_ysize,
 
 	OPT_fsize,
 	OPT_fsize_ops,
@@ -481,6 +558,7 @@ typedef enum {
 
 	OPT_get,
 	OPT_get_ops,
+	OPT_get_slow_sync,
 
 	OPT_getrandom,
 	OPT_getrandom_ops,
@@ -496,7 +574,7 @@ typedef enum {
 	OPT_gpu_ops,
 	OPT_gpu_devnode,
 	OPT_gpu_frag,
-	OPT_gpu_uploads,
+	OPT_gpu_upload,
 	OPT_gpu_size,
 	OPT_gpu_xsize,
 	OPT_gpu_ysize,
@@ -527,11 +605,16 @@ typedef enum {
 	OPT_hsearch_ops,
 	OPT_hsearch_size,
 
+	OPT_hyperbolic,
+	OPT_hyperbolic_method,
+	OPT_hyperbolic_ops,
+
 	OPT_icache,
 	OPT_icache_ops,
 
 	OPT_icmp_flood,
 	OPT_icmp_flood_ops,
+	OPT_icmp_flood_max_size,
 
 	OPT_idle_page,
 	OPT_idle_page_ops,
@@ -545,6 +628,15 @@ typedef enum {
 
 	OPT_inotify,
 	OPT_inotify_ops,
+
+	OPT_insertionsort,
+	OPT_insertionsort_ops,
+	OPT_insertionsort_size,
+
+	OPT_intmath,
+	OPT_intmath_fast,
+	OPT_intmath_method,
+	OPT_intmath_ops,
 
 	OPT_iomix,
 	OPT_iomix_bytes,
@@ -567,6 +659,7 @@ typedef enum {
 	OPT_io_uring,
 	OPT_io_uring_entries,
 	OPT_io_uring_ops,
+	OPT_io_uring_rand,
 
 	OPT_ipsec_mb,
 	OPT_ipsec_mb_ops,
@@ -604,8 +697,6 @@ typedef enum {
 	OPT_klog,
 	OPT_klog_ops,
 
-	OPT_klog_check,
-
 	OPT_ksm,
 
 	OPT_kvm,
@@ -640,7 +731,9 @@ typedef enum {
 	OPT_list_size,
 
 	OPT_llc_affinity,
+	OPT_llc_affinity_clflush,
 	OPT_llc_affinity_mlock,
+	OPT_llc_affinity_numa,
 	OPT_llc_affinity_ops,
 
 	OPT_loadavg,
@@ -658,12 +751,19 @@ typedef enum {
 	OPT_lockf_ops,
 	OPT_lockf_nonblock,
 
+	OPT_lockmix,
+	OPT_lockmix_ops,
+
 	OPT_lockofd,
 	OPT_lockofd_ops,
 
 	OPT_log_brief,
 	OPT_log_file,
 	OPT_log_lockless,
+
+	OPT_logmath,
+	OPT_logmath_method,
+	OPT_logmath_ops,
 
 	OPT_longjmp,
 	OPT_longjmp_ops,
@@ -675,6 +775,9 @@ typedef enum {
 	OPT_lsearch_method,
 	OPT_lsearch_ops,
 	OPT_lsearch_size,
+
+	OPT_lsm,
+	OPT_lsm_ops,
 
 	OPT_madvise,
 	OPT_madvise_ops,
@@ -709,6 +812,7 @@ typedef enum {
 	OPT_max_fd,
 
 	OPT_mcontend,
+	OPT_mcontend_numa,
 	OPT_mcontend_ops,
 
 	OPT_membarrier,
@@ -723,15 +827,18 @@ typedef enum {
 	OPT_memfd_fds,
 	OPT_memfd_madvise,
 	OPT_memfd_mlock,
+	OPT_memfd_numa,
 	OPT_memfd_ops,
 	OPT_memfd_zap_pte,
 
 	OPT_memhotplug,
 	OPT_memhotplug_ops,
+	OPT_memhotplug_mmap,
 
 	OPT_memrate,
 	OPT_memrate_bytes,
 	OPT_memrate_flush,
+	OPT_memrate_method,
 	OPT_memrate_ops,
 	OPT_memrate_rd_mbs,
 	OPT_memrate_wr_mbs,
@@ -754,6 +861,11 @@ typedef enum {
 	OPT_mincore,
 	OPT_mincore_ops,
 	OPT_mincore_rand,
+
+	OPT_min_nanosleep,
+	OPT_min_nanosleep_ops,
+	OPT_min_nanosleep_max,
+	OPT_min_nanosleep_sched,
 
 	OPT_misaligned,
 	OPT_misaligned_ops,
@@ -780,6 +892,7 @@ typedef enum {
 	OPT_mmap_mlock,
 	OPT_mmap_mmap2,
 	OPT_mmap_mprotect,
+	OPT_mmap_numa,
 	OPT_mmap_odirect,
 	OPT_mmap_ops,
 	OPT_mmap_osync,
@@ -791,27 +904,44 @@ typedef enum {
 	OPT_mmapaddr_mlock,
 	OPT_mmapaddr_ops,
 
+	OPT_mmapcow,
+	OPT_mmapcow_fork,
+	OPT_mmapcow_free,
+	OPT_mmapcow_mlock,
+	OPT_mmapcow_numa,
+	OPT_mmapcow_ops,
+
 	OPT_mmapfiles,
+	OPT_mmapfiles_numa,
 	OPT_mmapfiles_ops,
 	OPT_mmapfiles_populate,
 	OPT_mmapfiles_shared,
 
 	OPT_mmapfixed,
 	OPT_mmapfixed_mlock,
+	OPT_mmapfixed_numa,
 	OPT_mmapfixed_ops,
 
 	OPT_mmapfork,
 	OPT_mmapfork_ops,
+	OPT_mmapfork_bytes,
 
 	OPT_mmaphuge,
 	OPT_mmaphuge_file,
 	OPT_mmaphuge_mlock,
 	OPT_mmaphuge_mmaps,
+	OPT_mmaphuge_numa,
 	OPT_mmaphuge_ops,
 
 	OPT_mmapmany,
 	OPT_mmapmany_mlock,
+	OPT_mmapmany_numa,
 	OPT_mmapmany_ops,
+
+	OPT_mmaptorture,
+	OPT_mmaptorture_bytes,
+	OPT_mmaptorture_msync,
+	OPT_mmaptorture_ops,
 
 	OPT_module,
 	OPT_module_name,
@@ -841,6 +971,10 @@ typedef enum {
 	OPT_mremap_ops,
 	OPT_mremap_bytes,
 	OPT_mremap_mlock,
+	OPT_mremap_numa,
+
+	OPT_mseal,
+	OPT_mseal_ops,
 
 	OPT_msg,
 	OPT_msg_bytes,
@@ -853,6 +987,10 @@ typedef enum {
 
 	OPT_msyncmany,
 	OPT_msyncmany_ops,
+
+	OPT_mtx,
+	OPT_mtx_ops,
+	OPT_mtx_procs,
 
 	OPT_munmap,
 	OPT_munmap_ops,
@@ -913,18 +1051,24 @@ typedef enum {
 	OPT_open_max,
 
 	OPT_page_in,
+
 	OPT_pathological,
+
+	OPT_pause,
 
 	OPT_pagemove,
 	OPT_pagemove_bytes,
 	OPT_pagemove_mlock,
+	OPT_pagemove_numa,
 	OPT_pagemove_ops,
 
 	OPT_pageswap,
 	OPT_pageswap_ops,
 
 	OPT_pci,
+	OPT_pci_dev,
 	OPT_pci_ops,
+	OPT_pci_ops_rate,
 
 	OPT_perf_stats,
 
@@ -939,6 +1083,10 @@ typedef enum {
 	OPT_physpage,
 	OPT_physpage_ops,
 	OPT_physpage_mtrr,
+
+	OPT_physmmap,
+	OPT_physmmap_ops,
+	OPT_physmmap_read,
 
 	OPT_pidfd,
 	OPT_pidfd_ops,
@@ -963,8 +1111,13 @@ typedef enum {
 	OPT_plugin_method,
 	OPT_plugin_so,
 
-	OPT_poll_ops,
 	OPT_poll_fds,
+	OPT_poll_ops,
+	OPT_poll_random_us,
+
+	OPT_powmath,
+	OPT_powmath_method,
+	OPT_powmath_ops,
 
 	OPT_prefetch,
 	OPT_prefetch_l3_size,
@@ -973,6 +1126,12 @@ typedef enum {
 
 	OPT_prctl,
 	OPT_prctl_ops,
+
+	OPT_prime,
+	OPT_prime_method,
+	OPT_prime_ops,
+	OPT_prime_progress,
+	OPT_prime_start,
 
 	OPT_prio_inv,
 	OPT_prio_inv_ops,
@@ -987,6 +1146,11 @@ typedef enum {
 
 	OPT_progress,
 
+	OPT_pseek,
+	OPT_pseek_ops,
+	OPT_pseek_rand,
+	OPT_pseek_io_size,
+
 	OPT_pthread,
 	OPT_pthread_ops,
 	OPT_pthread_max,
@@ -994,13 +1158,17 @@ typedef enum {
 	OPT_ptrace,
 	OPT_ptrace_ops,
 
+	OPT_ptr_chase,
+	OPT_ptr_chase_ops,
+	OPT_ptr_chase_pages,
+
 	OPT_pty,
 	OPT_pty_ops,
 	OPT_pty_max,
 
 	OPT_qsort,
 	OPT_qsort_ops,
-	OPT_qsort_integers,
+	OPT_qsort_size,
 	OPT_qsort_method,
 
 	OPT_quota,
@@ -1020,6 +1188,9 @@ typedef enum {
 	OPT_randlist_compact,
 	OPT_randlist_items,
 	OPT_randlist_size,
+
+	OPT_rapl,
+	OPT_raplstat,
 
 	OPT_ramfs,
 	OPT_ramfs_ops,
@@ -1054,6 +1225,9 @@ typedef enum {
 
 	OPT_reboot,
 	OPT_reboot_ops,
+
+	OPT_regex,
+	OPT_regex_ops,
 
 	OPT_regs,
 	OPT_regs_ops,
@@ -1145,10 +1319,12 @@ typedef enum {
 	OPT_sem,
 	OPT_sem_ops,
 	OPT_sem_procs,
+	OPT_sem_shared,
 
 	OPT_sem_sysv,
 	OPT_sem_sysv_ops,
 	OPT_sem_sysv_procs,
+	OPT_sem_sysv_setall,
 
 	OPT_session,
 	OPT_session_ops,
@@ -1166,13 +1342,13 @@ typedef enum {
 	OPT_shm_bytes,
 	OPT_shm_mlock,
 	OPT_shm_ops,
-	OPT_shm_objects,
+	OPT_shm_objs,
 
 	OPT_shm_sysv,
 	OPT_shm_sysv_bytes,
 	OPT_shm_sysv_mlock,
 	OPT_shm_sysv_ops,
-	OPT_shm_sysv_segments,
+	OPT_shm_sysv_segs,
 
 	OPT_sequential,
 
@@ -1190,6 +1366,12 @@ typedef enum {
 
 	OPT_sigfpe,
 	OPT_sigfpe_ops,
+
+	OPT_sighup,
+	OPT_sighup_ops,
+
+	OPT_sigill,
+	OPT_sigill_ops,
 
 	OPT_sigio,
 	OPT_sigio_ops,
@@ -1220,6 +1402,12 @@ typedef enum {
 
 	OPT_sigtrap,
 	OPT_sigtrap_ops,
+
+	OPT_sigurg,
+	OPT_sigurg_ops,
+
+	OPT_sigvtalrm,
+	OPT_sigvtalrm_ops,
 
 	OPT_sigxcpu,
 	OPT_sigxcpu_ops,
@@ -1265,6 +1453,7 @@ typedef enum {
 	OPT_sockfd,
 	OPT_sockfd_ops,
 	OPT_sockfd_port,
+	OPT_sockfd_reuse,
 
 	OPT_sockmany,
 	OPT_sockmany_if,
@@ -1279,6 +1468,7 @@ typedef enum {
 
 	OPT_swap,
 	OPT_swap_ops,
+	OPT_swap_self,
 
 	OPT_switch_ops,
 	OPT_switch_freq,
@@ -1293,6 +1483,12 @@ typedef enum {
 	OPT_sparsematrix_method,
 	OPT_sparsematrix_size,
 
+	OPT_spinmem,
+	OPT_spinmem_affinity,
+	OPT_spinmem_method,
+	OPT_spinmem_numa,
+	OPT_spinmem_ops,
+
 	OPT_splice,
 	OPT_splice_ops,
 	OPT_splice_bytes,
@@ -1306,6 +1502,9 @@ typedef enum {
 
 	OPT_stackmmap,
 	OPT_stackmmap_ops,
+
+	OPT_statmount,
+	OPT_statmount_ops,
 
 	OPT_status,
 
@@ -1323,6 +1522,8 @@ typedef enum {
 	OPT_stream_mlock,
 	OPT_stream_ops,
 
+	OPT_stressor_time,
+
 	OPT_stressors,
 
 	OPT_symlink,
@@ -1332,6 +1533,8 @@ typedef enum {
 	OPT_sync_file,
 	OPT_sync_file_ops,
 	OPT_sync_file_bytes,
+
+	OPT_sync_start,
 
 	OPT_syncload,
 	OPT_syncload_ops,
@@ -1361,6 +1564,8 @@ typedef enum {
 	OPT_tee_ops,
 
 	OPT_taskset,
+
+	OPT_taskset_random,
 
 	OPT_temp_path,
 
@@ -1436,8 +1641,14 @@ typedef enum {
 	OPT_udp_flood_domain,
 	OPT_udp_flood_if,
 
+	OPT_umask,
+	OPT_umask_ops,
+
 	OPT_umount,
 	OPT_umount_ops,
+
+	OPT_unlink,
+	OPT_unlink_ops,
 
 	OPT_unshare,
 	OPT_unshare_ops,
@@ -1461,6 +1672,9 @@ typedef enum {
 	OPT_vdso,
 	OPT_vdso_ops,
 	OPT_vdso_func,
+
+	OPT_veccmp,
+	OPT_veccmp_ops,
 
 	OPT_vecfp,
 	OPT_vecfp_ops,
@@ -1492,17 +1706,20 @@ typedef enum {
 	OPT_vforkmany_vm_bytes,
 
 	OPT_vm_bytes,
+	OPT_vm_flush,
 	OPT_vm_hang,
 	OPT_vm_keep,
-	OPT_vm_mmap_populate,
-	OPT_vm_mmap_locked,
+	OPT_vm_populate,
+	OPT_vm_locked,
 	OPT_vm_ops,
 	OPT_vm_madvise,
 	OPT_vm_method,
+	OPT_vm_numa,
 
 	OPT_vm_addr,
 	OPT_vm_addr_method,
 	OPT_vm_addr_mlock,
+	OPT_vm_addr_numa,
 	OPT_vm_addr_ops,
 
 	OPT_vm_rw,
@@ -1520,6 +1737,7 @@ typedef enum {
 	OPT_vma_ops,
 
 	OPT_vmstat,
+	OPT_vmstat_units,
 
 	OPT_vnni,
 	OPT_vnni_intrinsic,
@@ -1534,8 +1752,6 @@ typedef enum {
 
 	OPT_watchdog,
 	OPT_watchdog_ops,
-
-	OPT_with,
 
 	OPT_wcs,
 	OPT_wcs_ops,
@@ -1562,6 +1778,8 @@ typedef enum {
 	OPT_xattr_ops,
 
 	OPT_yield_ops,
+	OPT_yield_procs,
+	OPT_yield_sched,
 
 	OPT_zero,
 	OPT_zero_read,

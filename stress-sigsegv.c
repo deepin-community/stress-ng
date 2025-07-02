@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +25,8 @@
 #include "core-cpu-cache.h"
 #include "core-nt-store.h"
 #include "core-put.h"
+
+#include <time.h>
 
 #if defined(HAVE_SYS_IO_H)
 #include <sys/io.h>
@@ -194,7 +196,7 @@ static void stress_sigsegv_misaligned128nt(void)
 static void stress_sigsegv_readtsc(void)
 {
 	/* SEGV reading tsc when tsc is not allowed */
-	if (prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0) == 0)
+	if (LIKELY(prctl(PR_SET_TSC, PR_TSC_SIGSEGV, 0, 0, 0) == 0))
 		(void)stress_asm_x86_rdtsc();
 }
 
@@ -224,13 +226,14 @@ static void stress_sigsegv_vdso(void)
 	const uintptr_t vdso = (uintptr_t)getauxval(AT_SYSINFO_EHDR);
 
 	/* No vdso, don't bother */
-	if (!vdso)
+	if (UNLIKELY(!vdso))
 		return;
 
 #if defined(HAVE_CLOCK_GETTIME) &&	\
     (defined(STRESS_ARCH_ARM) ||	\
      defined(STRESS_ARCH_MIPS) ||	\
      defined(STRESS_ARCH_PPC64) || 	\
+     defined(STRESS_ARCH_PPC) || 	\
      defined(STRESS_ARCH_RISCV) ||	\
      defined(STRESS_ARCH_S390) ||	\
      defined(STRESS_ARCH_X86))
@@ -239,6 +242,7 @@ static void stress_sigsegv_vdso(void)
 #if defined(STRESS_ARCH_ARM) ||		\
     defined(STRESS_ARCH_MIPS) ||	\
     defined(STRESS_ARCH_PPC64) || 	\
+    defined(STRESS_ARCH_PPC) || 	\
     defined(STRESS_ARCH_RISCV) ||	\
     defined(STRESS_ARCH_S390) ||	\
     defined(STRESS_ARCH_X86)
@@ -255,6 +259,10 @@ static void stress_sigsegv_vdso(void)
 static int stress_sigsegv(stress_args_t *args)
 {
 	uint8_t *ro_ptr, *none_ptr;
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_GUARD_INSTALL)
+	uint8_t *guard_ptr;
+#endif
 	static uint32_t mask_shift;
 	static uintptr_t mask, last_mask;
 	NOCLOBBER int rc = EXIT_FAILURE;
@@ -274,22 +282,55 @@ static int stress_sigsegv(stress_args_t *args)
 	ro_ptr = (uint8_t *)mmap(NULL, args->page_size, PROT_READ,
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (ro_ptr == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of read only page failed: "
+		pr_inf_skip("%s: failed to mmap %zu byte read only page%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, args->page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(ro_ptr, args->page_size, "ro-page");
+
 	/* Allocate write only page */
 	none_ptr = (uint8_t *)mmap(NULL, args->page_size, PROT_NONE,
 		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (none_ptr == MAP_FAILED) {
-		pr_inf_skip("%s: mmap of write only page failed: "
+		pr_inf_skip("%s: failed to mmap %zu byte write only page%s, "
 			"errno=%d (%s), skipping stressor\n",
-			args->name, errno, strerror(errno));
+			args->name, args->page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		(void)munmap((void *)ro_ptr, args->page_size);
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(ro_ptr, args->page_size, "no-page");
 
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_GUARD_INSTALL)
+	/* Allocate guard page */
+	guard_ptr = (uint8_t *)mmap(NULL, args->page_size, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (guard_ptr == MAP_FAILED) {
+		pr_inf_skip("%s: failed to mmap %zu byte guard page%s, "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, args->page_size,
+			stress_get_memfree_str(), errno, strerror(errno));
+		(void)munmap((void *)none_ptr, args->page_size);
+		(void)munmap((void *)ro_ptr, args->page_size);
+		return EXIT_NO_RESOURCE;
+	}
+	stress_set_vma_anon_name(guard_ptr, args->page_size, "guard-page");
+	if (madvise(guard_ptr, args->page_size, MADV_GUARD_INSTALL) < 0) {
+		/*
+		 * older kernels may not have MADV_GUARD_INSTALL, so
+		 * unmap and indicate it's not usable by setting guard_ptr
+		 * to NULL
+		 */
+		(void)munmap((void *)guard_ptr, args->page_size);
+		guard_ptr = NULL;
+	}
+#endif
+
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	mask = 0;
@@ -312,20 +353,20 @@ static int stress_sigsegv(stress_args_t *args)
 		action.sa_flags = SA_SIGINFO;
 #endif
 		ret = sigaction(SIGSEGV, &action, NULL);
-		if (ret < 0) {
-			pr_fail("%s: sigaction SIGSEGV: errno=%d (%s)\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_fail("%s: sigaction SIGSEGV failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy;
 		}
 		ret = sigaction(SIGILL, &action, NULL);
-		if (ret < 0) {
-			pr_fail("%s: sigaction SIGILL: errno=%d (%s)\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_fail("%s: sigaction SIGILL failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy;
 		}
 		ret = sigaction(SIGBUS, &action, NULL);
-		if (ret < 0) {
-			pr_fail("%s: sigaction SIGBUS: errno=%d (%s)\n",
+		if (UNLIKELY(ret < 0)) {
+			pr_fail("%s: sigaction SIGBUS failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
 			goto tidy;
 		}
@@ -335,31 +376,34 @@ static int stress_sigsegv(stress_args_t *args)
 		 * We return here if we segfault, so
 		 * first check if we need to terminate
 		 */
-		if (!stress_continue(args))
+		if (UNLIKELY(!stress_continue(args)))
 			break;
 
 		if (ret) {
 			/* Signal was tripped */
 #if defined(SA_SIGINFO)
-			if (verify && expected_addr && fault_addr &&
-				(fault_addr < expected_addr) &&
-				(fault_addr > (expected_addr + 8))) {
+			if (UNLIKELY(verify && expected_addr && fault_addr &&
+				     (fault_addr < expected_addr) &&
+				     (fault_addr > (expected_addr + 8)))) {
 				pr_fail("%s: expecting fault address %p, got %p instead\n",
 					args->name, (volatile void *)expected_addr, fault_addr);
 			}
-			if (verify &&
-			    (signo != -1) &&
-			    (signo != SIGSEGV) &&
-			    (signo != SIGILL) &&
-			    (signo != SIGBUS)) {
+			if (UNLIKELY((verify &&
+				     (signo != -1) &&
+				     (signo != SIGSEGV) &&
+				     (signo != SIGILL) &&
+				     (signo != SIGBUS)))) {
 				pr_fail("%s: expecting SIGSEGV/SIGILL/SIGBUS, got %s instead\n",
 					args->name, strsignal(signo));
 			}
-#if defined(SEGV_ACCERR) && 	\
-    !defined(__OpenBSD__)
-			if (verify && (signo == SIGBUS) && (code != SEGV_ACCERR)) {
-				pr_fail("%s: expecting SIGBUS si_code SEGV_ACCERR (%d), got %d instead\n",
-					args->name, SEGV_ACCERR, code);
+#if defined(BUS_OBJERR) &&	\
+    defined(BUS_ADRERR)
+			if (UNLIKELY((verify && (signo == SIGBUS) &&
+				     (code != BUS_OBJERR) &&
+				     (code != BUS_ADRERR)))) {
+				pr_fail("%s: expecting SIGBUS si_code BUS_OBJERR (%d) "
+					"or BUS_ADRERR (%d), got %d instead\n",
+					args->name, BUS_OBJERR, BUS_ADRERR, code);
 			}
 #endif
 #endif
@@ -372,9 +416,9 @@ static int stress_sigsegv(stress_args_t *args)
 			expected_addr = NULL;
 #endif
 retry:
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
-			switch (stress_mwc8modn(10)) {
+			switch (stress_mwc8modn(11)) {
 #if defined(HAVE_SIGSEGV_X86_TRAP)
 			case 0:
 				/* Trip a SIGSEGV/SIGILL/SIGBUS */
@@ -418,7 +462,7 @@ retry:
 				/* Illegal address passed to VDSO system call  */
 #if defined(SA_SIGINFO)
 				expected_addr = (uint8_t *)BAD_ADDR;
-				shim_cacheflush((char *)&expected_addr, (int)sizeof(*expected_addr), SHIM_DCACHE);
+				stress_cpu_data_cache_flush((char *)&expected_addr, (int)sizeof(*expected_addr));
 #endif
 				stress_sigsegv_vdso();
 				goto retry;
@@ -427,7 +471,7 @@ retry:
 #if defined(SA_SIGINFO)
 				/* Write to read-only address */
 				expected_addr = (uint8_t *)ro_ptr;
-				shim_cacheflush((char *)&expected_addr, (int)sizeof(*expected_addr), SHIM_DCACHE);
+				stress_cpu_data_cache_flush((char *)&expected_addr, (int)sizeof(*expected_addr));
 #endif
 				*ro_ptr = 0;
 				goto retry;
@@ -439,6 +483,14 @@ retry:
 				stress_uint8_put(*none_ptr);
 				goto retry;
 			case 9:
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_GUARD_INSTALL)
+				/* Access to guard pages is not allowed */
+				if (guard_ptr)
+					*guard_ptr = 0;
+#endif
+				goto retry;
+			case 10:
 				/* Read from random address, work through all address widths */
 #if defined(UINTPTR_MAX)
 #if UINTMAX_WIDTH > 32
@@ -477,16 +529,20 @@ tidy:
 	stress_enable_readtsc();
 #endif
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
+#if defined(HAVE_MADVISE) &&	\
+    defined(MADV_GUARD_INSTALL)
+	if (guard_ptr)
+		(void)munmap((void *)guard_ptr, args->page_size);
+#endif
 	(void)munmap((void *)none_ptr, args->page_size);
 	(void)munmap((void *)ro_ptr, args->page_size);
 
 	return rc;
-
 }
 
-stressor_info_t stress_sigsegv_info = {
+const stressor_info_t stress_sigsegv_info = {
 	.stressor = stress_sigsegv,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 #if defined(SA_SIGINFO)
 	.verify = VERIFY_OPTIONAL,
 #endif

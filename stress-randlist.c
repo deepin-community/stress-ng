@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,9 +22,13 @@
 #include "core-pragma.h"
 #include "core-put.h"
 
-#define STRESS_RANDLIST_DEFAULT_ITEMS	(100000)
-#define STRESS_RANDLIST_MAX_SIZE	(8192)
-#define STRESS_RANDLIST_DEFAULT_SIZE	(64)
+#define MIN_RANDLIST_SIZE		(1)
+#define MAX_RANDLIST_SIZE		(8192)
+#define DEFAULT_RANDLIST_SIZE		(64)
+
+#define MIN_RANDLIST_ITEMS		(1)
+#define MAX_RANDLIST_ITEMS		(0xffffffffULL)
+#define DEFAULT_RANDLIST_ITEMS		(100000)
 
 #define STRESS_RANDLIST_ALLOC_HEAP	(0)
 #define STRESS_RANDLIST_ALLOC_MMAP	(1)
@@ -45,49 +49,9 @@ typedef struct stress_randlist_item {
 	uint8_t data[];
 } stress_randlist_item_t;
 
-/*
- *  stress_set_randlist_compact()
- *      set randlist compact mode setting
- */
-static int stress_set_randlist_compact(const char *opt)
-{
-	return stress_set_setting_true("randlist-compact", opt);
-}
-
-/*
- *  stress_set_randlist_items()
- *      set randlist number of items from given option string
- */
-static int stress_set_randlist_items(const char *opt)
-{
-	uint32_t items;
-	size_t randlist_items;
-
-	items = stress_get_uint32(opt);
-	stress_check_range("randlist-size", (uint64_t)items, 1, 0xffffffff);
-	randlist_items = (size_t)items;
-	return stress_set_setting("randlist-items", TYPE_ID_SIZE_T, &randlist_items);
-}
-
-/*
- *  stress_set_randlist_size()
- *      set randlist size from given option string
- */
-static int stress_set_randlist_size(const char *opt)
-{
-	uint64_t size;
-	size_t randlist_size;
-
-	size = stress_get_uint64_byte(opt);
-	stress_check_range("randlist-size", size, 1, STRESS_RANDLIST_MAX_SIZE);
-
-	randlist_size = (size_t)size;
-	return stress_set_setting("randlist-size", TYPE_ID_SIZE_T, &randlist_size);
-}
-
 static void stress_randlist_free_item(stress_randlist_item_t **item, const size_t randlist_size)
 {
-	if (!*item)
+	if (UNLIKELY(!*item))
 		return;
 
 	if ((*item)->alloc_type == STRESS_RANDLIST_ALLOC_HEAP)
@@ -135,7 +99,7 @@ static inline uint8_t OPTIMIZE3 stress_randlist_bad_data(
 
 PRAGMA_UNROLL_N(8)
 	while (data < end) {
-		if (*(data++) != dataval)
+		if (UNLIKELY(*(data++) != dataval))
 			return true;
 	}
 	return false;
@@ -145,7 +109,8 @@ static inline void OPTIMIZE3 stress_randlist_exercise(
 	stress_args_t *args,
 	stress_randlist_item_t *head,
 	const size_t randlist_size,
-	const bool verify)
+	const bool verify,
+	int *rc)
 {
 	register stress_randlist_item_t *ptr;
 	uint8_t dataval = stress_mwc8();
@@ -155,16 +120,18 @@ static inline void OPTIMIZE3 stress_randlist_exercise(
 		ptr->dataval = dataval;
 		(void)shim_memset(ptr->data, dataval, randlist_size);
 		dataval++;
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
 
 	for (ptr = head; ptr; ptr = ptr->next) {
 		shim_builtin_prefetch(ptr->next);
-		if (!stress_continue_flag())
+		if (UNLIKELY(!stress_continue_flag()))
 			break;
-		if (verify && stress_randlist_bad_data(ptr, randlist_size))
+		if (UNLIKELY(verify && stress_randlist_bad_data(ptr, randlist_size))) {
 			pr_fail("%s: data check failure in list object at 0x%p\n", args->name, ptr);
+			*rc = EXIT_FAILURE;
+		}
 	}
 }
 
@@ -181,29 +148,40 @@ static int stress_randlist(stress_args_t *args)
 	bool do_mmap = false;
 	bool randlist_compact = false;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
-	size_t randlist_items = STRESS_RANDLIST_DEFAULT_ITEMS;
-	size_t randlist_size = STRESS_RANDLIST_DEFAULT_SIZE;
+	size_t randlist_items = DEFAULT_RANDLIST_ITEMS;
+	size_t randlist_size = DEFAULT_RANDLIST_SIZE;
 	size_t heap_allocs = 0;
 	size_t mmap_allocs = 0;
+	int rc = EXIT_SUCCESS;
 
 	(void)stress_get_setting("randlist-compact", &randlist_compact);
-	(void)stress_get_setting("randlist-items", &randlist_items);
-	(void)stress_get_setting("randlist-size", &randlist_size);
+	if (!stress_get_setting("randlist-items", &randlist_items)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			randlist_items = MAX_RANDLIST_ITEMS;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			randlist_items = MIN_RANDLIST_ITEMS;
+	}
+	if (!stress_get_setting("randlist-size", &randlist_size)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			randlist_size = MAX_RANDLIST_SIZE;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			randlist_size = MIN_RANDLIST_SIZE;
+	}
 
 	if (randlist_size >= args->page_size)
 		do_mmap = true;
 
-	ptrs = calloc(randlist_items, sizeof(stress_randlist_item_t *));
+	ptrs = (stress_randlist_item_t **)calloc(randlist_items, sizeof(stress_randlist_item_t *));
 	if (!ptrs) {
-		pr_inf_skip("%s: cannot allocate %zd temporary pointers, skipping stressor\n",
-			args->name, randlist_items);
+		pr_inf_skip("%s: cannot allocate %zu temporary pointers%s, skipping stressor\n",
+			args->name, randlist_items, stress_get_memfree_str());
 		return EXIT_NO_RESOURCE;
 	}
 
 	if (randlist_compact) {
 		const size_t size = sizeof(*ptr) + randlist_size;
 
-		compact_ptr = calloc(randlist_items, size);
+		compact_ptr = (stress_randlist_item_t *)calloc(randlist_items, size);
 		if (!compact_ptr) {
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 			free(ptrs);
@@ -212,7 +190,7 @@ static int stress_randlist(stress_args_t *args)
 		}
 
 		for (ptr = compact_ptr, i = 0; i < randlist_items; i++) {
-			if (!stress_continue_flag()) {
+			if (UNLIKELY(!stress_continue_flag())) {
 				stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 				stress_randlist_free_ptrs(compact_ptr, ptrs, i, randlist_size);
 				stress_randlist_enomem(args);
@@ -226,7 +204,7 @@ static int stress_randlist(stress_args_t *args)
 		for (i = 0; i < randlist_items; i++) {
 			const size_t size = sizeof(*ptr) + randlist_size;
 
-			if (!stress_continue_flag()) {
+			if (UNLIKELY(!stress_continue_flag())) {
 				stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 				stress_randlist_free_ptrs(compact_ptr, ptrs, i, randlist_size);
 				return EXIT_SUCCESS;
@@ -236,7 +214,7 @@ retry:
 				ptr = (stress_randlist_item_t *)stress_mmap_populate(NULL, size,
 					PROT_READ | PROT_WRITE,
 					MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-				if (ptr == MAP_FAILED) {
+				if (UNLIKELY(ptr == MAP_FAILED)) {
 					do_mmap = false;
 					goto retry;
 				}
@@ -244,7 +222,7 @@ retry:
 				mmap_allocs++;
 			} else {
 				ptr = (stress_randlist_item_t *)calloc(1, size);
-				if (!ptr) {
+				if (UNLIKELY(!ptr)) {
 					stress_randlist_free_ptrs(compact_ptr, ptrs, i, randlist_size);
 					stress_randlist_enomem(args);
 					return EXIT_NO_RESOURCE;
@@ -266,7 +244,7 @@ retry:
 		ptrs[i] = ptrs[n];
 		ptrs[n] = ptr;
 
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 			stress_randlist_free_ptrs(compact_ptr, ptrs, i, randlist_size);
 			return EXIT_SUCCESS;
@@ -284,12 +262,14 @@ retry:
 	head = ptrs[0];
 	free(ptrs);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
-		stress_randlist_exercise(args, head, randlist_size, verify);
+		stress_randlist_exercise(args, head, randlist_size, verify, &rc);
 		stress_bogo_inc(args);
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
@@ -305,20 +285,20 @@ retry:
 		}
 	}
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_randlist_compact,	stress_set_randlist_compact },
-	{ OPT_randlist_items,	stress_set_randlist_items },
-	{ OPT_randlist_size,	stress_set_randlist_size },
-	{ 0,                    NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_randlist_compact,	"randlist-compact", TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_randlist_items,	"randlist-items",   TYPE_ID_SIZE_T, MIN_RANDLIST_ITEMS, MAX_RANDLIST_ITEMS, NULL },
+	{ OPT_randlist_size,	"randlist-size",    TYPE_ID_SIZE_T, MIN_RANDLIST_SIZE, MAX_RANDLIST_SIZE, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_randlist_info = {
+const stressor_info_t stress_randlist_info = {
 	.stressor = stress_randlist,
-	.class = CLASS_MEMORY,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_MEMORY,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024      Colin Ian King.
+ * Copyright (C) 2024-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,9 +19,10 @@
 #ifndef CORE_TIME_H
 #define CORE_TIME_H
 
+#include "core-attribute.h"
+
 extern double stress_timeval_to_double(const struct timeval *tv);
-extern double stress_timespec_to_double(const struct timespec *ts);
 extern double stress_time_now(void);
-extern const char *stress_duration_to_str(const double duration, const bool int_secs);
+extern const char *stress_duration_to_str(const double duration, const bool int_secs, const bool report_secs) RETURNS_NONNULL;
 
 #endif

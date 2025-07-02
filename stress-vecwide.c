@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2024 Colin Ian King
+ * Copyright (C) 2021-2025 Colin Ian King
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -76,17 +76,16 @@ typedef struct {
 	uint8_t *res;	/* pointer to res1 and/or res2 */
 } vec_args_t;
 
-typedef void (*stress_vecwide_func_t)(const vec_args_t *vec_args);
+typedef void (*stress_vecwide_func_t)(vec_args_t *vec_args);
 
 typedef struct {
 	const stress_vecwide_func_t vecwide_func;
 	const size_t byte_size;
-	double duration;
-	double count;
 } stress_vecwide_funcs_t;
 
+
 #define STRESS_VECWIDE(name, type)				\
-static void TARGET_CLONES OPTIMIZE3 name (const vec_args_t *vec_args) \
+static void TARGET_CLONES OPTIMIZE3 name (vec_args_t *vec_args) \
 {								\
 	type ALIGN64 a;						\
 	type ALIGN64 b;						\
@@ -116,6 +115,7 @@ PRAGMA_UNROLL_N(8)						\
 	}							\
 								\
 	res = a + b + c;					\
+	(void)shim_memcpy(vec_args->res, &res, sizeof(res));	\
 								\
 PRAGMA_UNROLL							\
 	for (i = 0; i < (int)sizeof(res); i++) {		\
@@ -138,22 +138,24 @@ STRESS_VECWIDE(stress_vecwide_32, stress_vint8w32_t)
 STRESS_VECWIDE(stress_vecwide_16, stress_vint8w16_t)
 #endif
 
-static stress_vecwide_funcs_t stress_vecwide_funcs[] = {
+static const stress_vecwide_funcs_t stress_vecwide_funcs[] = {
 #if VERY_WIDE
-	{ stress_vecwide_8192, sizeof(stress_vint8w8192_t), 0.0, 0.0 },
-	{ stress_vecwide_4096, sizeof(stress_vint8w4096_t), 0.0, 0.0 },
+	{ stress_vecwide_8192, sizeof(stress_vint8w8192_t) },
+	{ stress_vecwide_4096, sizeof(stress_vint8w4096_t) },
 #endif
-	{ stress_vecwide_2048, sizeof(stress_vint8w2048_t), 0.0, 0.0 },
-	{ stress_vecwide_1024, sizeof(stress_vint8w1024_t), 0.0, 0.0 },
-	{ stress_vecwide_512,  sizeof(stress_vint8w512_t),  0.0, 0.0 },
-	{ stress_vecwide_256,  sizeof(stress_vint8w256_t),  0.0, 0.0 },
-	{ stress_vecwide_128,  sizeof(stress_vint8w128_t),  0.0, 0.0 },
-	{ stress_vecwide_64,   sizeof(stress_vint8w64_t),   0.0, 0.0 },
-	{ stress_vecwide_32,   sizeof(stress_vint8w32_t),   0.0, 0.0 },
+	{ stress_vecwide_2048, sizeof(stress_vint8w2048_t) },
+	{ stress_vecwide_1024, sizeof(stress_vint8w1024_t) },
+	{ stress_vecwide_512,  sizeof(stress_vint8w512_t)  },
+	{ stress_vecwide_256,  sizeof(stress_vint8w256_t)  },
+	{ stress_vecwide_128,  sizeof(stress_vint8w128_t)  },
+	{ stress_vecwide_64,   sizeof(stress_vint8w64_t)   },
+	{ stress_vecwide_32,   sizeof(stress_vint8w32_t)   },
 #if VERY_SMALL
-	{ stress_vecwide_16,   sizeof(stress_vint8w16_t),   0.0, 0.0 },
+	{ stress_vecwide_16,   sizeof(stress_vint8w16_t)   },
 #endif
 };
+
+static stress_metrics_t stress_vecwide_metrics[SIZEOF_ARRAY(stress_vecwide_funcs)];
 
 static int stress_vecwide(stress_args_t *args)
 {
@@ -163,6 +165,7 @@ static int stress_vecwide(stress_args_t *args)
 	size_t total_bytes = 0;
 	const size_t vec_args_size = (sizeof(*vec_args) + args->page_size - 1) & ~(args->page_size - 1);
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
+	int rc = EXIT_SUCCESS;
 
 	stress_catch_sigill();
 
@@ -170,14 +173,17 @@ static int stress_vecwide(stress_args_t *args)
 					PROT_READ | PROT_WRITE,
 					MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 	if (vec_args == MAP_FAILED) {
-		pr_inf_skip("%s: skipping stressor, failed to allocate vectors, errno=%d (%s)\n",
-			args->name, errno, strerror(errno));
+		pr_inf_skip("%s: failed to mmap %zu byte vector%s "
+			"errno=%d (%s), skipping stressor\n",
+			args->name, vec_args_size,
+			stress_get_memfree_str(), errno, strerror(errno));
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(vec_args, vec_args_size, "vec-args");
 
 	for (i = 0; i < SIZEOF_ARRAY(stress_vecwide_funcs); i++) {
-		stress_vecwide_funcs[i].duration = 0.0;
-		stress_vecwide_funcs[i].count = 0.0;
+		stress_vecwide_metrics[i].duration = 0.0;
+		stress_vecwide_metrics[i].count = 0.0;
 	}
 
 	for (i = 0; i < SIZEOF_ARRAY(vec_args->a); i++) {
@@ -190,6 +196,8 @@ static int stress_vecwide(stress_args_t *args)
 	(void)shim_memset(&vec_args->v23, 23, sizeof(vec_args->v23));
 	(void)shim_memset(&vec_args->v3, 3, sizeof(vec_args->v3));
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	do {
@@ -203,8 +211,8 @@ static int stress_vecwide(stress_args_t *args)
 			dt = (t2 - t1);
 
 			total_duration += dt;
-			stress_vecwide_funcs[i].duration += dt;
-			stress_vecwide_funcs[i].count += 1.0;
+			stress_vecwide_metrics[i].duration += dt;
+			stress_vecwide_metrics[i].count += 1.0;
 			stress_bogo_inc(args);
 
 			if (verify) {
@@ -215,28 +223,30 @@ static int stress_vecwide(stress_args_t *args)
 				dt = (t2 - t1);
 
 				total_duration += dt;
-				stress_vecwide_funcs[i].duration += dt;
-				stress_vecwide_funcs[i].count += 1.0;
+				stress_vecwide_metrics[i].duration += dt;
+				stress_vecwide_metrics[i].count += 1.0;
 				stress_bogo_inc(args);
 
 				if (shim_memcmp(vec_args->res1, vec_args->res2, sizeof(vec_args->res1))) {
 					pr_fail("%s: data difference between identical vector computations\n", args->name);
+					rc = EXIT_FAILURE;
+					break;
 				}
 			}
 		}
-	} while (stress_continue(args));
+	} while ((rc == EXIT_SUCCESS) && stress_continue(args));
 
 	for (i = 0; i < SIZEOF_ARRAY(stress_vecwide_funcs); i++) {
 		total_bytes += stress_vecwide_funcs[i].byte_size;
 	}
 
-	if (args->instance == 0) {
+	if (stress_instance_zero(args)) {
 		pr_block_begin();
 		pr_dbg("%s: Bits  %% Dur  %% Exp (x Win) (> 1.0 is better than expected)\n", args->name);
 		for (i = 0; i < SIZEOF_ARRAY(stress_vecwide_funcs); i++) {
 			double dur_pc, exp_pc, win;
 
-			dur_pc = stress_vecwide_funcs[i].duration / total_duration * 100.0;
+			dur_pc = stress_vecwide_metrics[i].duration / total_duration * 100.0;
 			exp_pc = (double)stress_vecwide_funcs[i].byte_size / (double)total_bytes * 100.0;
 			win    = exp_pc / dur_pc;
 
@@ -251,31 +261,31 @@ static int stress_vecwide(stress_args_t *args)
 
 	for (i = 0; i < SIZEOF_ARRAY(stress_vecwide_funcs); i++) {
 		char str[64];
-		const double rate = (stress_vecwide_funcs[i].duration > 0) ?
-				stress_vecwide_funcs[i].count / stress_vecwide_funcs[i].duration : 0.0;
+		const double rate = (stress_vecwide_metrics[i].duration > 0) ?
+				stress_vecwide_metrics[i].count / stress_vecwide_metrics[i].duration : 0.0;
 
 		(void)snprintf(str, sizeof(str), "vecwide%zd ops per sec", stress_vecwide_funcs[i].byte_size * 8);
 		stress_metrics_set(args, i, str,
-			rate, STRESS_HARMONIC_MEAN);
+			rate, STRESS_METRIC_HARMONIC_MEAN);
 	}
 
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 
 	(void)munmap((void *)vec_args, vec_args_size);
 
-	return EXIT_SUCCESS;
+	return rc;
 }
 
-stressor_info_t stress_vecwide_info = {
+const stressor_info_t stress_vecwide_info = {
 	.stressor = stress_vecwide,
-	.class = CLASS_CPU | CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE | CLASS_VECTOR,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_vecwide_info = {
+const stressor_info_t stress_vecwide_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_CPU | CLASS_CPU_CACHE,
+	.classifier = CLASS_CPU | CLASS_INTEGER | CLASS_COMPUTE | CLASS_VECTOR,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "built without compiler support for vector data/operations"

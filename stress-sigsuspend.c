@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -54,7 +54,7 @@ static int stress_sigsuspend(stress_args_t *args)
 	if (stress_sighandler(args->name, SIGCHLD, stress_sigsuspend_chld_handler, NULL) < 0)
 		return EXIT_FAILURE;
 
-	counter_lock = stress_lock_create();
+	counter_lock = stress_lock_create("counter");
 	if (!counter_lock) {
 		pr_inf_skip("%s: failed to create counter lock. skipping stressor\n", args->name);
 		return EXIT_NO_RESOURCE;
@@ -63,6 +63,8 @@ static int stress_sigsuspend(stress_args_t *args)
 	(void)sigemptyset(&mask);
 	(void)sigprocmask(SIG_BLOCK, &mask, &oldmask);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	for (n = 0; n < MAX_SIGSUSPEND_PIDS; n++) {
@@ -72,7 +74,7 @@ again:
 		if (pid[n] < 0) {
 			if (stress_redo_fork(args, errno))
 				goto again;
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				goto reap;
 			pr_err("%s: fork failed, errno=%d (%s)\n",
 				args->name, errno, strerror(errno));
@@ -122,7 +124,8 @@ reap:
 			(void)stress_kill_pid_wait(pid[i], NULL);
 		} else {
 			if (shim_waitpid(pid[i], &status, 0) == 0) {
-				pr_inf("%jd died prematurely\n", (intmax_t)pid[i]);
+				pr_inf("%s: PID %" PRIdMAX " died prematurely\n", 
+					args->name, (intmax_t)pid[i]);
 			}
 		}
 	}
@@ -132,9 +135,9 @@ reap:
 	return rc;
 }
 
-stressor_info_t stress_sigsuspend_info = {
+const stressor_info_t stress_sigsuspend_info = {
 	.stressor = stress_sigsuspend,
-	.class = CLASS_SIGNAL | CLASS_OS,
+	.classifier = CLASS_SIGNAL | CLASS_OS,
 	.verify = VERIFY_ALWAYS,
 	.help = help
 };

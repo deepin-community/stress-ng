@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2021-2024 Colin Ian King.
+ * Copyright (C) 2021-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -35,19 +35,9 @@ static const stress_help_t help[] = {
 	{ NULL,	NULL,			NULL }
 };
 
-static int stress_set_readahead_bytes(const char *opt)
-{
-	uint64_t readahead_bytes;
-
-	readahead_bytes = stress_get_uint64_byte_filesystem(opt, 1);
-	stress_check_range_bytes("readahead-bytes", readahead_bytes,
-		MIN_READAHEAD_BYTES, MAX_READAHEAD_BYTES);
-	return stress_set_setting("readahead-bytes", TYPE_ID_UINT64, &readahead_bytes);
-}
-
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_readahead_bytes,	stress_set_readahead_bytes },
-	{ 0,			NULL }
+static const stress_opt_t opts[] = {
+	{ OPT_readahead_bytes, "readahead-bytes", TYPE_ID_UINT64_BYTES_FS, MIN_READAHEAD_BYTES, MAX_READAHEAD_BYTES, NULL },
+	END_OPT,
 };
 
 #if defined(__linux__) &&	\
@@ -99,7 +89,7 @@ static int stress_readahead(stress_args_t *args)
 {
 	buffer_t *buf = NULL;
 	uint64_t rounded_readahead_bytes, i;
-	uint64_t readahead_bytes = DEFAULT_READAHEAD_BYTES;
+	uint64_t readahead_bytes, readahead_bytes_total = DEFAULT_READAHEAD_BYTES;
 	uint64_t misreads = 0;
 	uint64_t baddata = 0;
 	int ret, rc = EXIT_FAILURE;
@@ -112,15 +102,19 @@ static int stress_readahead(stress_args_t *args)
 	int generate_offsets = 0;
 	const bool verify = !!(g_opt_flags & OPT_FLAGS_VERIFY);
 
-	if (!stress_get_setting("readahead-bytes", &readahead_bytes)) {
+	if (!stress_get_setting("readahead-bytes", &readahead_bytes_total)) {
 		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			readahead_bytes = MAXIMIZED_FILE_SIZE;
+			readahead_bytes_total = MAX_32;
 		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			readahead_bytes = MIN_READAHEAD_BYTES;
+			readahead_bytes_total = MIN_READAHEAD_BYTES;
 	}
-	readahead_bytes /= args->num_instances;
-	if (readahead_bytes < MIN_READAHEAD_BYTES)
+	readahead_bytes = readahead_bytes_total / args->instances;
+	if (readahead_bytes < MIN_READAHEAD_BYTES) {
 		readahead_bytes = MIN_READAHEAD_BYTES;
+		readahead_bytes_total = readahead_bytes * args->instances;
+	}
+	if (stress_instance_zero(args))
+		stress_fs_usage_bytes(args, readahead_bytes, readahead_bytes_total);
 
 	ret = stress_temp_dir_mk_args(args);
 	if (ret < 0)
@@ -129,7 +123,8 @@ static int stress_readahead(stress_args_t *args)
 	ret = posix_memalign((void **)&buf, BUF_ALIGNMENT, BUF_SIZE);
 	if (ret || !buf) {
 		rc = stress_exit_status(errno);
-		pr_err("%s: cannot allocate buffer\n", args->name);
+		pr_err("%s: cannot allocate %d byte buffer%s\n",
+			args->name, BUF_SIZE, stress_get_memfree_str());
 		(void)stress_temp_dir_rm_args(args);
 		return rc;
 	}
@@ -178,7 +173,7 @@ static int stress_readahead(stress_args_t *args)
 		size_t j;
 		const off_t o = i / BUF_SIZE;
 seq_wr_retry:
-		if (!stress_continue_flag()) {
+		if (UNLIKELY(!stress_continue_flag())) {
 			pr_inf("%s: test expired during test setup "
 				"(writing of data file)\n", args->name);
 			rc = EXIT_SUCCESS;
@@ -187,7 +182,7 @@ seq_wr_retry:
 
 PRAGMA_UNROLL_N(8)
 		for (j = 0; j < (BUF_SIZE / sizeof(*buf)); j++)
-			buf[j] = (buffer_t)o + j;
+			buf[j] = (buffer_t)(o << 12) + j;
 
 		pret = pwrite(fd, buf, BUF_SIZE, (off_t)i);
 		if (pret <= 0) {
@@ -213,7 +208,16 @@ PRAGMA_UNROLL_N(8)
 	rounded_readahead_bytes = (uint64_t)statbuf.st_size -
 		(uint64_t)(statbuf.st_size % BUF_SIZE);
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
+
+	if (statbuf.st_size < (off_t)readahead_bytes) {
+		pr_inf_skip("%s: out of free file space on %s, stressor instance %" PRIu32 " terminating early\n",
+			args->name, stress_get_temp_path(), args->instance);
+		rc = EXIT_NO_RESOURCE;
+		goto close_finish;
+	}
 
 	stress_readahead_generate_offsets(offsets, rounded_readahead_bytes);
 
@@ -224,7 +228,7 @@ PRAGMA_UNROLL_N(8)
 		for (i = 0; i < MAX_OFFSETS; i++) {
 			ssize_t pret;
 rnd_rd_retry:
-			if (!stress_continue(args))
+			if (UNLIKELY(!stress_continue(args)))
 				break;
 
 			pret = pread(fd, buf, BUF_SIZE, offsets[i]);
@@ -232,8 +236,8 @@ rnd_rd_retry:
 				if ((errno == EAGAIN) || (errno == EINTR))
 					goto rnd_rd_retry;
 				if (errno) {
-					pr_fail("%s: read failed, errno=%d (%s)%s\n",
-						args->name, errno, strerror(errno), fs_type);
+					pr_fail("%s: read failed, errno=%d (%s)%s at offset 0x%" PRIxMAX "\n",
+						args->name, errno, strerror(errno), fs_type, (intmax_t)offsets[i]);
 					goto close_finish;
 				}
 				continue;
@@ -247,13 +251,19 @@ rnd_rd_retry:
 
 PRAGMA_UNROLL_N(8)
 				for (j = 0; j < (BUF_SIZE / sizeof(*buf)); j++) {
-					const buffer_t v = (buffer_t)o + j;
+					const buffer_t v = (buffer_t)(o << 12) + j;
 
-					if (UNLIKELY(buf[j] != v))
+					if (UNLIKELY(buf[j] != v)) {
+						if (baddata == 0) {
+							pr_inf("%s: first data error at offset 0x%" PRIxMAX
+								", got 0x%" PRIx64 ", expecting 0x%" PRIx64 "\n", 
+								args->name, (intmax_t)(offsets[i] + (j * sizeof(*buf))), buf[j], v);
+						}
 						baddata++;
+					}
 				}
 				if (UNLIKELY(baddata)) {
-					pr_fail("%s: error in data between 0x%jx and 0x%jx\n",
+					pr_fail("%s: error in data between 0x%" PRIxMAX " and 0x%" PRIxMAX "\n",
 						args->name,
 						(intmax_t)offsets[i],
 						(intmax_t)offsets[i] + BUF_SIZE - 1);
@@ -310,18 +320,18 @@ finish:
 	return rc;
 }
 
-stressor_info_t stress_readahead_info = {
+const stressor_info_t stress_readahead_info = {
 	.stressor = stress_readahead,
-	.class = CLASS_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };
 #else
-stressor_info_t stress_readahead_info = {
+const stressor_info_t stress_readahead_info = {
 	.stressor = stress_unimplemented,
-	.class = CLASS_IO | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_IO | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help,
 	.unimplemented_reason = "only supported on Linux"

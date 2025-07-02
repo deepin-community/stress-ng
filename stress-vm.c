@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,7 @@
  */
 #include "stress-ng.h"
 #include "core-asm-generic.h"
+#include "core-asm-x86.h"
 #include "core-attribute.h"
 #include "core-builtin.h"
 #include "core-cpu-cache.h"
@@ -27,6 +28,7 @@
 #include "core-mincore.h"
 #include "core-nt-load.h"
 #include "core-nt-store.h"
+#include "core-numa.h"
 #include "core-out-of-memory.h"
 #include "core-pragma.h"
 #include "core-vecmath.h"
@@ -45,12 +47,13 @@
 #define VM_BOGO_SHIFT		(12)
 #define VM_ROWHAMMER_LOOPS	(1000000)
 
-#define NO_MEM_RETRIES_MAX	(100)
+#define NO_MEM_RETRIES_MAX	(32)
 
 static size_t stress_vm_cache_line_size;
+static bool vm_flush;
 
 /*
- *  the VM stress test has diffent methods of vm stressor
+ *  the VM stress test has different methods of vm stressor
  */
 typedef size_t (*stress_vm_func)(void *buf, void *buf_end, const size_t sz,
 		stress_args_t *args, const uint64_t max_ops);
@@ -68,11 +71,18 @@ typedef struct {
 typedef struct {
 	uint64_t *bit_error_count;
 	const stress_vm_method_info_t *vm_method;
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	stress_numa_mask_t *numa_mask;
+	stress_numa_mask_t *numa_nodes;
+#endif
+	size_t vm_bytes;
+	bool vm_numa;
 } stress_vm_context_t;
 
 static const stress_help_t help[] = {
 	{ "m N", "vm N",	 "start N workers spinning on anonymous mmap" },
 	{ NULL,	 "vm-bytes N",	 "allocate N bytes per vm worker (default 256MB)" },
+	{ NULL,  "vm-flush",	 "cache flush data after write" },
 	{ NULL,	 "vm-hang N",	 "sleep N seconds before freeing memory" },
 	{ NULL,	 "vm-keep",	 "redirty memory instead of reallocating" },
 #if defined(MAP_LOCKED)
@@ -80,6 +90,7 @@ static const stress_help_t help[] = {
 #endif
 	{ NULL,	 "vm-madvise M", "specify mmap'd vm buffer madvise advice" },
 	{ NULL,	 "vm-method M",	 "specify stress vm method M, default is all" },
+	{ NULL,	 "vm-numa",	 "bind memory mappings to randomly selected NUMA nodes" },
 	{ NULL,	 "vm-ops N",	 "stop after N vm bogo operations" },
 #if defined(MAP_POPULATE)
 	{ NULL,	 "vm-populate",	 "populate (prefault) page tables for a mapping" },
@@ -88,9 +99,15 @@ static const stress_help_t help[] = {
 };
 
 static const stress_vm_madvise_info_t vm_madvise_info[] = {
-#if defined(HAVE_MADVISE)
+#if !defined(HAVE_MADVISE)
+	/* No MADVISE, default to normal, ignored */
+	{ "normal",	0 },
+#else
+#if defined(MADV_COLLAPSE)
+	{ "collapse",	MADV_COLLAPSE },
+#endif
 #if defined(MADV_DONTNEED)
-	{ "dontneed",	MADV_DONTNEED},
+	{ "dontneed",	MADV_DONTNEED },
 #endif
 #if defined(MADV_HUGEPAGE)
 	{ "hugepage",	MADV_HUGEPAGE },
@@ -116,10 +133,6 @@ static const stress_vm_madvise_info_t vm_madvise_info[] = {
 #if defined(MADV_WILLNEED)
 	{ "willneed",	MADV_WILLNEED},
 #endif
-	{ NULL,         0 },
-#else
-	/* No MADVISE, default to normal, ignored */
-	{ "normal",	0 },
 #endif
 };
 
@@ -127,86 +140,10 @@ static const stress_vm_madvise_info_t vm_madvise_info[] = {
  *  stress_continue(args)
  *	returns true if we can keep on running a stressor
  */
-static bool HOT OPTIMIZE3 stress_continue_vm(stress_args_t *args)
+static bool OPTIMIZE3 stress_continue_vm(stress_args_t *args)
 {
 	return (LIKELY(stress_continue_flag()) &&
-	        LIKELY(!args->max_ops || ((stress_bogo_get(args) >> VM_BOGO_SHIFT) < args->max_ops)));
-}
-
-static int stress_set_vm_hang(const char *opt)
-{
-	uint64_t vm_hang;
-
-	vm_hang = stress_get_uint64_time(opt);
-	stress_check_range("vm-hang", vm_hang,
-		MIN_VM_HANG, MAX_VM_HANG);
-	return stress_set_setting("vm-hang", TYPE_ID_UINT64, &vm_hang);
-}
-
-static int stress_set_vm_bytes(const char *opt)
-{
-	size_t vm_bytes;
-
-	vm_bytes = (size_t)stress_get_uint64_byte_memory(opt, 1);
-	stress_check_range_bytes("vm-bytes", vm_bytes,
-		MIN_VM_BYTES, MAX_VM_BYTES);
-	return stress_set_setting("vm-bytes", TYPE_ID_SIZE_T, &vm_bytes);
-}
-
-#if defined(MAP_LOCKED) || defined(MAP_POPULATE)
-static int stress_set_vm_flags(const int flag)
-{
-	int vm_flags = 0;
-
-	(void)stress_get_setting("vm-flags", &vm_flags);
-	vm_flags |= flag;
-	return stress_set_setting("vm-flags", TYPE_ID_INT, &vm_flags);
-}
-#endif
-
-static int stress_set_vm_mmap_locked(const char *opt)
-{
-	(void)opt;
-
-#if defined(MAP_LOCKED)
-	return stress_set_vm_flags(MAP_LOCKED);
-#else
-	return 0;
-#endif
-}
-
-static int stress_set_vm_mmap_populate(const char *opt)
-{
-	(void)opt;
-
-#if defined(MAP_POPULATE)
-	return stress_set_vm_flags(MAP_POPULATE);
-#else
-	return 0;
-#endif
-}
-
-static int stress_set_vm_madvise(const char *opt)
-{
-	const stress_vm_madvise_info_t *info;
-
-	for (info = vm_madvise_info; info->name; info++) {
-		if (!strcmp(opt, info->name)) {
-			stress_set_setting("vm-madvise", TYPE_ID_INT, &info->advice);
-			return 0;
-		}
-	}
-	(void)fprintf(stderr, "invalid vm-madvise advice '%s', allowed advice options are:", opt);
-	for (info = vm_madvise_info; info->name; info++) {
-		(void)fprintf(stderr, " %s", info->name);
-	}
-	(void)fprintf(stderr, "\n");
-	return -1;
-}
-
-static int stress_set_vm_keep(const char *opt)
-{
-	return stress_set_setting_true("vm-keep", opt);
+	        LIKELY(!args->bogo.max_ops || ((stress_bogo_get(args) >> VM_BOGO_SHIFT) < args->bogo.max_ops)));
 }
 
 #define SET_AND_TEST(ptr, val, bit_errors)	\
@@ -280,7 +217,9 @@ static inline void inject_random_bit_errors(uint8_t *buf, const size_t sz)
  */
 static inline ALWAYS_INLINE PURE OPTIMIZE3 uint64_t stress_vm_mod(register uint64_t a, register const size_t b)
 {
-	while (LIKELY(a >= b))
+	if (LIKELY(a >= b))
+		a -= b;
+	if (UNLIKELY(a >= b))
 		a -= b;
 	return a;
 }
@@ -291,7 +230,7 @@ static inline ALWAYS_INLINE PURE OPTIMIZE3 uint64_t stress_vm_mod(register uint6
  */
 static void stress_vm_check(const char *name, const size_t bit_errors)
 {
-	if (bit_errors && (g_opt_flags & OPT_FLAGS_VERIFY))
+	if (UNLIKELY(bit_errors && (g_opt_flags & OPT_FLAGS_VERIFY)))
 #if INJECT_BIT_ERRORS
 		pr_dbg("%s: detected %zu memory error%s\n",
 			name, bit_errors, bit_errors == 1 ? "" : "s");
@@ -325,27 +264,25 @@ static inline PURE size_t stress_vm_count_bits8(uint8_t v)
 static inline size_t PURE stress_vm_count_bits(uint64_t v)
 {
 #if defined(HAVE_BUILTIN_POPCOUNTLL)
-	if (sizeof(unsigned long long) == sizeof(uint64_t)) {
-		return (size_t)__builtin_popcountll((unsigned long long)v);
+	if (sizeof(unsigned long long int) == sizeof(uint64_t)) {
+		return (size_t)__builtin_popcountll((unsigned long long int)v);
 	}
 #endif
 #if defined(HAVE_BUILTIN_POPCOUNTL)
-	if (sizeof(unsigned long) == sizeof(uint64_t)) {
-		return (size_t)__builtin_popcountl((unsigned long)v);
-	} else if (sizeof(unsigned long) == sizeof(uint32_t)) {
-		unsigned long lo, hi;
+	if (sizeof(unsigned long int) == sizeof(uint64_t)) {
+		return (size_t)__builtin_popcountl((unsigned long int)v);
+	} else if (sizeof(unsigned long int) == sizeof(uint32_t)) {
+		const unsigned long int lo = (unsigned long int)(v >> 32);
+		const unsigned long int hi = (unsigned long int)(v & 0xffffffff);
 
-		lo = (unsigned long)(v >> 32);
-		hi = (unsigned long)(v & 0xffffffff);
 		return (size_t)__builtin_popcountl(hi) + __builtin_popcountl(lo);
 	}
 #endif
 #if defined(HAVE_BUILTIN_POPCOUNT)
 	if (sizeof(unsigned int) == sizeof(uint32_t)) {
-		unsigned int lo, hi;
+		const unsigned int lo = (unsigned int)(v >> 32);
+		const unsigned int hi = (unsigned int)(v & 0xffffffff);
 
-		lo = (unsigned int)(v >> 32);
-		hi = (unsigned int)(v & 0xffffffff);
 		return (size_t)__builtin_popcount(hi) + __builtin_popcount(lo);
 	}
 #else
@@ -399,6 +336,8 @@ static size_t TARGET_CLONES stress_vm_moving_inversion(
 	if (UNLIKELY(!stress_continue_flag()))
 		goto ret;
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 
 	inject_random_bit_errors(buf, sz);
@@ -425,6 +364,8 @@ static size_t TARGET_CLONES stress_vm_moving_inversion(
 
 	inject_random_bit_errors(buf, sz);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	stress_mwc_set_seed(w, z);
 	for (ptr = (uint64_t *)buf_end; ptr > (uint64_t *)buf; ) {
@@ -522,6 +463,8 @@ static size_t TARGET_CLONES stress_vm_modulo_x(
 
 	if (UNLIKELY(max_ops && (c >= max_ops)))
 		c = max_ops;
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("modulo X", bit_errors);
 ret:
 	stress_bogo_set(args, c);
@@ -569,6 +512,8 @@ static size_t TARGET_CLONES stress_vm_walking_one_data(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("walking one (data)", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -615,6 +560,8 @@ static size_t TARGET_CLONES stress_vm_walking_zero_data(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("walking zero (data)", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -662,6 +609,8 @@ static size_t TARGET_CLONES stress_vm_walking_one_addr(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("walking one (address)", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -715,11 +664,88 @@ static size_t TARGET_CLONES stress_vm_walking_zero_addr(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("walking zero (address)", bit_errors);
 	stress_bogo_set(args, c);
 
 	return bit_errors;
 }
+
+/*
+ *  stress_vm_walking_flush_data()
+ *	for each byte, walk through each byte flushing data
+ */
+static size_t TARGET_CLONES stress_vm_walking_flush_data(
+	void *buf,
+	void *buf_end,
+	const size_t sz,
+	stress_args_t *args,
+	const uint64_t max_ops)
+{
+	size_t bit_errors = 0;
+	register uint8_t *ptr;
+	register uint64_t c = stress_bogo_get(args);
+	register uint8_t val = 0;
+
+	(void)sz;
+
+	for (ptr = (uint8_t *)buf; ptr < (uint8_t *)buf_end - 7; ptr++, val++) {
+		*(ptr + 0) = (val + 0) & 0xff;
+		shim_clflush(ptr + 0);
+		stress_asm_mb();
+		*(ptr + 1) = (val + 1) & 0xff;
+		shim_clflush(ptr + 1);
+		stress_asm_mb();
+		*(ptr + 2) = (val + 2) & 0xff;
+		shim_clflush(ptr + 2);
+		stress_asm_mb();
+		*(ptr + 3) = (val + 3) & 0xff;
+		shim_clflush(ptr + 3);
+		stress_asm_mb();
+		*(ptr + 4) = (val + 4) & 0xff;
+		shim_clflush(ptr + 4);
+		stress_asm_mb();
+		*(ptr + 5) = (val + 5) & 0xff;
+		shim_clflush(ptr + 5);
+		stress_asm_mb();
+		*(ptr + 6) = (val + 6) & 0xff;
+		shim_clflush(ptr + 6);
+		stress_asm_mb();
+		*(ptr + 7) = (val + 7) & 0xff;
+		shim_mfence();
+
+		bit_errors += (*(ptr + 0) != ((val + 0) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 1) != ((val + 1) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 2) != ((val + 2) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 3) != ((val + 3) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 4) != ((val + 4) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 5) != ((val + 5) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 6) != ((val + 6) & 0xff));
+		stress_asm_mb();
+		bit_errors += (*(ptr + 7) != ((val + 7) & 0xff));
+		stress_asm_mb();
+
+		c++;
+		if (UNLIKELY(max_ops && (c >= max_ops)))
+			break;
+		if (UNLIKELY(!stress_continue_flag()))
+			break;
+	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("walking flush (data)", bit_errors);
+	stress_bogo_set(args, c);
+
+	return bit_errors;
+}
+
 
 /*
  *  stress_vm_gray()
@@ -799,6 +825,8 @@ static size_t TARGET_CLONES OPTIMIZE3 stress_vm_gray(
 	}
 	val++;
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("gray code", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -873,7 +901,9 @@ static size_t TARGET_CLONES stress_vm_grayflip(
 	}
 	val++;
 
-	stress_vm_check("gray code", bit_errors);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("gray code (flip)", bit_errors);
 	stress_bogo_set(args, c);
 
 	return bit_errors;
@@ -921,6 +951,8 @@ static size_t TARGET_CLONES stress_vm_incdec(
 			bit_errors++;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("incdec code", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -944,7 +976,7 @@ static size_t TARGET_CLONES stress_vm_prime_incdec(
 	register uint8_t *ptr = buf;
 	size_t bit_errors = 0, i;
 	const uint64_t prime = stress_get_prime64(sz + 4096);
-	register uint64_t j, c = stress_bogo_get(args);
+	register uint64_t j, c;
 
 #if SIZE_MAX > UINT32_MAX
 	/* Unlikely.. */
@@ -954,12 +986,13 @@ static size_t TARGET_CLONES stress_vm_prime_incdec(
 
 	(void)shim_memset(buf, 0x00, sz);
 
+	c = stress_bogo_get(args);
 	for (i = 0; i < sz; i++) {
 		ptr[i] += val;
 		stress_asm_mb();
 		c++;
 		if (UNLIKELY(max_ops && (c >= max_ops)))
-			return 0;
+			break;
 	}
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
@@ -968,13 +1001,14 @@ static size_t TARGET_CLONES stress_vm_prime_incdec(
 	 *  in a totally sub-optimal way to exercise
 	 *  memory and cache stalls
 	 */
+	c = stress_bogo_get(args);
 	for (i = 0, j = prime; i < sz; i++, j += prime) {
 		j = stress_vm_mod(j, sz);
 		ptr[j] -= val;
 		stress_asm_mb();
 		c++;
 		if (UNLIKELY(max_ops && (c >= max_ops)))
-			return 0;
+			break;
 	}
 
 	for (ptr = (uint8_t *)buf; ptr < (uint8_t *)buf_end; ptr++) {
@@ -982,6 +1016,8 @@ static size_t TARGET_CLONES stress_vm_prime_incdec(
 			bit_errors++;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("prime-incdec", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -1011,7 +1047,7 @@ static size_t TARGET_CLONES stress_vm_swap(
 	z1 = stress_mwc32();
 	w1 = stress_mwc32();
 
-	if ((swaps = calloc(chunks, sizeof(*swaps))) == NULL) {
+	if ((swaps = (size_t *)calloc(chunks, sizeof(*swaps))) == NULL) {
 		pr_fail("%s: calloc failed on vm_swap\n", args->name);
 		return 0;
 	}
@@ -1048,6 +1084,8 @@ static size_t TARGET_CLONES stress_vm_swap(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	/* Reverse swaps */
 	for (i = chunks - 1, ptr = (uint8_t *)buf_end - chunk_sz; ptr >= (uint8_t *)buf; ptr -= chunk_sz, i--) {
 		size_t offset = swaps[i];
@@ -1070,12 +1108,14 @@ static size_t TARGET_CLONES stress_vm_swap(
 			goto abort;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	stress_mwc_set_seed(w1, z1);
 	for (ptr = (uint8_t *)buf; ptr < (uint8_t *)buf_end; ptr += chunk_sz) {
-		uint8_t *p = (uint8_t *)ptr;
+		const uint8_t *p = (uint8_t *)ptr;
 		const uint8_t *p_end = (uint8_t *)ptr + chunk_sz;
 		uint8_t val = stress_mwc8();
 
@@ -1087,6 +1127,8 @@ static size_t TARGET_CLONES stress_vm_swap(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("swap bytes", bit_errors);
 abort:
 	free(swaps);
@@ -1143,6 +1185,8 @@ static size_t TARGET_CLONES stress_vm_rand_set(
 			goto abort;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -1161,6 +1205,8 @@ static size_t TARGET_CLONES stress_vm_rand_set(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("rand-set", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -1217,6 +1263,8 @@ static size_t TARGET_CLONES stress_vm_ror(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 
 	for (ptr = (uint8_t *)buf; ptr < (uint8_t *)buf_end; ptr += chunk_sz) {
@@ -1241,6 +1289,8 @@ static size_t TARGET_CLONES stress_vm_ror(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 
 	inject_random_bit_errors(buf, sz);
@@ -1261,6 +1311,8 @@ static size_t TARGET_CLONES stress_vm_ror(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("ror", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -1325,6 +1377,8 @@ static size_t TARGET_CLONES stress_vm_flip(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 
 	for (i = 0; i < 8; i++) {
@@ -1355,6 +1409,8 @@ static size_t TARGET_CLONES stress_vm_flip(
 		(void)stress_mincore_touch_pages(buf, sz);
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	stress_mwc_set_seed(w, z);
@@ -1380,7 +1436,75 @@ static size_t TARGET_CLONES stress_vm_flip(
 			break;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("flip", bit_errors);
+abort:
+	stress_bogo_set(args, c);
+
+	return bit_errors;
+}
+
+/*
+ *  stress_vm_one_zone()
+ *	set all memory to one and see if any bits are stuck at zero and
+ *	set all memory to zero and see if any bits are stuck at one
+ */
+static size_t TARGET_CLONES stress_vm_one_zero(
+	void *buf,
+	void *buf_end,
+	const size_t sz,
+	stress_args_t *args,
+	const uint64_t max_ops)
+{
+	register uint64_t *ptr;
+	register uint64_t c = stress_bogo_get(args);
+	size_t bit_errors = 0;
+
+	(void)max_ops;
+
+	(void)shim_memset(buf, 0xff, sz);
+	(void)stress_mincore_touch_pages(buf, sz);
+	inject_random_bit_errors(buf, sz);
+	c += sz / 8;
+
+	for (ptr = (uint64_t *)buf; ptr < (uint64_t *)buf_end; ptr += 8) {
+		bit_errors += stress_vm_count_bits(~*(ptr + 0));
+		bit_errors += stress_vm_count_bits(~*(ptr + 1));
+		bit_errors += stress_vm_count_bits(~*(ptr + 2));
+		bit_errors += stress_vm_count_bits(~*(ptr + 3));
+		bit_errors += stress_vm_count_bits(~*(ptr + 4));
+		bit_errors += stress_vm_count_bits(~*(ptr + 5));
+		bit_errors += stress_vm_count_bits(~*(ptr + 6));
+		bit_errors += stress_vm_count_bits(~*(ptr + 7));
+
+		if (UNLIKELY(!stress_continue_flag()))
+			goto abort;
+	}
+
+	(void)shim_memset(buf, 0x00, sz);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	(void)stress_mincore_touch_pages(buf, sz);
+	inject_random_bit_errors(buf, sz);
+	c += sz / 8;
+
+	for (ptr = (uint64_t *)buf; ptr < (uint64_t *)buf_end; ptr += 8) {
+		bit_errors += stress_vm_count_bits(*(ptr + 0));
+		bit_errors += stress_vm_count_bits(*(ptr + 1));
+		bit_errors += stress_vm_count_bits(*(ptr + 2));
+		bit_errors += stress_vm_count_bits(*(ptr + 3));
+		bit_errors += stress_vm_count_bits(*(ptr + 4));
+		bit_errors += stress_vm_count_bits(*(ptr + 5));
+		bit_errors += stress_vm_count_bits(*(ptr + 6));
+		bit_errors += stress_vm_count_bits(*(ptr + 7));
+
+		if (UNLIKELY(!stress_continue_flag()))
+			break;
+	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("one-zero", bit_errors);
 abort:
 	stress_bogo_set(args, c);
 
@@ -1425,6 +1549,8 @@ static size_t TARGET_CLONES stress_vm_zero_one(
 	}
 
 	(void)shim_memset(buf, 0xff, sz);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 	c += sz / 8;
@@ -1442,6 +1568,8 @@ static size_t TARGET_CLONES stress_vm_zero_one(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("zero-one", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -1484,6 +1612,8 @@ static size_t TARGET_CLONES stress_vm_galpat_zero(
 			}
 		}
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -1504,6 +1634,8 @@ static size_t TARGET_CLONES stress_vm_galpat_zero(
 	if (bits_set != bits_bad)
 		bit_errors += UNSIGNED_ABS(bits_set, bits_bad);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("galpat-zero", bit_errors);
 ret:
 	if (UNLIKELY(max_ops && (c >= max_ops)))
@@ -1548,6 +1680,8 @@ static size_t TARGET_CLONES stress_vm_galpat_one(
 			}
 		}
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -1568,6 +1702,8 @@ static size_t TARGET_CLONES stress_vm_galpat_one(
 	if (bits_set != bits_bad)
 		bit_errors += UNSIGNED_ABS(bits_set, bits_bad);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("galpat-one", bit_errors);
 ret:
 	if (UNLIKELY(max_ops && (c >= max_ops)))
@@ -1644,6 +1780,8 @@ static size_t TARGET_CLONES stress_vm_inc_nybble(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -1660,6 +1798,8 @@ static size_t TARGET_CLONES stress_vm_inc_nybble(
 			break;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("inc-nybble", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -1715,6 +1855,8 @@ static size_t TARGET_CLONES stress_vm_rand_sum(
 			goto abort;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -1731,6 +1873,8 @@ static size_t TARGET_CLONES stress_vm_rand_sum(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("rand-sum", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -1754,13 +1898,13 @@ static size_t TARGET_CLONES stress_vm_prime_zero(
 	size_t bit_errors = 0;
 	register uint64_t c = stress_bogo_get(args);
 	register uint8_t i = 0;
-	register size_t prime = 61; /* prime less than cache line size */
+	register const size_t prime = 61; /* prime less than cache line size */
 	static size_t offset = 0;
-	register uint8_t *ptr = (uint8_t *)buf + offset;
+	register uint8_t *ptr;
 
 #if SIZE_MAX > UINT32_MAX
 	/* Unlikely.. */
-	if (sz > (1ULL << 63))
+	if (UNLIKELY(sz > (1ULL << 63)))
 		return 0;
 #endif
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
@@ -1783,16 +1927,20 @@ static size_t TARGET_CLONES stress_vm_prime_zero(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
 		bit_errors += stress_vm_count_bits8(*ptr);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("prime-zero", bit_errors);
 abort:
 	offset++;
-	if (offset >= prime)
+	if (UNLIKELY(offset >= prime))
 		offset = 0;
 	stress_bogo_set(args, c);
 	return bit_errors;
@@ -1814,13 +1962,13 @@ static size_t TARGET_CLONES stress_vm_prime_one(
 	size_t bit_errors = 0;
 	uint64_t c = stress_bogo_get(args);
 	register uint8_t i = 0;
-	register size_t prime = 61; /* prime less than cache line size */
+	register const size_t prime = 61; /* prime less than cache line size */
 	static size_t offset = 0;
-	register uint8_t *ptr = (uint8_t *)buf + offset;
+	register uint8_t *ptr;
 
 #if SIZE_MAX > UINT32_MAX
 	/* Unlikely.. */
-	if (sz > (1ULL << 63))
+	if (UNLIKELY(sz > (1ULL << 63)))
 		return 0;
 #endif
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
@@ -1843,16 +1991,20 @@ static size_t TARGET_CLONES stress_vm_prime_one(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
 		bit_errors += 8 - stress_vm_count_bits8(*ptr);
 
-	stress_vm_check("prime-zero", bit_errors);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("prime-one", bit_errors);
 abort:
 	offset++;
-	if (offset >= prime)
+	if (UNLIKELY(offset >= prime))
 		offset = 0;
 	stress_bogo_set(args, c);
 	return bit_errors;
@@ -1874,13 +2026,13 @@ static size_t TARGET_CLONES stress_vm_prime_gray_zero(
 	size_t bit_errors = 0;
 	register uint64_t c = stress_bogo_get(args);
 	register uint8_t i = 0;
-	register size_t prime = 61; /* prime less than cache line size */
+	register const size_t prime = 61; /* prime less than cache line size */
 	static size_t offset = 0;
-	register uint8_t *ptr = (uint8_t *)buf + offset;
+	register uint8_t *ptr;
 
 #if SIZE_MAX > UINT32_MAX
 	/* Unlikely.. */
-	if (sz > (1ULL << 63))
+	if (UNLIKELY(sz > (1ULL << 63)))
 		return 0;
 #endif
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
@@ -1903,16 +2055,20 @@ static size_t TARGET_CLONES stress_vm_prime_gray_zero(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
 		bit_errors += stress_vm_count_bits8(*ptr);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("prime-gray-zero", bit_errors);
 abort:
 	offset++;
-	if (offset >= prime)
+	if (UNLIKELY(offset >= prime))
 		offset = 0;
 	stress_bogo_set(args, c);
 	return bit_errors;
@@ -1934,13 +2090,13 @@ static size_t TARGET_CLONES stress_vm_prime_gray_one(
 	size_t bit_errors = 0;
 	register uint64_t c = stress_bogo_get(args);
 	register uint8_t i = 0;
-	register size_t prime = 61; /* prime less than cache line size */
+	register const size_t prime = 61; /* prime less than cache line size */
 	static size_t offset = 0;
-	register uint8_t *ptr = (uint8_t *)buf + offset;
+	register uint8_t *ptr;
 
 #if SIZE_MAX > UINT32_MAX
 	/* Unlikely.. */
-	if (sz > (1ULL << 63))
+	if (UNLIKELY(sz > (1ULL << 63)))
 		return 0;
 #endif
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
@@ -1963,16 +2119,20 @@ static size_t TARGET_CLONES stress_vm_prime_gray_one(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
 	for (ptr = (uint8_t *)buf + offset; ptr < (uint8_t *)buf_end; ptr += prime)
 		bit_errors += 8 - stress_vm_count_bits8(*ptr);
 
-	stress_vm_check("prime-gray-zero", bit_errors);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("prime-gray-one", bit_errors);
 abort:
 	offset++;
-	if (offset >= prime)
+	if (UNLIKELY(offset >= prime))
 		offset = 0;
 	stress_bogo_set(args, c);
 	return bit_errors;
@@ -2068,11 +2228,98 @@ static size_t OPTIMIZE3 TARGET_CLONES stress_vm_write64(
 		if (UNLIKELY(!stress_continue_flag() || (max_ops && (i >= max_ops))))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_bogo_add(args, i);
 	val++;
 
 	return 0;
 }
+
+#if defined(HAVE_ASM_X86_MOVDIRI) &&	\
+    defined(STRESS_ARCH_X86_64)
+/*
+ *  stress_vm_write_64ds()
+ *	64 bit direct store write, no read check
+ */
+static size_t OPTIMIZE3 stress_vm_write64ds(
+	void *buf,
+	void *buf_end,
+	const size_t sz,
+	stress_args_t *args,
+	const uint64_t max_ops)
+{
+	static bool movdiri = true;
+
+	if (stress_cpu_x86_has_movdiri()) {
+		static uint64_t val;
+		register uint64_t *ptr = (uint64_t *)buf;
+		register const uint64_t v = val;
+		register size_t i = 0;
+		register const size_t n = sz / (sizeof(*ptr) * 32);
+
+		while (i < n) {
+			stress_ds_store64(&ptr[0x00], v);
+			stress_ds_store64(&ptr[0x01], v);
+			stress_ds_store64(&ptr[0x02], v);
+			stress_ds_store64(&ptr[0x03], v);
+			stress_ds_store64(&ptr[0x04], v);
+			stress_ds_store64(&ptr[0x05], v);
+			stress_ds_store64(&ptr[0x06], v);
+			stress_ds_store64(&ptr[0x07], v);
+			ptr += 8;
+
+			stress_ds_store64(&ptr[0x00], v);
+			stress_ds_store64(&ptr[0x01], v);
+			stress_ds_store64(&ptr[0x02], v);
+			stress_ds_store64(&ptr[0x03], v);
+			stress_ds_store64(&ptr[0x04], v);
+			stress_ds_store64(&ptr[0x05], v);
+			stress_ds_store64(&ptr[0x06], v);
+			stress_ds_store64(&ptr[0x07], v);
+			ptr += 8;
+
+			stress_ds_store64(&ptr[0x00], v);
+			stress_ds_store64(&ptr[0x01], v);
+			stress_ds_store64(&ptr[0x02], v);
+			stress_ds_store64(&ptr[0x03], v);
+			stress_ds_store64(&ptr[0x04], v);
+			stress_ds_store64(&ptr[0x05], v);
+			stress_ds_store64(&ptr[0x06], v);
+			stress_ds_store64(&ptr[0x07], v);
+			ptr += 8;
+
+			stress_ds_store64(&ptr[0x00], v);
+			stress_ds_store64(&ptr[0x01], v);
+			stress_ds_store64(&ptr[0x02], v);
+			stress_ds_store64(&ptr[0x03], v);
+			stress_ds_store64(&ptr[0x04], v);
+			stress_ds_store64(&ptr[0x05], v);
+			stress_ds_store64(&ptr[0x06], v);
+			stress_ds_store64(&ptr[0x07], v);
+			ptr += 8;
+
+			i++;
+			if (UNLIKELY(!stress_continue_flag() || (max_ops && (i >= max_ops))))
+				break;
+		}
+		stress_bogo_add(args, i);
+		val++;
+		if (vm_flush)
+			stress_cpu_data_cache_flush(buf, sz);
+		return 0;
+	}
+
+	if (movdiri && (stress_instance_zero(args))) {
+		movdiri = false;
+
+		pr_inf("%s: x86 movdiri instruction not supported, "
+			"dropping back to plain 64 bit writes\n", args->name);
+	}
+
+	return stress_vm_write64(buf, buf_end, sz, args, max_ops);
+}
+#endif
 
 #if defined(HAVE_NT_STORE64)
 /*
@@ -2086,14 +2333,14 @@ static size_t TARGET_CLONES stress_vm_write64nt(
 	stress_args_t *args,
 	const uint64_t max_ops)
 {
+	static bool nt_store = true;
+
 	if (stress_cpu_x86_has_sse2()) {
 		static uint64_t val;
 		register uint64_t *ptr = (uint64_t *)buf;
 		register const uint64_t v = val;
 		register size_t i = 0;
 		register const size_t n = sz / (sizeof(*ptr) * 32);
-
-		(void)buf_end;
 
 		while (i < n) {
 			stress_nt_store64(&ptr[0x00], v);
@@ -2104,33 +2351,37 @@ static size_t TARGET_CLONES stress_vm_write64nt(
 			stress_nt_store64(&ptr[0x05], v);
 			stress_nt_store64(&ptr[0x06], v);
 			stress_nt_store64(&ptr[0x07], v);
+			ptr += 8;
 
-			stress_nt_store64(&ptr[0x08], v);
-			stress_nt_store64(&ptr[0x09], v);
-			stress_nt_store64(&ptr[0x0a], v);
-			stress_nt_store64(&ptr[0x0b], v);
-			stress_nt_store64(&ptr[0x0c], v);
-			stress_nt_store64(&ptr[0x0d], v);
-			stress_nt_store64(&ptr[0x0e], v);
-			stress_nt_store64(&ptr[0x0f], v);
+			stress_nt_store64(&ptr[0x00], v);
+			stress_nt_store64(&ptr[0x01], v);
+			stress_nt_store64(&ptr[0x02], v);
+			stress_nt_store64(&ptr[0x03], v);
+			stress_nt_store64(&ptr[0x04], v);
+			stress_nt_store64(&ptr[0x05], v);
+			stress_nt_store64(&ptr[0x06], v);
+			stress_nt_store64(&ptr[0x07], v);
+			ptr += 8;
 
-			stress_nt_store64(&ptr[0x10], v);
-			stress_nt_store64(&ptr[0x11], v);
-			stress_nt_store64(&ptr[0x12], v);
-			stress_nt_store64(&ptr[0x13], v);
-			stress_nt_store64(&ptr[0x14], v);
-			stress_nt_store64(&ptr[0x15], v);
-			stress_nt_store64(&ptr[0x16], v);
-			stress_nt_store64(&ptr[0x17], v);
+			stress_nt_store64(&ptr[0x00], v);
+			stress_nt_store64(&ptr[0x01], v);
+			stress_nt_store64(&ptr[0x02], v);
+			stress_nt_store64(&ptr[0x03], v);
+			stress_nt_store64(&ptr[0x04], v);
+			stress_nt_store64(&ptr[0x05], v);
+			stress_nt_store64(&ptr[0x06], v);
+			stress_nt_store64(&ptr[0x07], v);
+			ptr += 8;
 
-			stress_nt_store64(&ptr[0x18], v);
-			stress_nt_store64(&ptr[0x19], v);
-			stress_nt_store64(&ptr[0x1a], v);
-			stress_nt_store64(&ptr[0x1b], v);
-			stress_nt_store64(&ptr[0x1c], v);
-			stress_nt_store64(&ptr[0x1d], v);
-			stress_nt_store64(&ptr[0x1e], v);
-			stress_nt_store64(&ptr[0x1f], v);
+			stress_nt_store64(&ptr[0x00], v);
+			stress_nt_store64(&ptr[0x01], v);
+			stress_nt_store64(&ptr[0x02], v);
+			stress_nt_store64(&ptr[0x03], v);
+			stress_nt_store64(&ptr[0x04], v);
+			stress_nt_store64(&ptr[0x05], v);
+			stress_nt_store64(&ptr[0x06], v);
+			stress_nt_store64(&ptr[0x07], v);
+			ptr += 8;
 
 			i++;
 			if (UNLIKELY(!stress_continue_flag() || (max_ops && (i >= max_ops))))
@@ -2138,8 +2389,17 @@ static size_t TARGET_CLONES stress_vm_write64nt(
 		}
 		stress_bogo_add(args, i);
 		val++;
+		if (vm_flush)
+			stress_cpu_data_cache_flush(buf, sz);
 		return 0;
 	}
+	if (nt_store && (stress_instance_zero(args))) {
+		nt_store = false;
+
+		pr_inf("%s: x86 movnti instruction not supported, "
+			"dropping back to plain 64 bit writes\n", args->name);
+	}
+
 	return stress_vm_write64(buf, buf_end, sz, args, max_ops);
 }
 #endif
@@ -2208,6 +2468,8 @@ static size_t OPTIMIZE3 TARGET_CLONES stress_vm_read64(
 			break;
 	}
 	stress_bogo_add(args, i);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 
 	return 0;
 }
@@ -2265,6 +2527,8 @@ static size_t TARGET_CLONES stress_vm_write1024v(
 	}
 	stress_bogo_add(args, i);
 	val++;
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 
 	return 0;
 }
@@ -2293,7 +2557,7 @@ static size_t TARGET_CLONES stress_vm_rowhammer(
 	(void)buf_end;
 	(void)max_ops;
 
-	if (!n) {
+	if (UNLIKELY(!n)) {
 		pr_dbg("stress-vm: rowhammer: zero uint32_t integers could "
 			"be hammered, aborting\n");
 		return 0;
@@ -2362,6 +2626,8 @@ static size_t TARGET_CLONES stress_vm_rowhammer(
 	stress_bogo_add(args, VM_ROWHAMMER_LOOPS);
 	val = (val >> 31) | (val << 1);
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("rowhammer", bit_errors);
 
 	return bit_errors;
@@ -2379,7 +2645,8 @@ static size_t TARGET_CLONES stress_vm_mscan(
 	const uint64_t max_ops)
 {
 	size_t bit_errors = 0;
-	register uint8_t *ptr = (uint8_t *)buf, *end;
+	register uint8_t *ptr = (uint8_t *)buf;
+	register const uint8_t *end;
 	register uint64_t c = stress_bogo_get(args);
 
 	(void)sz;
@@ -2441,6 +2708,8 @@ static size_t TARGET_CLONES stress_vm_mscan(
 	}
 
 abort:
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("mscan", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -2598,6 +2867,8 @@ static size_t TARGET_CLONES stress_vm_cache_stripe(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 
 	for (ptr = (uint8_t *)buf; ptr < (uint8_t *)buf_end; ptr += 64) {
 		bit_errors += (ptr[0x00] != 0xa0);
@@ -2666,6 +2937,8 @@ static size_t TARGET_CLONES stress_vm_cache_stripe(
 		bit_errors += (ptr[0x20] != 0x30);
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 	stress_vm_check("cache-stripe", bit_errors);
@@ -2697,6 +2970,8 @@ static size_t TARGET_CLONES stress_vm_cache_lines(
 		*ptr = i++;
 		stress_asm_mb();
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	c += sz / stress_vm_cache_line_size;
 	if (UNLIKELY(max_ops && (c >= max_ops)))
 		goto abort;
@@ -2708,7 +2983,9 @@ static size_t TARGET_CLONES stress_vm_cache_lines(
 	}
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
-	stress_vm_check("cache-stripe", bit_errors);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("cache-lines", bit_errors);
 abort:
 	stress_bogo_set(args, c);
 
@@ -2785,6 +3062,8 @@ static size_t TARGET_CLONES stress_vm_wrrd128nt(
 		val++;
 		c++;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	if (UNLIKELY(max_ops && (c >= max_ops)))
 		goto abort;
 	if (UNLIKELY(!stress_continue_flag()))
@@ -2830,6 +3109,8 @@ static size_t TARGET_CLONES stress_vm_wrrd128nt(
 		bit_errors += (tmp != (val + 3));
 		val++;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	inject_random_bit_errors(buf, sz);
 	stress_vm_check("wrrd128nt", bit_errors);
 abort:
@@ -2898,6 +3179,8 @@ static size_t TARGET_CLONES stress_vm_fwdrev(
 		if (UNLIKELY(!stress_continue_flag()))
 			goto abort;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 
 	for (fwdptr = (uint8_t *)buf, revptr = (uint8_t *)buf_end; fwdptr < (uint8_t *)buf_end; ) {
 		bit_errors += (*(fwdptr + 0) != ((rnd >> 0x00) & 0xff));
@@ -2941,7 +3224,9 @@ static size_t TARGET_CLONES stress_vm_fwdrev(
 			goto abort;
 	}
 
-	stress_vm_check("walking one (data)", bit_errors);
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
+	stress_vm_check("fwdrev", bit_errors);
 abort:
 	stress_bogo_set(args, c);
 
@@ -3000,6 +3285,8 @@ static size_t stress_vm_lfsr32(
 			goto abort;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -3023,6 +3310,8 @@ static size_t stress_vm_lfsr32(
 		if (UNLIKELY(!stress_continue_flag()))
 			break;
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("lfsr32", bit_errors);
 abort:
 	stress_bogo_set(args, c);
@@ -3044,7 +3333,7 @@ do {						\
 
 /*
  *  stress_vm_checkerboard()
- *	fill adjecent bytes with alternative bit patterns
+ *	fill adjacent bytes with alternative bit patterns
  */
 static size_t TARGET_CLONES stress_vm_checkerboard(
 	void *buf,
@@ -3116,6 +3405,8 @@ static size_t TARGET_CLONES stress_vm_checkerboard(
 		stress_asm_mb();
 		STRESS_VM_CHECKERBOARD_SWAP(ptr + 6, ptr + 7);
 	}
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	(void)stress_mincore_touch_pages(buf, sz);
 	inject_random_bit_errors(buf, sz);
 
@@ -3135,6 +3426,8 @@ static size_t TARGET_CLONES stress_vm_checkerboard(
 			break;
 	}
 
+	if (vm_flush)
+		stress_cpu_data_cache_flush(buf, sz);
 	stress_vm_check("checkerboard", bit_errors);
 	stress_bogo_set(args, c);
 
@@ -3159,36 +3452,42 @@ static const stress_vm_method_info_t vm_methods[] = {
 	{ "galpat-1",		stress_vm_galpat_one },
 	{ "gray",		stress_vm_gray },
 	{ "grayflip",		stress_vm_grayflip },
-	{ "rowhammer",		stress_vm_rowhammer },
 	{ "incdec",		stress_vm_incdec },
 	{ "inc-nybble",		stress_vm_inc_nybble },
 	{ "lfsr32",		stress_vm_lfsr32 },
-	{ "rand-set",		stress_vm_rand_set },
-	{ "rand-sum",		stress_vm_rand_sum },
-	{ "read64",		stress_vm_read64 },
-	{ "ror",		stress_vm_ror },
-	{ "swap",		stress_vm_swap },
-	{ "move-inv",		stress_vm_moving_inversion },
 	{ "modulo-x",		stress_vm_modulo_x },
+	{ "move-inv",		stress_vm_moving_inversion },
 	{ "mscan",		stress_vm_mscan },
-#if defined(HAVE_NT_STORE64)
-	{ "wrrd128nt",		stress_vm_wrrd128nt },
-#endif
+	{ "one-zero",		stress_vm_one_zero },
 	{ "prime-0",		stress_vm_prime_zero },
 	{ "prime-1",		stress_vm_prime_one },
 	{ "prime-gray-0",	stress_vm_prime_gray_zero },
 	{ "prime-gray-1",	stress_vm_prime_gray_one },
 	{ "prime-incdec",	stress_vm_prime_incdec },
-	{ "walk-0d",		stress_vm_walking_zero_data },
-	{ "walk-1d",		stress_vm_walking_one_data },
+	{ "rand-set",		stress_vm_rand_set },
+	{ "rand-sum",		stress_vm_rand_sum },
+	{ "read64",		stress_vm_read64 },
+	{ "ror",		stress_vm_ror },
+	{ "rowhammer",		stress_vm_rowhammer },
+	{ "swap",		stress_vm_swap },
 	{ "walk-0a",		stress_vm_walking_zero_addr },
+	{ "walk-0d",		stress_vm_walking_zero_data },
 	{ "walk-1a",		stress_vm_walking_one_addr },
+	{ "walk-1d",		stress_vm_walking_one_data },
+	{ "walk-flush",		stress_vm_walking_flush_data },
 	{ "write64",		stress_vm_write64 },
+#if defined(HAVE_ASM_X86_MOVDIRI) &&	\
+    defined(STRESS_ARCH_X86_64)
+	{ "write64ds",		stress_vm_write64ds },
+#endif
 #if defined(HAVE_NT_STORE64)
 	{ "write64nt",		stress_vm_write64nt },
 #endif
 #if defined(HAVE_VECMATH)
 	{ "write1024v",		stress_vm_write1024v },
+#endif
+#if defined(HAVE_NT_STORE128)
+	{ "wrrd128nt",		stress_vm_wrrd128nt },
 #endif
 	{ "zero-one",		stress_vm_zero_one },
 };
@@ -3209,99 +3508,119 @@ static size_t stress_vm_all(
 
 	bit_errors = vm_methods[i].func(buf, buf_end, sz, args, max_ops);
 	i++;
-	if (i >= SIZEOF_ARRAY(vm_methods))
+	if (UNLIKELY(i >= SIZEOF_ARRAY(vm_methods)))
 		i = 1;
 
 	return bit_errors;
 }
 
-/*
- *  stress_set_vm_method()
- *      set default vm stress method
- */
-static int stress_set_vm_method(const char *name)
+#if defined(MAP_LOCKED) ||	\
+    defined(MAP_POPULATE)
+static void stress_vm_flags(const char *opt, int *vm_flags, const int bitmask)
 {
-	size_t i;
+	bool flag = false;
 
-	for (i = 0; i < SIZEOF_ARRAY(vm_methods); i++) {
-		if (!strcmp(vm_methods[i].name, name)) {
-			stress_set_setting("vm-method", TYPE_ID_SIZE_T, &i);
-			return 0;
-		}
-	}
-
-	(void)fprintf(stderr, "vm-method must be one of:");
-	for (i = 0; i < SIZEOF_ARRAY(vm_methods); i++) {
-		(void)fprintf(stderr, " %s", vm_methods[i].name);
-	}
-	(void)fprintf(stderr, "\n");
-
-	return -1;
+	(void)stress_get_setting(opt, &flag);
+	if (flag)
+		*vm_flags |= bitmask;
 }
+#endif
 
 static int stress_vm_child(stress_args_t *args, void *ctxt)
 {
-	int no_mem_retries = 0;
-	const uint64_t max_ops = args->max_ops << VM_BOGO_SHIFT;
-	uint64_t vm_hang = DEFAULT_VM_HANG;
-	void *buf = NULL, *buf_end = NULL;
-	int vm_flags = 0;                      /* VM mmap flags */
-	int vm_madvise = -1;
-	int rc = EXIT_SUCCESS;
-	size_t buf_sz;
-	size_t vm_bytes = DEFAULT_VM_BYTES;
-	const size_t page_size = args->page_size;
-	bool vm_keep = false;
 	stress_vm_context_t *context = (stress_vm_context_t *)ctxt;
 	const stress_vm_func func = context->vm_method->func;
+	const size_t page_size = args->page_size;
+	size_t buf_sz = context->vm_bytes & ~(page_size - 1);
+	const uint64_t max_ops = args->bogo.max_ops << VM_BOGO_SHIFT;
+	uint64_t vm_hang = DEFAULT_VM_HANG;
+	void *buf = NULL, *buf_end = NULL;
+	int no_mem_retries = 0;
+	int vm_flags = 0;                      /* VM mmap flags */
+	size_t vm_madvise = 0;
+	int advice = -1;
+	int rc = EXIT_SUCCESS;
+	bool vm_keep = false;
 
 	stress_catch_sigill();
 
+	(void)stress_get_setting("vm-flush", &vm_flush);
+	if (g_opt_flags & OPT_FLAGS_AGGRESSIVE)
+		vm_flush = true;
 	(void)stress_get_setting("vm-hang", &vm_hang);
 	(void)stress_get_setting("vm-keep", &vm_keep);
+#if defined(MAP_LOCKED)
+	stress_vm_flags("vm-locked", &vm_flags, MAP_LOCKED);
+#endif
+#if defined(MAP_POPULATE)
+	stress_vm_flags("vm-populate", &vm_flags, MAP_POPULATE);
+#endif
 	(void)stress_get_setting("vm-flags", &vm_flags);
-
-	if (!stress_get_setting("vm-bytes", &vm_bytes)) {
-		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
-			vm_bytes = MAX_32;
-		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
-			vm_bytes = MIN_VM_BYTES;
-	}
-	vm_bytes /= args->num_instances;
-	if (vm_bytes < MIN_VM_BYTES)
-		vm_bytes = MIN_VM_BYTES;
-	buf_sz = vm_bytes & ~(page_size - 1);
-	(void)stress_get_setting("vm-madvise", &vm_madvise);
+	if (stress_get_setting("vm-madvise", &vm_madvise))
+		advice = vm_madvise_info[vm_madvise].advice;
 
 	do {
-		if (no_mem_retries >= NO_MEM_RETRIES_MAX) {
-			pr_inf_skip("%s: gave up trying to mmap, no available memory, skipping stressor\n",
-				args->name);
-			rc = EXIT_NO_RESOURCE;
-			break;
-		}
 		if (!vm_keep || (buf == NULL)) {
-			if (!stress_continue_flag())
+			if (UNLIKELY(!stress_continue_flag()))
 				return EXIT_SUCCESS;
-			if ((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(buf_sz)) {
+			if (UNLIKELY(((g_opt_flags & OPT_FLAGS_OOM_AVOID) && stress_low_memory(buf_sz)))) {
 				buf = MAP_FAILED;
+				errno = ENOMEM;
 			} else {
+#if defined(HAVE_MPROTECT) &&	\
+    defined(PROT_NONE)
+				/*
+				 *   allocate buffer + one trailing page
+				 *   so the last page can be marked PROT_NONE later
+				 *   to catch any buffer over-runs.
+				 */
+				buf = (uint8_t *)mmap(NULL, buf_sz + page_size,
+#else
 				buf = (uint8_t *)mmap(NULL, buf_sz,
+#endif
 					PROT_READ | PROT_WRITE,
 					MAP_PRIVATE | MAP_ANONYMOUS |
 					vm_flags, -1, 0);
 			}
-			if (buf == MAP_FAILED) {
+			if (UNLIKELY(buf == MAP_FAILED)) {
 				buf = NULL;
 				no_mem_retries++;
-				(void)shim_usleep(100000);
+				if (no_mem_retries >= NO_MEM_RETRIES_MAX) {
+					char str[32];
+
+					/* shrink a bit and retry */
+					buf_sz = ((buf_sz / 16) * 15) & ~(page_size - 1);
+					no_mem_retries = 0;
+					if (buf_sz < page_size) {
+						(void)stress_uint64_to_str(str, sizeof(str), (uint64_t)buf_sz, 1, true);
+						pr_inf_skip("%s: gave up trying to mmap %s after many attempts, "
+							"errno=%d (%s), skipping stressor\n",
+							args->name, str, errno, strerror(errno));
+						rc = EXIT_NO_RESOURCE;
+						break;
+					}
+				}
+				(void)shim_usleep(10000);
 				continue;	/* Try again */
 			}
 			buf_end = (void *)((uint8_t *)buf + buf_sz);
-			if (vm_madvise < 0)
+#if defined(HAVE_MPROTECT) &&	\
+    defined(PROT_NONE)
+			/*
+			 * page after end of buffer is not readable or writable
+			 * to catch any buffer overruns
+			 */
+			(void)mprotect(buf_end, page_size, PROT_NONE);
+#endif
+
+			if (advice < 0)
 				(void)stress_madvise_random(buf, buf_sz);
 			else
-				(void)shim_madvise(buf, buf_sz, vm_madvise);
+				(void)shim_madvise(buf, buf_sz, advice);
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+			if (UNLIKELY(context->vm_numa))
+				stress_numa_randomize_pages(args, context->numa_nodes, context->numa_mask, buf, buf_sz, page_size);
+#endif
 		}
 
 		no_mem_retries = 0;
@@ -3318,12 +3637,23 @@ static int stress_vm_child(stress_args_t *args, void *ctxt)
 
 		if (!vm_keep) {
 			(void)stress_madvise_random(buf, buf_sz);
+#if defined(HAVE_MPROTECT) &&	\
+    defined(PROT_NONE)
+			(void)stress_munmap_retry_enomem(buf, buf_sz + page_size);
+#else
 			(void)stress_munmap_retry_enomem(buf, buf_sz);
+#endif
 		}
 	} while (stress_continue_vm(args));
 
-	if (vm_keep && (buf != NULL))
-		(void)stress_munmap_retry_enomem((void *)buf, buf_sz);
+	if (vm_keep && (buf != NULL)) {
+#if defined(HAVE_MPROTECT) && 	\
+    defined(PROT_NONE)
+		(void)stress_munmap_retry_enomem(buf, buf_sz + page_size);
+#else
+		(void)stress_munmap_retry_enomem(buf, buf_sz);
+#endif
+	}
 
 	return rc;
 }
@@ -3365,19 +3695,52 @@ static int stress_vm(stress_args_t *args)
 	size_t retries;
 	int err = 0, ret = EXIT_SUCCESS;
 	size_t vm_method = 0;
+	size_t vm_total = DEFAULT_VM_BYTES;
 	stress_vm_context_t context;
 
+	(void)shim_memset(&context, 0, sizeof(context));
 	stress_vm_get_cache_line_size();
 
+	(void)stress_get_setting("vm-numa", &context.vm_numa);
+	if (context.vm_numa) {
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		stress_numa_mask_and_node_alloc(args, &context.numa_nodes,
+						&context.numa_mask, "--vm-numa",
+						&context.vm_numa);
+#else
+		if (stress_instance_zero(args))
+			pr_inf("%s: --vm-numa selected but not supported by this system, disabling option\n",
+				args->name);
+		context.vm_numa = false;
+#endif
+	}
 	context.bit_error_count = MAP_FAILED;
 
 	(void)stress_get_setting("vm-method", &vm_method);
 	context.vm_method = &vm_methods[vm_method];
 
-	if (args->instance == 0)
-		pr_dbg("%s: using method '%s'\n", args->name, context.vm_method->name);
+	if (!stress_get_setting("vm-bytes", &vm_total)) {
+		if (g_opt_flags & OPT_FLAGS_MAXIMIZE)
+			vm_total = MAX_32;
+		if (g_opt_flags & OPT_FLAGS_MINIMIZE)
+			vm_total = MIN_VM_BYTES;
+	}
+	context.vm_bytes = vm_total / args->instances;
+	if (context.vm_bytes < MIN_VM_BYTES) {
+		context.vm_bytes = MIN_VM_BYTES;
+		vm_total = context.vm_bytes * args->instances;
+	}
+	if (context.vm_bytes < page_size) {
+		context.vm_bytes = MIN_VM_BYTES;
+		vm_total = context.vm_bytes * args->instances;
+	}
 
-	for (retries = 0; (retries < 100) && stress_continue_flag(); retries++) {
+	if (stress_instance_zero(args)) {
+		pr_dbg("%s: using method '%s'\n", args->name, context.vm_method->name);
+		stress_usage_bytes(args, context.vm_bytes, vm_total);
+	}
+
+	for (retries = 0; LIKELY((retries < 100) && stress_continue_flag()); retries++) {
 		context.bit_error_count = (uint64_t *)
 			stress_mmap_populate(NULL, page_size,
 				PROT_READ | PROT_WRITE,
@@ -3390,16 +3753,25 @@ static int stress_vm(stress_args_t *args)
 
 	/* Cannot allocate a single page for bit error counter */
 	if (context.bit_error_count == MAP_FAILED) {
-		if (stress_continue_flag()) {
+		if (LIKELY(stress_continue_flag())) {
 			pr_err("%s: could not mmap bit error counter: "
 				"retry count=%zu, errno=%d (%s)\n",
 				args->name, retries, err, strerror(err));
 		}
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+		if (context.numa_mask)
+			stress_numa_mask_free(context.numa_mask);
+		if (context.numa_nodes)
+			stress_numa_mask_free(context.numa_nodes);
+#endif
 		return EXIT_NO_RESOURCE;
 	}
+	stress_set_vma_anon_name(context.bit_error_count, page_size, "bit-error-count");
 
 	*context.bit_error_count = 0ULL;
 
+	stress_set_proc_state(args->name, STRESS_STATE_SYNC_WAIT);
+	stress_sync_start_wait(args);
 	stress_set_proc_state(args->name, STRESS_STATE_RUN);
 
 	ret = stress_oomable_child(args, &context, stress_vm_child, STRESS_OOMABLE_NORMAL);
@@ -3415,33 +3787,45 @@ static int stress_vm(stress_args_t *args)
 	stress_set_proc_state(args->name, STRESS_STATE_DEINIT);
 	(void)munmap((void *)context.bit_error_count, page_size);
 
+#if defined(HAVE_LINUX_MEMPOLICY_H)
+	if (context.numa_mask)
+		stress_numa_mask_free(context.numa_mask);
+	if (context.numa_nodes)
+		stress_numa_mask_free(context.numa_nodes);
+#endif
 	tmp_counter = stress_bogo_get(args) >> VM_BOGO_SHIFT;
 	stress_bogo_set(args, tmp_counter);
 
 	return ret;
 }
 
-static void stress_vm_set_default(void)
+static const char *stress_vm_madvise(const size_t i)
 {
-	stress_set_vm_method("all");
+	return (i < SIZEOF_ARRAY(vm_madvise_info)) ? vm_madvise_info[i].name : NULL;
 }
 
-static const stress_opt_set_func_t opt_set_funcs[] = {
-	{ OPT_vm_bytes,		stress_set_vm_bytes },
-	{ OPT_vm_hang,		stress_set_vm_hang },
-	{ OPT_vm_keep,		stress_set_vm_keep },
-	{ OPT_vm_madvise,	stress_set_vm_madvise },
-	{ OPT_vm_method,	stress_set_vm_method },
-	{ OPT_vm_mmap_locked,	stress_set_vm_mmap_locked },
-	{ OPT_vm_mmap_populate,	stress_set_vm_mmap_populate },
-	{ 0,			NULL }
+static const char *stress_vm_method(const size_t i)
+{
+	return (i < SIZEOF_ARRAY(vm_methods)) ? vm_methods[i].name : NULL;
+}
+
+static const stress_opt_t opts[] = {
+	{ OPT_vm_bytes,    "vm-bytes",    TYPE_ID_SIZE_T_BYTES_VM, MIN_VM_BYTES, MAX_VM_BYTES, NULL },
+	{ OPT_vm_flush,	   "vm-flush",	  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_vm_hang,     "vm-hang",     TYPE_ID_UINT64, MIN_VM_HANG, MAX_VM_HANG, NULL },
+	{ OPT_vm_keep,     "vm-keep",     TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_vm_locked,   "vm-locked",   TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_vm_madvise,  "vm-madvise",  TYPE_ID_SIZE_T_METHOD, 0, 0, stress_vm_madvise },
+	{ OPT_vm_method,   "vm-method",   TYPE_ID_SIZE_T_METHOD, 0, 0, stress_vm_method },
+	{ OPT_vm_numa,	   "vm-numa",	  TYPE_ID_BOOL, 0, 1, NULL },
+	{ OPT_vm_populate, "vm-populate", TYPE_ID_BOOL, 0, 1, NULL },
+	END_OPT,
 };
 
-stressor_info_t stress_vm_info = {
+const stressor_info_t stress_vm_info = {
 	.stressor = stress_vm,
-	.set_default = stress_vm_set_default,
-	.class = CLASS_VM | CLASS_MEMORY | CLASS_OS,
-	.opt_set_funcs = opt_set_funcs,
+	.classifier = CLASS_VM | CLASS_MEMORY | CLASS_OS,
+	.opts = opts,
 	.verify = VERIFY_OPTIONAL,
 	.help = help
 };

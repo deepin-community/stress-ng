@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013-2021 Canonical, Ltd.
- * Copyright (C) 2022-2024 Colin Ian King.
+ * Copyright (C) 2022-2025 Colin Ian King.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -61,12 +61,12 @@ int stress_net_interface_exists(const char *interface, const int domain, struct 
 	struct ifaddrs *ifaddr, *ifa;
 	int ret = -1;
 
-	if (!interface)
+	if (UNLIKELY(!interface))
 		return -1;
-	if (!addr)
+	if (UNLIKELY(!addr))
 		return -1;
 
-	if (getifaddrs(&ifaddr) < 0)
+	if (UNLIKELY(getifaddrs(&ifaddr) < 0))
 		return -1;
 	for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
 		if (!ifa->ifa_addr)
@@ -76,7 +76,7 @@ int stress_net_interface_exists(const char *interface, const int domain, struct 
 		if (ifa->ifa_addr->sa_family != domain)
 			continue;
 		if (strcmp(ifa->ifa_name, interface) == 0) {
-			(void)memcpy(addr, ifa->ifa_addr, sizeof(*addr));
+			(void)shim_memcpy(addr, ifa->ifa_addr, sizeof(*addr));
 			ret = 0;
 			break;
 		}
@@ -177,7 +177,7 @@ int stress_set_sockaddr_if(
 	*len = 0;
 
 	/* omit ports 0..1023 */
-	if (sin_port < 1024)
+	if (UNLIKELY(sin_port < 1024))
 		sin_port += 1024;
 
 	switch (domain) {
@@ -240,7 +240,7 @@ int stress_set_sockaddr_if(
 		(void)shim_memset(&addr, 0, sizeof(addr));
 		addr.sun_family = AF_UNIX;
 		(void)snprintf(addr.sun_path, sizeof(addr.sun_path),
-			"/tmp/stress-ng-%jd-%" PRIu32,
+			"/tmp/stress-ng-%" PRIdMAX "-%" PRIu32,
 			(intmax_t)pid, instance);
 		*sockaddr = (struct sockaddr *)&addr;
 		*len = sizeof(addr);
@@ -275,7 +275,7 @@ int stress_set_sockaddr(
  *  stress_set_sockaddr_port()
  *	setup just the socket address port
  */
-void HOT stress_set_sockaddr_port(
+void stress_set_sockaddr_port(
 	const int domain,
 	const int port,
 	struct sockaddr *sockaddr)
@@ -312,11 +312,11 @@ void HOT stress_set_sockaddr_port(
  */
 static bool PURE stress_net_port_range_ok(const int start_port, const int end_port)
 {
-	if ((start_port > end_port))
+	if (UNLIKELY((start_port > end_port)))
 		return false;
-	if ((start_port < 0) || (start_port >= 65536))
+	if (UNLIKELY((start_port < 0) || (start_port >= 65536)))
 		return false;
-	if ((end_port < 0) || (end_port >= 65536))
+	if (UNLIKELY((end_port < 0) || (end_port >= 65536)))
 		return false;
 	return true;
 }
@@ -330,10 +330,10 @@ int stress_net_reserve_ports(const int start_port, const int end_port)
 {
 	int i, port = -1;
 
-	if (!stress_net_port_range_ok(start_port, end_port))
+	if (UNLIKELY(!stress_net_port_range_ok(start_port, end_port)))
 		return -1;
 
-	if (stress_lock_acquire(g_shared->net_port_map.lock) < 0)
+	if (UNLIKELY(stress_lock_acquire(g_shared->net_port_map.lock) < 0))
 		return -1;
 
 	if (LIKELY(start_port == end_port)) {
@@ -378,7 +378,7 @@ int stress_net_reserve_ports(const int start_port, const int end_port)
  */
 void stress_net_release_ports(const int start_port, const int end_port)
 {
-	if (stress_net_port_range_ok(start_port, end_port)) {
+	if (LIKELY(stress_net_port_range_ok(start_port, end_port))) {
 		int i;
 
 		for (i = start_port; i <= end_port; i++)
